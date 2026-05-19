@@ -31,10 +31,15 @@ PIPELINE_EOF</pre>
   `</pre>` (or `</pre></div>` for Python files — both forms appear in the
   current HTML and are equivalent).
 
-A regeneration script is **not** committed yet. When one is added, it should
-live in `/scripts` (e.g., `scripts/regenerate_embeds.py`) and read each
-canonical file, escape it, and rewrite the corresponding `<pre>` block in
-`docs/asset-pipeline-guide.html`.
+Regeneration is automated via `tools/regenerate_embeds.py` (or `make
+regenerate`). Drift checking is `tools/verify_embeds.py` (or `make verify`).
+The shared mapping of canonical-file → embedded-path lives in
+`tools/_embed_lib.py` — update it there when you add a new script worth
+embedding.
+
+A pre-commit hook in `.githooks/pre-commit` refuses commits that touch
+`/scripts` or `/skill` without a matching HTML regeneration. Opt in once
+per clone with `make install-hooks` (which sets `core.hooksPath`).
 
 ## Visual register
 

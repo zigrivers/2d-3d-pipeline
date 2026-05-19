@@ -2,9 +2,25 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
-## 2026-05-19
+## 2026-05-19 — tooling
 
-Initial import. Project-aware pipeline complete with three user guides
+Maintenance tooling added on top of the initial import:
+
+- `tools/regenerate_embeds.py` + `tools/verify_embeds.py` — programmatic
+  regeneration and drift checking of the HTML heredoc embeds, sharing
+  `tools/_embed_lib.py`. Round-trip verified bit-identical against the
+  initial-import HTML.
+- `Makefile` — `verify`, `regenerate`, `bundle`, `install-hooks`, `clean`.
+- `.githooks/pre-commit` — refuses commits where `/scripts` or `/skill`
+  changed without a matching HTML regeneration. Opt in via
+  `make install-hooks`.
+- `docs/index.html` — minimal Catppuccin Mocha landing page linking the
+  three audiences' canonical docs.
+- `.editorconfig` — locks indent/EOL/charset conventions across the repo.
+
+## 2026-05-19 — initial import
+
+Project-aware pipeline complete with three user guides
 (setup, workflows, upgrade), AI context doc in HTML+markdown, and canonical
 scripts extracted to `/scripts`:
 

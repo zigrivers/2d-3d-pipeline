@@ -27,17 +27,27 @@ regeneration procedure.
 ## Layout
 
 ```
-docs/      User-facing HTML guides
-context/   AI-facing context docs (HTML + markdown)
-scripts/   Canonical bash wrappers and Python helpers (_pipeline_lib.sh,
-           concept.sh, generate.sh, print.sh, clean_asset.py,
-           prepare_for_print.py, migrate_assets.sh)
-skill/     SKILL.md + scripts/update_manifest.py (deployed to
-           ~/.claude/skills/asset-pipeline/)
-dist/      Generated bundle zips (gitignored)
+docs/         User-facing HTML guides (+ index.html landing page)
+context/      AI-facing context docs (HTML + markdown)
+scripts/      Canonical bash wrappers and Python helpers (_pipeline_lib.sh,
+              concept.sh, generate.sh, print.sh, clean_asset.py,
+              prepare_for_print.py, migrate_assets.sh)
+skill/        SKILL.md + scripts/update_manifest.py (deployed to
+              ~/.claude/skills/asset-pipeline/)
+tools/        Maintenance tooling — embed regenerate + verify
+.githooks/    Optional pre-commit hook (opt in via `make install-hooks`)
+dist/         Generated bundle zips (gitignored)
+Makefile      verify / regenerate / bundle / install-hooks / clean
 ```
 
 ## Working in this repo
 
-See [`CONVENTIONS.md`](CONVENTIONS.md) for naming, style, the
-canonical-vs-embedded rule, and the visual register used across the docs.
+```sh
+make verify         # check HTML embeds match /scripts and /skill
+make regenerate     # rewrite HTML embeds from canonical files
+make bundle         # zip canonical scripts + skill + guide into dist/
+make install-hooks  # opt into pre-commit verify (one-time, per clone)
+```
+
+The canonical-vs-embedded rule, palette, naming, and visual register are all
+documented in [`CONVENTIONS.md`](CONVENTIONS.md).

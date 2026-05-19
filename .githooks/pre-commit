@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Refuse a commit if /scripts or /skill changed but docs/asset-pipeline-guide.html
+# wasn't regenerated to match. Enable with: `make install-hooks` (or
+# `git config core.hooksPath .githooks`).
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+changed_canonical=$(git diff --cached --name-only --diff-filter=ACMR \
+    | grep -E '^(scripts/|skill/)' || true)
+
+if [ -z "$changed_canonical" ]; then
+    exit 0
+fi
+
+if ! python3 tools/verify_embeds.py >/dev/null 2>&1; then
+    echo "pre-commit: HTML embeds in docs/asset-pipeline-guide.html are out of sync."
+    echo "Canonical files in this commit:"
+    echo "$changed_canonical" | sed 's/^/  - /'
+    echo
+    echo "Run 'make regenerate' and stage docs/asset-pipeline-guide.html before committing."
+    exit 1
+fi
