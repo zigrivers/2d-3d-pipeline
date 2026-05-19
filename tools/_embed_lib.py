@@ -28,6 +28,8 @@ EMBEDS: dict[str, str] = {
     "scripts/clean_asset.py":            "~/3d-pipeline/workspace/clean_asset.py",
     "scripts/prepare_for_print.py":      "~/3d-pipeline/workspace/prepare_for_print.py",
     "scripts/migrate_assets.sh":         "~/3d-pipeline/workspace/migrate_assets.sh",
+    "scripts/benchmark.sh":              "~/3d-pipeline/workspace/benchmark.sh",
+    "scripts/model_bakeoff.py":          "~/3d-pipeline/workspace/model_bakeoff.py",
     "skill/SKILL.md":                    "~/.claude/skills/asset-pipeline/SKILL.md",
     "skill/scripts/update_manifest.py":  "~/.claude/skills/asset-pipeline/scripts/update_manifest.py",
 }

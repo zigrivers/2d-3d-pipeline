@@ -3240,6 +3240,490 @@ fi
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/migrate_assets.sh</pre></div>
             </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>benchmark.sh</code>
+                <span class="script-summary-desc">v0.2 model bake-off harness (calls concept.sh / generate.sh with <code>--json</code>)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/benchmark.sh << 'PIPELINE_EOF'
+#!/usr/bin/env bash
+#
+# Model bake-off harness (v0.2).
+#
+# Runs the same prompts through one or more 2D models and one or more 3D
+# generators and writes a structured results file you can review later
+# (or hand to Claude Code for ranking). The actual orchestration lives in
+# scripts/model_bakeoff.py — this wrapper exists so you can run it the
+# same way you run the rest of the pipeline.
+#
+# Output:
+#   &lt;assets_root&gt;/benchmarks/&lt;timestamp&gt;/benchmark_results.json
+#
+# Per-result fields include status / model / license_bucket / paths /
+# duration / hardware_tier / machine, plus a manual scoring scaffold
+# (prompt_match, front_accuracy, …) initialised to null so a later
+# review pass can fill them in.
+
+set -euo pipefail
+
+SCRIPT_DIR=&quot;$(cd &quot;$(dirname &quot;${BASH_SOURCE[0]}&quot;)&quot; &amp;&amp; pwd)&quot;
+# shellcheck source=/dev/null
+source &quot;$SCRIPT_DIR/_pipeline_lib.sh&quot;
+
+PIPELINE_ROOT=&quot;${PIPELINE_ROOT:-$HOME/3d-pipeline}&quot;
+
+EXPLICIT_PROJECT=&quot;&quot;
+SUITE=&quot;default&quot;
+PROMPTS_FILE=&quot;&quot;
+GENERATORS=&quot;sf3d&quot;
+MODELS_2D=&quot;z-image-turbo&quot;
+COUNT=1
+POLYCOUNT=&quot;&quot;
+TEXTURE_RES=&quot;&quot;
+SKIP_2D=0
+SKIP_3D=0
+JSON_MODE=0
+DRY_RUN=0
+
+usage() {
+    cat &lt;&lt;EOF
+Usage: $(basename &quot;$0&quot;) [options]
+
+Run a model bake-off across one or more 2D models and 3D generators.
+
+Project context:
+  --project PATH               Force a project root (skips auto-detection)
+
+Suite selection:
+  --suite NAME                 default | quick | custom (default: default)
+  --prompts-file PATH          One prompt per line; overrides the built-in
+                               suite. Implies --suite custom.
+
+Models:
+  --generators LIST            Comma-separated list (default: sf3d).
+                               Allowed: sf3d, spar3d, trellis
+  --models-2d LIST             Comma-separated list (default: z-image-turbo).
+                               Allowed: z-image-turbo, flux-schnell, flux-dev
+
+Generation knobs (forwarded to wrappers):
+  --count N                    Concept images per prompt (default: 1)
+  --polycount N                Override target polycount for the 3D pass
+  --texture-resolution N       Override SF3D texture resolution
+
+Skip flags:
+  --skip-2d                    Reuse existing concept images instead of
+                               regenerating them
+  --skip-3d                    Concept-only bake-off (2D models only)
+
+Output / behaviour:
+  --json                       Emit the path to the results JSON on stdout
+  --dry-run                    Print the work plan; do not run anything
+  -h, --help                   This help
+
+Examples:
+  # Quick studio sanity check
+  $(basename &quot;$0&quot;) --suite quick
+
+  # Full bake-off across sf3d + spar3d
+  $(basename &quot;$0&quot;) --suite default --generators sf3d,spar3d
+
+  # Concept-only sanity across both 2D models
+  $(basename &quot;$0&quot;) --models-2d z-image-turbo,flux-schnell --skip-3d
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case &quot;$1&quot; in
+        --project)              EXPLICIT_PROJECT=&quot;$2&quot;; shift 2 ;;
+        --suite)                SUITE=&quot;$2&quot;;             shift 2 ;;
+        --prompts-file)         PROMPTS_FILE=&quot;$2&quot;;      shift 2 ;;
+        --generators)           GENERATORS=&quot;$2&quot;;        shift 2 ;;
+        --models-2d)            MODELS_2D=&quot;$2&quot;;         shift 2 ;;
+        --count)                COUNT=&quot;$2&quot;;             shift 2 ;;
+        --polycount)            POLYCOUNT=&quot;$2&quot;;         shift 2 ;;
+        --texture-resolution)   TEXTURE_RES=&quot;$2&quot;;       shift 2 ;;
+        --skip-2d)              SKIP_2D=1;              shift   ;;
+        --skip-3d)              SKIP_3D=1;              shift   ;;
+        --json)                 JSON_MODE=1;            shift   ;;
+        --dry-run)              DRY_RUN=1;              shift   ;;
+        -h|--help)              usage; exit 0 ;;
+        *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
+    esac
+done
+
+case &quot;$SUITE&quot; in default|quick|custom) ;;
+    *) echo &quot;ERROR: --suite must be default, quick, or custom&quot; &gt;&amp;2; exit 1 ;;
+esac
+
+resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
+
+BAKEOFF_PY=&quot;$SCRIPT_DIR/model_bakeoff.py&quot;
+[[ -f &quot;$BAKEOFF_PY&quot; ]] || { echo &quot;ERROR: model_bakeoff.py not found at $BAKEOFF_PY&quot; &gt;&amp;2; exit 1; }
+
+# Build the python invocation. The harness reads the same env (PIPELINE_ROOT,
+# hardware_tier via _pipeline_lib.sh) and calls back into concept.sh /
+# generate.sh under --json for structured results.
+ARGS=(
+    --assets-root &quot;$ASSETS_ROOT&quot;
+    --manifest-path &quot;$MANIFEST_PATH&quot;
+    --project-mode &quot;$PROJECT_MODE&quot;
+    --project-root &quot;$PROJECT_ROOT&quot;
+    --project-engine &quot;$PROJECT_ENGINE&quot;
+    --hardware-tier &quot;$(hardware_tier)&quot;
+    --machine &quot;$(hostname_safe)&quot;
+    --script-dir &quot;$SCRIPT_DIR&quot;
+    --suite &quot;$SUITE&quot;
+    --generators &quot;$GENERATORS&quot;
+    --models-2d &quot;$MODELS_2D&quot;
+    --count &quot;$COUNT&quot;
+)
+[[ -n &quot;$PROMPTS_FILE&quot; ]] &amp;&amp; ARGS+=( --prompts-file &quot;$PROMPTS_FILE&quot; )
+[[ -n &quot;$POLYCOUNT&quot; ]]    &amp;&amp; ARGS+=( --polycount &quot;$POLYCOUNT&quot; )
+[[ -n &quot;$TEXTURE_RES&quot; ]]  &amp;&amp; ARGS+=( --texture-resolution &quot;$TEXTURE_RES&quot; )
+[[ $SKIP_2D -eq 1 ]]     &amp;&amp; ARGS+=( --skip-2d )
+[[ $SKIP_3D -eq 1 ]]     &amp;&amp; ARGS+=( --skip-3d )
+[[ $DRY_RUN -eq 1 ]]     &amp;&amp; ARGS+=( --dry-run )
+[[ $JSON_MODE -eq 1 ]]   &amp;&amp; ARGS+=( --json )
+
+exec python3 &quot;$BAKEOFF_PY&quot; &quot;${ARGS[@]}&quot;
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/benchmark.sh</pre></div>
+            </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>model_bakeoff.py</code>
+                <span class="script-summary-desc">v0.2 Python orchestrator used by <code>benchmark.sh</code></span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/model_bakeoff.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Model bake-off orchestrator (v0.2).
+
+Invoked by benchmark.sh; not intended to be called directly. Reads a list
+of prompts, calls concept.sh / generate.sh under `--json` to produce
+structured per-run results, and writes a combined JSON to
+`&lt;assets_root&gt;/benchmarks/&lt;timestamp&gt;/benchmark_results.json`.
+
+The harness deliberately does NOT try to auto-score outputs (subjective
+fields like prompt_match are scaffolded as `null` for a manual review
+pass later). It DOES record everything needed to make ranking possible:
+runtime, paths, file sizes, license bucket, hardware tier, machine,
+exit status, and the wrapper&#x27;s own JSON.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+DEFAULT_SUITE = [
+    &quot;wooden treasure chest&quot;,
+    &quot;fantasy sword&quot;,
+    &quot;shield with emblem&quot;,
+    &quot;potion bottle&quot;,
+    &quot;barrel crate prop&quot;,
+    &quot;stylized creature bust&quot;,
+    &quot;small creature&quot;,
+    &quot;character bust&quot;,
+    &quot;modular stone wall segment&quot;,
+    &quot;statue or terrain decoration&quot;,
+    &quot;product prototype stand&quot;,
+    &quot;printable figurine&quot;,
+    &quot;text logo plaque&quot;,
+    &quot;simple game environment object&quot;,
+]
+
+QUICK_SUITE = [
+    &quot;wooden treasure chest&quot;,
+    &quot;fantasy sword&quot;,
+    &quot;printable figurine&quot;,
+]
+
+LICENSE_BUCKET = {
+    &quot;z-image-turbo&quot;: &quot;commercial_safe&quot;,
+    &quot;flux-schnell&quot;: &quot;commercial_safe&quot;,
+    &quot;flux-dev&quot;: &quot;non_commercial&quot;,
+    &quot;qwen-image&quot;: &quot;commercial_safe&quot;,
+    &quot;sf3d&quot;: &quot;commercial_threshold&quot;,
+    &quot;spar3d&quot;: &quot;commercial_threshold&quot;,
+    &quot;trellis&quot;: &quot;non_commercial&quot;,
+}
+
+EVAL_SCAFFOLD = {
+    &quot;prompt_match&quot;: None,
+    &quot;front_accuracy&quot;: None,
+    &quot;backside_plausibility&quot;: None,
+    &quot;topology&quot;: None,
+    &quot;uv_quality&quot;: None,
+    &quot;texture_quality&quot;: None,
+    &quot;pbr_maps_present&quot;: None,
+    &quot;unity_import&quot;: &quot;not_tested&quot;,
+    &quot;unreal_import&quot;: &quot;not_tested&quot;,
+    &quot;print_prep&quot;: &quot;not_tested&quot;,
+    &quot;slicer_check&quot;: &quot;not_tested&quot;,
+    &quot;failure_type&quot;: &quot;&quot;,
+    &quot;review_notes&quot;: &quot;&quot;,
+}
+
+
+def _file_size(path: str) -&gt; int | None:
+    if not path:
+        return None
+    p = Path(os.path.expanduser(path))
+    return p.stat().st_size if p.exists() else None
+
+
+def _slug(text: str) -&gt; str:
+    out = []
+    last_underscore = True
+    for ch in text.lower():
+        if ch.isalnum():
+            out.append(ch)
+            last_underscore = False
+        elif not last_underscore:
+            out.append(&quot;_&quot;)
+            last_underscore = True
+    s = &quot;&quot;.join(out).strip(&quot;_&quot;)
+    return s[:50] or &quot;prompt&quot;
+
+
+def _load_prompts(args) -&gt; list[str]:
+    if args.prompts_file:
+        text = Path(os.path.expanduser(args.prompts_file)).read_text()
+        return [line.strip() for line in text.splitlines()
+                if line.strip() and not line.startswith(&quot;#&quot;)]
+    if args.suite == &quot;default&quot;:
+        return list(DEFAULT_SUITE)
+    if args.suite == &quot;quick&quot;:
+        return list(QUICK_SUITE)
+    # `custom` without --prompts-file is an error caught upstream.
+    return []
+
+
+def _run_wrapper(cmd: list[str], dry_run: bool) -&gt; tuple[int, dict[str, Any] | None, str]:
+    &quot;&quot;&quot;Run a wrapper under --json. Returns (exit_code, parsed_json_or_None, stderr_tail).&quot;&quot;&quot;
+    if dry_run:
+        return 0, {&quot;status&quot;: &quot;dry_run&quot;, &quot;cmd&quot;: cmd}, &quot;&quot;
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    parsed: dict[str, Any] | None = None
+    # Last non-empty line of stdout should be the JSON object.
+    for line in reversed(proc.stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            parsed = None
+        break
+    stderr_tail = &quot;\n&quot;.join(proc.stderr.splitlines()[-20:])
+    return proc.returncode, parsed, stderr_tail
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser()
+    p.add_argument(&quot;--assets-root&quot;, required=True)
+    p.add_argument(&quot;--manifest-path&quot;, required=True)
+    p.add_argument(&quot;--project-mode&quot;, required=True)
+    p.add_argument(&quot;--project-root&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--project-engine&quot;, default=&quot;none&quot;)
+    p.add_argument(&quot;--hardware-tier&quot;, required=True)
+    p.add_argument(&quot;--machine&quot;, required=True)
+    p.add_argument(&quot;--script-dir&quot;, required=True,
+                   help=&quot;Directory containing concept.sh / generate.sh&quot;)
+    p.add_argument(&quot;--suite&quot;, default=&quot;default&quot;,
+                   choices=[&quot;default&quot;, &quot;quick&quot;, &quot;custom&quot;])
+    p.add_argument(&quot;--prompts-file&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--generators&quot;, default=&quot;sf3d&quot;)
+    p.add_argument(&quot;--models-2d&quot;, default=&quot;z-image-turbo&quot;)
+    p.add_argument(&quot;--count&quot;, type=int, default=1)
+    p.add_argument(&quot;--polycount&quot;, type=int, default=0)
+    p.add_argument(&quot;--texture-resolution&quot;, type=int, default=0)
+    p.add_argument(&quot;--skip-2d&quot;, action=&quot;store_true&quot;)
+    p.add_argument(&quot;--skip-3d&quot;, action=&quot;store_true&quot;)
+    p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    if args.suite == &quot;custom&quot; and not args.prompts_file:
+        print(&quot;ERROR: --suite custom requires --prompts-file&quot;, file=sys.stderr)
+        return 2
+
+    prompts = _load_prompts(args)
+    if not prompts:
+        print(&quot;ERROR: no prompts to run&quot;, file=sys.stderr)
+        return 2
+
+    models_2d = [m.strip() for m in args.models_2d.split(&quot;,&quot;) if m.strip()]
+    generators = [g.strip() for g in args.generators.split(&quot;,&quot;) if g.strip()]
+
+    for m in models_2d:
+        if m not in LICENSE_BUCKET:
+            print(f&quot;ERROR: unknown 2D model: {m}&quot;, file=sys.stderr)
+            return 2
+    for g in generators:
+        if g not in {&quot;sf3d&quot;, &quot;spar3d&quot;, &quot;trellis&quot;}:
+            print(f&quot;ERROR: unknown 3D generator: {g}&quot;, file=sys.stderr)
+            return 2
+
+    stamp = datetime.now().strftime(&quot;%Y%m%d-%H%M%S&quot;)
+    out_dir = Path(args.assets_root) / &quot;benchmarks&quot; / stamp
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results_path = out_dir / &quot;benchmark_results.json&quot;
+
+    concept_sh = Path(args.script_dir) / &quot;concept.sh&quot;
+    generate_sh = Path(args.script_dir) / &quot;generate.sh&quot;
+
+    overall = {
+        &quot;schema_version&quot;: 1,
+        &quot;suite&quot;: args.suite,
+        &quot;started&quot;: datetime.now().isoformat(timespec=&quot;seconds&quot;),
+        &quot;hardware_tier&quot;: args.hardware_tier,
+        &quot;machine&quot;: args.machine,
+        &quot;project_mode&quot;: args.project_mode,
+        &quot;project_root&quot;: args.project_root,
+        &quot;project_engine&quot;: args.project_engine,
+        &quot;models_2d&quot;: models_2d,
+        &quot;generators&quot;: generators,
+        &quot;polycount&quot;: args.polycount,
+        &quot;texture_resolution&quot;: args.texture_resolution,
+        &quot;skip_2d&quot;: args.skip_2d,
+        &quot;skip_3d&quot;: args.skip_3d,
+        &quot;dry_run&quot;: args.dry_run,
+        &quot;prompts&quot;: prompts,
+        &quot;runs&quot;: [],
+    }
+
+    def add_run(record: dict[str, Any]):
+        record.setdefault(&quot;eval&quot;, dict(EVAL_SCAFFOLD))
+        overall[&quot;runs&quot;].append(record)
+
+    # ---- 2D pass ----
+    concept_paths: dict[tuple[str, str], list[str]] = {}
+    if not args.skip_2d:
+        for prompt in prompts:
+            for model_2d in models_2d:
+                cmd = [str(concept_sh), prompt,
+                       &quot;-m&quot;, model_2d,
+                       &quot;-n&quot;, str(args.count),
+                       &quot;-o&quot;, f&quot;bench_{stamp}_{_slug(prompt)}_{model_2d}&quot;,
+                       &quot;--json&quot;]
+                if args.project_root:
+                    cmd.extend([&quot;--project&quot;, args.project_root])
+                t0 = time.time()
+                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                dt = time.time() - t0
+                outputs = (j or {}).get(&quot;outputs&quot;, []) if j else []
+                concept_paths[(prompt, model_2d)] = outputs
+                add_run({
+                    &quot;stage&quot;: &quot;text_to_image&quot;,
+                    &quot;prompt&quot;: prompt,
+                    &quot;model&quot;: model_2d,
+                    &quot;license_bucket&quot;: LICENSE_BUCKET.get(model_2d, &quot;unknown&quot;),
+                    &quot;exit_code&quot;: rc,
+                    &quot;duration_seconds&quot;: round(dt, 2),
+                    &quot;outputs&quot;: outputs,
+                    &quot;output_sizes_bytes&quot;: [_file_size(o) for o in outputs],
+                    &quot;status&quot;: &quot;ok&quot; if rc == 0 else &quot;error&quot;,
+                    &quot;stderr_tail&quot;: stderr_tail if rc != 0 else &quot;&quot;,
+                    &quot;wrapper_json&quot;: j,
+                })
+
+    # ---- 3D pass ----
+    if not args.skip_3d:
+        for prompt in prompts:
+            input_path = &quot;&quot;
+            input_model = &quot;&quot;
+            for model_2d in models_2d:
+                paths = concept_paths.get((prompt, model_2d), [])
+                if paths:
+                    input_path = paths[0]
+                    input_model = model_2d
+                    break
+            if not input_path:
+                add_run({
+                    &quot;stage&quot;: &quot;image_to_3d&quot;,
+                    &quot;prompt&quot;: prompt,
+                    &quot;status&quot;: &quot;skipped&quot;,
+                    &quot;reason&quot;: &quot;no concept image (skip-2d set and no cached input given)&quot;,
+                })
+                continue
+
+            for gen in generators:
+                cmd = [str(generate_sh),
+                       &quot;-i&quot;, input_path,
+                       &quot;-g&quot;, gen,
+                       &quot;-o&quot;, f&quot;bench_{stamp}_{_slug(prompt)}_{gen}&quot;,
+                       &quot;--json&quot;]
+                if args.project_root:
+                    cmd.extend([&quot;--project&quot;, args.project_root])
+                if args.polycount:
+                    cmd.extend([&quot;-p&quot;, str(args.polycount)])
+                if args.texture_resolution:
+                    cmd.extend([&quot;-t&quot;, str(args.texture_resolution)])
+                t0 = time.time()
+                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                dt = time.time() - t0
+                clean_path = (j or {}).get(&quot;clean_path&quot;, &quot;&quot;)
+                raw_path = (j or {}).get(&quot;raw_path&quot;, &quot;&quot;)
+                add_run({
+                    &quot;stage&quot;: &quot;image_to_3d&quot;,
+                    &quot;prompt&quot;: prompt,
+                    &quot;input_concept&quot;: input_path,
+                    &quot;input_concept_model&quot;: input_model,
+                    &quot;generator&quot;: gen,
+                    &quot;license_bucket&quot;: LICENSE_BUCKET.get(gen, &quot;unknown&quot;),
+                    &quot;exit_code&quot;: rc,
+                    &quot;duration_seconds&quot;: round(dt, 2),
+                    &quot;raw_path&quot;: raw_path,
+                    &quot;clean_path&quot;: clean_path,
+                    &quot;raw_size_bytes&quot;: _file_size(raw_path),
+                    &quot;clean_size_bytes&quot;: _file_size(clean_path),
+                    &quot;status&quot;: &quot;ok&quot; if rc == 0 else &quot;error&quot;,
+                    &quot;stderr_tail&quot;: stderr_tail if rc != 0 else &quot;&quot;,
+                    &quot;wrapper_json&quot;: j,
+                })
+
+    overall[&quot;finished&quot;] = datetime.now().isoformat(timespec=&quot;seconds&quot;)
+    overall[&quot;run_count&quot;] = len(overall[&quot;runs&quot;])
+    overall[&quot;summary&quot;] = {
+        &quot;ok&quot;: sum(1 for r in overall[&quot;runs&quot;] if r.get(&quot;status&quot;) == &quot;ok&quot;),
+        &quot;errors&quot;: sum(1 for r in overall[&quot;runs&quot;] if r.get(&quot;status&quot;) == &quot;error&quot;),
+        &quot;skipped&quot;: sum(1 for r in overall[&quot;runs&quot;] if r.get(&quot;status&quot;) == &quot;skipped&quot;),
+        &quot;total&quot;: len(overall[&quot;runs&quot;]),
+    }
+
+    with open(results_path, &quot;w&quot;) as f:
+        json.dump(overall, f, indent=2, sort_keys=True)
+        f.write(&quot;\n&quot;)
+
+    if args.json:
+        print(json.dumps({
+            &quot;status&quot;: &quot;ok&quot;,
+            &quot;stage&quot;: &quot;benchmark&quot;,
+            &quot;results_path&quot;: str(results_path),
+            &quot;run_count&quot;: overall[&quot;run_count&quot;],
+            &quot;summary&quot;: overall[&quot;summary&quot;],
+            &quot;hardware_tier&quot;: args.hardware_tier,
+            &quot;machine&quot;: args.machine,
+        }))
+    else:
+        print(f&quot;[benchmark] wrote {overall[&#x27;run_count&#x27;]} runs to {results_path}&quot;)
+        print(f&quot;[benchmark] summary: {overall[&#x27;summary&#x27;]}&quot;)
+
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/model_bakeoff.py</pre></div>
+            </details>
 
 
           <div class="callout callout-tip">
