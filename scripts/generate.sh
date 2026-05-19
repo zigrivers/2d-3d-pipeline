@@ -36,6 +36,7 @@ REMESH="quad"
 UP_AXIS="y"
 SKIP_CLEAN=0
 SKIP_ENGINE_STAGE=0
+OVERWRITE_ENGINE=0
 JSON_MODE=0
 
 usage() {
@@ -58,6 +59,9 @@ Generation options:
   -r, --remesh OPT         none | triangle | quad (default: quad)
   -u, --up AXIS            y (default) | z
       --no-clean           Skip Blender cleanup; raw mesh only
+      --overwrite-engine   Allow overwriting an existing engine-staged file
+                           (only relevant when auto_increment_collisions
+                           is false in .asset-pipeline.json).
       --json               Emit a final JSON result line on stdout.
                            Human-readable logs are routed to stderr so
                            stdout contains only the JSON object.
@@ -89,6 +93,7 @@ while [[ $# -gt 0 ]]; do
         -u|--up)             UP_AXIS="$2";      shift 2 ;;
         --no-clean)          SKIP_CLEAN=1;      shift ;;
         --no-engine-stage)   SKIP_ENGINE_STAGE=1; shift ;;
+        --overwrite-engine)  OVERWRITE_ENGINE=1; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -241,13 +246,42 @@ info "Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)..."
 [[ -f "$CLEAN_PATH" ]] || { err "Cleanup did not produce $CLEAN_PATH"; exit 1; }
 
 # --- Engine staging: copy clean GLB into project's engine folder if applicable ---
+#
+# Collision handling (Phase 5):
+#   AUTO_INCREMENT=1 (default)            -> find next free <name>_N.glb
+#   AUTO_INCREMENT=0 + --overwrite-engine -> warn, then overwrite
+#   AUTO_INCREMENT=0 + no overwrite flag  -> warn, skip the stage so the
+#                                            existing engine file is preserved
 ENGINE_STAGED_PATH=""
 if [[ "$PROJECT_MODE" == "project" && $SKIP_ENGINE_STAGE -eq 0 ]]; then
     if [[ "$PROJECT_ENGINE" == "unity" || "$PROJECT_ENGINE" == "unreal" || -n "${ENGINE_PATH:-}" ]]; then
         mkdir -p "$ENGINE_PATH"
-        ENGINE_STAGED_PATH="$ENGINE_PATH/${OUTPUT_NAME}.glb"
-        cp "$CLEAN_PATH" "$ENGINE_STAGED_PATH"
-        info "Staged for engine: $ENGINE_STAGED_PATH"
+        CANDIDATE="$ENGINE_PATH/${OUTPUT_NAME}.glb"
+
+        if [[ ! -e "$CANDIDATE" ]]; then
+            ENGINE_STAGED_PATH="$CANDIDATE"
+        elif [[ "$AUTO_INCREMENT" == "1" ]]; then
+            # Find the next unused suffix.
+            n=2
+            while [[ -e "$ENGINE_PATH/${OUTPUT_NAME}_${n}.glb" ]]; do
+                n=$((n + 1))
+            done
+            ENGINE_STAGED_PATH="$ENGINE_PATH/${OUTPUT_NAME}_${n}.glb"
+            info "Engine collision avoided: writing $(basename "$ENGINE_STAGED_PATH") instead of ${OUTPUT_NAME}.glb"
+        elif [[ $OVERWRITE_ENGINE -eq 1 ]]; then
+            ENGINE_STAGED_PATH="$CANDIDATE"
+            info "Overwriting existing engine asset (--overwrite-engine): $ENGINE_STAGED_PATH"
+        else
+            info "Engine file already exists at $CANDIDATE; skipping stage."
+            info "  Pass --overwrite-engine to replace it, or enable"
+            info "  naming.auto_increment_collisions in .asset-pipeline.json."
+            ENGINE_STAGED_PATH=""
+        fi
+
+        if [[ -n "$ENGINE_STAGED_PATH" ]]; then
+            cp "$CLEAN_PATH" "$ENGINE_STAGED_PATH"
+            info "Staged for engine: $ENGINE_STAGED_PATH"
+        fi
     fi
 fi
 
