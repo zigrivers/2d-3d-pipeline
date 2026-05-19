@@ -14,6 +14,13 @@ Small clean-ups landed after the v0.2.0 tag:
   documented as a design choice ("Why STL, not 3MF or OBJ" already lives
   in the AI context). The JSON `format` field stays at "stl" as a stable
   schema constant.
+- `hunyuan3d-paint` recorded in the licence-bucket map as
+  `unclear_risky`. `texture.sh --mode paint` accepted as a deliberately
+  gated placeholder: stdout emits structured
+  `status=error error=needs_license_review tool=hunyuan3d-paint
+   license_bucket=unclear_risky` and exits 2; stderr explains the
+  Tencent Hunyuan Community License caveats. The wrapper will not run
+  Hunyuan3D-Paint until the gate is removed in `scripts/texture.sh`.
 - Queue worker gains an optional stuck-job reclaim:
   `queue_worker.py --reclaim-stuck-after MINUTES --max-claims N`.
   When enabled (off by default), each poll cycle scans `running/` for

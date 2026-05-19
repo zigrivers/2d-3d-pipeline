@@ -370,6 +370,24 @@ Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine's `Textures/`
 folder when applicable.
 
+### Paint (placeholder for Hunyuan3D-Paint — licence-gated, do NOT enable)
+
+`texture.sh --mode paint` is a deliberately broken placeholder. It fails
+with `status=error error=needs_license_review` and exits 2. The reason:
+Hunyuan3D-Paint is licensed under the Tencent Hunyuan Community License,
+which has revenue thresholds and region exclusions that haven't been
+reviewed against Ken's commercial usage. Until that review happens,
+the mode refuses to run rather than silently producing assets with
+unclear commercial usability.
+
+The licence bucket for `hunyuan3d-paint` is `unclear_risky` in
+`_pipeline_lib.sh::license_bucket_for_model` so anything that *does*
+get tagged with it shows up in manifests and benchmarks as unreviewed.
+
+If the user asks about Hunyuan3D-Paint, do not try to enable it. Explain
+the gate, point at the structured error message, and offer to help with
+the licence review (which is human work, not pipeline work).
+
 ## Flow 7: Model bake-off / benchmark
 
 ```bash

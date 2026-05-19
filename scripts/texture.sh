@@ -41,7 +41,11 @@ Project context:
   --project PATH           Force a project root (skips auto-detection).
 
 Mode:
-      --mode MODE          inspect (default) | upscale
+      --mode MODE          inspect (default) | upscale | paint
+                           paint is a placeholder for Hunyuan3D-Paint and
+                           currently fails with needs_license_review; do
+                           NOT enable this until the licence has been
+                           reviewed.
       --scale N            2 or 4 (default: 4) — used in upscale mode.
 
 I/O:
@@ -83,8 +87,8 @@ done
 
 [[ -z "$INPUT" ]] && { echo "ERROR: -i/--input is required" >&2; usage; exit 1; }
 [[ -e "$INPUT" ]] || { echo "ERROR: input does not exist: $INPUT" >&2; exit 1; }
-case "$MODE"  in inspect|upscale) ;;
-    *) echo "ERROR: --mode must be inspect or upscale (got: $MODE)" >&2; exit 1 ;;
+case "$MODE"  in inspect|upscale|paint) ;;
+    *) echo "ERROR: --mode must be inspect, upscale, or paint (got: $MODE)" >&2; exit 1 ;;
 esac
 case "$SCALE" in 2|4) ;;
     *) echo "ERROR: --scale must be 2 or 4 (got: $SCALE)" >&2; exit 1 ;;
@@ -154,6 +158,39 @@ if [[ "$MODE" == "inspect" ]]; then
         echo "$INSPECT_JSON" | python3 -m json.tool
     fi
     exit 0
+fi
+
+# ---------- paint mode (Hunyuan3D-Paint placeholder) ----------
+# Hunyuan3D-Paint generates PBR maps for an input mesh. It's the most
+# promising candidate for filling out the texture pipeline beyond
+# simple upscale, but the Tencent Hunyuan Community License has
+# revenue thresholds and region exclusions that haven't been reviewed
+# against Ken's commercial use (Grithkin, GripCraft, GitHub releases).
+# Until that review happens, this mode refuses to run rather than
+# silently producing assets with unclear commercial usability.
+if [[ "$MODE" == "paint" ]]; then
+    err "Hunyuan3D-Paint mode is gated pending licence review."
+    err "  Licence:   Tencent Hunyuan Community License"
+    err "             (revenue thresholds + region exclusions apply)"
+    err "  Action:    Review the licence against your commercial usage"
+    err "             (Grithkin / GripCraft / 3D-print products / GitHub releases)"
+    err "             before enabling this mode. The wrapper will not run"
+    err "             until the gate is removed in scripts/texture.sh."
+    if [[ "$JSON_MODE" == "1" ]]; then
+        json_mode_end
+        python3 "$SCRIPT_DIR/json_emit.py" \
+            status=error \
+            stage=texture_paint \
+            error=needs_license_review \
+            tool=hunyuan3d-paint \
+            license_bucket=unclear_risky \
+            input="$INPUT_ABS" \
+            assets_root="$ASSETS_ROOT" \
+            machine="$MACHINE" \
+            hardware_tier="$HW_TIER" \
+            created="$CREATED_AT"
+    fi
+    exit 2
 fi
 
 # ---------- upscale mode ----------

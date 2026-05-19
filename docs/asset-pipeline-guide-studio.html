@@ -1689,6 +1689,11 @@ license_bucket_for_model() {
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
+        # Hunyuan3D-Paint: licensed under the Tencent Hunyuan Community
+        # License, which has revenue thresholds and region exclusions
+        # that the user hasn&#x27;t reviewed yet. Reported as unclear_risky
+        # so it never accidentally becomes a default before that review.
+        hunyuan3d-paint)                        echo unclear_risky ;;
         &quot;&quot;)                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
@@ -3862,7 +3867,11 @@ Project context:
   --project PATH           Force a project root (skips auto-detection).
 
 Mode:
-      --mode MODE          inspect (default) | upscale
+      --mode MODE          inspect (default) | upscale | paint
+                           paint is a placeholder for Hunyuan3D-Paint and
+                           currently fails with needs_license_review; do
+                           NOT enable this until the licence has been
+                           reviewed.
       --scale N            2 or 4 (default: 4) — used in upscale mode.
 
 I/O:
@@ -3904,8 +3913,8 @@ done
 
 [[ -z &quot;$INPUT&quot; ]] &amp;&amp; { echo &quot;ERROR: -i/--input is required&quot; &gt;&amp;2; usage; exit 1; }
 [[ -e &quot;$INPUT&quot; ]] || { echo &quot;ERROR: input does not exist: $INPUT&quot; &gt;&amp;2; exit 1; }
-case &quot;$MODE&quot;  in inspect|upscale) ;;
-    *) echo &quot;ERROR: --mode must be inspect or upscale (got: $MODE)&quot; &gt;&amp;2; exit 1 ;;
+case &quot;$MODE&quot;  in inspect|upscale|paint) ;;
+    *) echo &quot;ERROR: --mode must be inspect, upscale, or paint (got: $MODE)&quot; &gt;&amp;2; exit 1 ;;
 esac
 case &quot;$SCALE&quot; in 2|4) ;;
     *) echo &quot;ERROR: --scale must be 2 or 4 (got: $SCALE)&quot; &gt;&amp;2; exit 1 ;;
@@ -3975,6 +3984,39 @@ if [[ &quot;$MODE&quot; == &quot;inspect&quot; ]]; then
         echo &quot;$INSPECT_JSON&quot; | python3 -m json.tool
     fi
     exit 0
+fi
+
+# ---------- paint mode (Hunyuan3D-Paint placeholder) ----------
+# Hunyuan3D-Paint generates PBR maps for an input mesh. It&#x27;s the most
+# promising candidate for filling out the texture pipeline beyond
+# simple upscale, but the Tencent Hunyuan Community License has
+# revenue thresholds and region exclusions that haven&#x27;t been reviewed
+# against Ken&#x27;s commercial use (Grithkin, GripCraft, GitHub releases).
+# Until that review happens, this mode refuses to run rather than
+# silently producing assets with unclear commercial usability.
+if [[ &quot;$MODE&quot; == &quot;paint&quot; ]]; then
+    err &quot;Hunyuan3D-Paint mode is gated pending licence review.&quot;
+    err &quot;  Licence:   Tencent Hunyuan Community License&quot;
+    err &quot;             (revenue thresholds + region exclusions apply)&quot;
+    err &quot;  Action:    Review the licence against your commercial usage&quot;
+    err &quot;             (Grithkin / GripCraft / 3D-print products / GitHub releases)&quot;
+    err &quot;             before enabling this mode. The wrapper will not run&quot;
+    err &quot;             until the gate is removed in scripts/texture.sh.&quot;
+    if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+        json_mode_end
+        python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+            status=error \
+            stage=texture_paint \
+            error=needs_license_review \
+            tool=hunyuan3d-paint \
+            license_bucket=unclear_risky \
+            input=&quot;$INPUT_ABS&quot; \
+            assets_root=&quot;$ASSETS_ROOT&quot; \
+            machine=&quot;$MACHINE&quot; \
+            hardware_tier=&quot;$HW_TIER&quot; \
+            created=&quot;$CREATED_AT&quot;
+    fi
+    exit 2
 fi
 
 # ---------- upscale mode ----------
@@ -5265,6 +5307,24 @@ only supported upscaler today.
 Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine&#x27;s `Textures/`
 folder when applicable.
+
+### Paint (placeholder for Hunyuan3D-Paint — licence-gated, do NOT enable)
+
+`texture.sh --mode paint` is a deliberately broken placeholder. It fails
+with `status=error error=needs_license_review` and exits 2. The reason:
+Hunyuan3D-Paint is licensed under the Tencent Hunyuan Community License,
+which has revenue thresholds and region exclusions that haven&#x27;t been
+reviewed against Ken&#x27;s commercial usage. Until that review happens,
+the mode refuses to run rather than silently producing assets with
+unclear commercial usability.
+
+The licence bucket for `hunyuan3d-paint` is `unclear_risky` in
+`_pipeline_lib.sh::license_bucket_for_model` so anything that *does*
+get tagged with it shows up in manifests and benchmarks as unreviewed.
+
+If the user asks about Hunyuan3D-Paint, do not try to enable it. Explain
+the gate, point at the structured error message, and offer to help with
+the licence review (which is human work, not pipeline work).
 
 ## Flow 7: Model bake-off / benchmark
 
