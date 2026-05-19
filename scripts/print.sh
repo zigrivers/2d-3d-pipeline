@@ -149,8 +149,54 @@ info "Input:    $INPUT"
 info "Output:   $OUTPUT_PATH"
 info "Size:     ${TARGET_SIZE_MM} mm"
 
+ALLOW_OVERSIZE_FLAG="false"
+[[ $ALLOW_OVERSIZE -eq 1 ]] && ALLOW_OVERSIZE_FLAG="true"
+
+# prepare_for_print.py exit codes:
+#   0  success (may or may not fit; if fits=false then --allow-oversize was set)
+#   3  oversize and --allow-oversize NOT set (no STL produced)
+#   non-zero otherwise: real failure (Blender crash, mesh issue)
+set +e
 "$BLENDER" --background --python "$PREPARE_SCRIPT" -- \
-    "$INPUT" "$OUTPUT_PATH" "$TARGET_SIZE_MM" "$ORIENTATION"
+    "$INPUT" "$OUTPUT_PATH" "$TARGET_SIZE_MM" "$ORIENTATION" "$ALLOW_OVERSIZE_FLAG"
+BLENDER_EXIT=$?
+set -e
+
+if [[ $BLENDER_EXIT -eq 3 ]]; then
+    echo "ERROR: STL would exceed Snapmaker U1 build volume on at least one axis." >&2
+    echo "       Re-run with --allow-oversize to write it anyway, or lower --size." >&2
+    META="${OUTPUT_PATH}.print_meta.json"
+    if [[ "$JSON_MODE" == "1" && -f "$META" ]]; then
+        # Emit a structured error so consumers can react.
+        json_mode_end
+        DIMS_JSON=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m["final_dimensions_mm"]))' "$META")
+        OVER_JSON=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m["oversized_axes"]))' "$META")
+        python3 "$SCRIPT_DIR/json_emit.py" \
+            status=error \
+            stage=glb_to_print \
+            error=oversize \
+            input="$INPUT" \
+            stl_path="" \
+            format="$FORMAT" \
+            --float target_size_mm="$TARGET_SIZE_MM" \
+            --object final_dimensions_mm="$DIMS_JSON" \
+            --bool fits_snapmaker_u1=false \
+            --array oversized_axes="$OVER_JSON" \
+            color_ref_path="" \
+            assets_root="$ASSETS_ROOT" \
+            manifest_path="$MANIFEST_PATH" \
+            project_mode="$PROJECT_MODE" \
+            machine="$MACHINE" \
+            hardware_tier="$HW_TIER" \
+            created="$CREATED_AT"
+    fi
+    exit 3
+fi
+
+if [[ $BLENDER_EXIT -ne 0 ]]; then
+    echo "ERROR: Blender exited $BLENDER_EXIT" >&2
+    exit $BLENDER_EXIT
+fi
 
 [[ -f "$OUTPUT_PATH" ]] || { echo "ERROR: Blender did not produce $OUTPUT_PATH" >&2; exit 1; }
 
@@ -187,9 +233,18 @@ if [[ $COPY_COLOR_REF -eq 1 ]]; then
 fi
 
 if [[ "$JSON_MODE" == "1" ]]; then
-    # Phase 4 will replace these placeholders with values read from a sidecar
-    # file produced by prepare_for_print.py. For now, emit honest defaults
-    # so the schema is stable and consumers can already key off the fields.
+    # Read the sidecar JSON that prepare_for_print.py just wrote.
+    META="${OUTPUT_PATH}.print_meta.json"
+    if [[ -f "$META" ]]; then
+        DIMS_JSON=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m.get("final_dimensions_mm", {})))' "$META")
+        FITS=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print("true" if m.get("fits_snapmaker_u1") else "false")' "$META")
+        OVER_JSON=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m.get("oversized_axes", [])))' "$META")
+    else
+        # Should not happen — but fall back to honest defaults.
+        DIMS_JSON='{"x":0.0,"y":0.0,"z":0.0}'
+        FITS=true
+        OVER_JSON='[]'
+    fi
     json_mode_end
     python3 "$SCRIPT_DIR/json_emit.py" \
         status=ok \
@@ -198,9 +253,9 @@ if [[ "$JSON_MODE" == "1" ]]; then
         stl_path="$OUTPUT_PATH" \
         format="$FORMAT" \
         --float target_size_mm="$TARGET_SIZE_MM" \
-        --object final_dimensions_mm='{"x":0.0,"y":0.0,"z":0.0}' \
-        --bool fits_snapmaker_u1=true \
-        --array oversized_axes='[]' \
+        --object final_dimensions_mm="$DIMS_JSON" \
+        --bool fits_snapmaker_u1="$FITS" \
+        --array oversized_axes="$OVER_JSON" \
         color_ref_path="$COLOR_REF_PATH" \
         assets_root="$ASSETS_ROOT" \
         manifest_path="$MANIFEST_PATH" \

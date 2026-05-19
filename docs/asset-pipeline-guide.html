@@ -2596,8 +2596,54 @@ info &quot;Input:    $INPUT&quot;
 info &quot;Output:   $OUTPUT_PATH&quot;
 info &quot;Size:     ${TARGET_SIZE_MM} mm&quot;
 
+ALLOW_OVERSIZE_FLAG=&quot;false&quot;
+[[ $ALLOW_OVERSIZE -eq 1 ]] &amp;&amp; ALLOW_OVERSIZE_FLAG=&quot;true&quot;
+
+# prepare_for_print.py exit codes:
+#   0  success (may or may not fit; if fits=false then --allow-oversize was set)
+#   3  oversize and --allow-oversize NOT set (no STL produced)
+#   non-zero otherwise: real failure (Blender crash, mesh issue)
+set +e
 &quot;$BLENDER&quot; --background --python &quot;$PREPARE_SCRIPT&quot; -- \
-    &quot;$INPUT&quot; &quot;$OUTPUT_PATH&quot; &quot;$TARGET_SIZE_MM&quot; &quot;$ORIENTATION&quot;
+    &quot;$INPUT&quot; &quot;$OUTPUT_PATH&quot; &quot;$TARGET_SIZE_MM&quot; &quot;$ORIENTATION&quot; &quot;$ALLOW_OVERSIZE_FLAG&quot;
+BLENDER_EXIT=$?
+set -e
+
+if [[ $BLENDER_EXIT -eq 3 ]]; then
+    echo &quot;ERROR: STL would exceed Snapmaker U1 build volume on at least one axis.&quot; &gt;&amp;2
+    echo &quot;       Re-run with --allow-oversize to write it anyway, or lower --size.&quot; &gt;&amp;2
+    META=&quot;${OUTPUT_PATH}.print_meta.json&quot;
+    if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; &amp;&amp; -f &quot;$META&quot; ]]; then
+        # Emit a structured error so consumers can react.
+        json_mode_end
+        DIMS_JSON=$(python3 -c &#x27;import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m[&quot;final_dimensions_mm&quot;]))&#x27; &quot;$META&quot;)
+        OVER_JSON=$(python3 -c &#x27;import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m[&quot;oversized_axes&quot;]))&#x27; &quot;$META&quot;)
+        python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+            status=error \
+            stage=glb_to_print \
+            error=oversize \
+            input=&quot;$INPUT&quot; \
+            stl_path=&quot;&quot; \
+            format=&quot;$FORMAT&quot; \
+            --float target_size_mm=&quot;$TARGET_SIZE_MM&quot; \
+            --object final_dimensions_mm=&quot;$DIMS_JSON&quot; \
+            --bool fits_snapmaker_u1=false \
+            --array oversized_axes=&quot;$OVER_JSON&quot; \
+            color_ref_path=&quot;&quot; \
+            assets_root=&quot;$ASSETS_ROOT&quot; \
+            manifest_path=&quot;$MANIFEST_PATH&quot; \
+            project_mode=&quot;$PROJECT_MODE&quot; \
+            machine=&quot;$MACHINE&quot; \
+            hardware_tier=&quot;$HW_TIER&quot; \
+            created=&quot;$CREATED_AT&quot;
+    fi
+    exit 3
+fi
+
+if [[ $BLENDER_EXIT -ne 0 ]]; then
+    echo &quot;ERROR: Blender exited $BLENDER_EXIT&quot; &gt;&amp;2
+    exit $BLENDER_EXIT
+fi
 
 [[ -f &quot;$OUTPUT_PATH&quot; ]] || { echo &quot;ERROR: Blender did not produce $OUTPUT_PATH&quot; &gt;&amp;2; exit 1; }
 
@@ -2634,9 +2680,18 @@ if [[ $COPY_COLOR_REF -eq 1 ]]; then
 fi
 
 if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
-    # Phase 4 will replace these placeholders with values read from a sidecar
-    # file produced by prepare_for_print.py. For now, emit honest defaults
-    # so the schema is stable and consumers can already key off the fields.
+    # Read the sidecar JSON that prepare_for_print.py just wrote.
+    META=&quot;${OUTPUT_PATH}.print_meta.json&quot;
+    if [[ -f &quot;$META&quot; ]]; then
+        DIMS_JSON=$(python3 -c &#x27;import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m.get(&quot;final_dimensions_mm&quot;, {})))&#x27; &quot;$META&quot;)
+        FITS=$(python3 -c &#x27;import json,sys; m=json.load(open(sys.argv[1])); print(&quot;true&quot; if m.get(&quot;fits_snapmaker_u1&quot;) else &quot;false&quot;)&#x27; &quot;$META&quot;)
+        OVER_JSON=$(python3 -c &#x27;import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps(m.get(&quot;oversized_axes&quot;, [])))&#x27; &quot;$META&quot;)
+    else
+        # Should not happen — but fall back to honest defaults.
+        DIMS_JSON=&#x27;{&quot;x&quot;:0.0,&quot;y&quot;:0.0,&quot;z&quot;:0.0}&#x27;
+        FITS=true
+        OVER_JSON=&#x27;[]&#x27;
+    fi
     json_mode_end
     python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
         status=ok \
@@ -2645,9 +2700,9 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
         stl_path=&quot;$OUTPUT_PATH&quot; \
         format=&quot;$FORMAT&quot; \
         --float target_size_mm=&quot;$TARGET_SIZE_MM&quot; \
-        --object final_dimensions_mm=&#x27;{&quot;x&quot;:0.0,&quot;y&quot;:0.0,&quot;z&quot;:0.0}&#x27; \
-        --bool fits_snapmaker_u1=true \
-        --array oversized_axes=&#x27;[]&#x27; \
+        --object final_dimensions_mm=&quot;$DIMS_JSON&quot; \
+        --bool fits_snapmaker_u1=&quot;$FITS&quot; \
+        --array oversized_axes=&quot;$OVER_JSON&quot; \
         color_ref_path=&quot;$COLOR_REF_PATH&quot; \
         assets_root=&quot;$ASSETS_ROOT&quot; \
         manifest_path=&quot;$MANIFEST_PATH&quot; \
@@ -2765,13 +2820,20 @@ Steps:
   4. Manifold pass (3D Print Toolbox if available; basic ops otherwise)
   5. Scale to real-world millimeters (longest side = TARGET_SIZE_MM)
   6. Orient: lowest point at Z=0, base on the build plate
-  7. Export binary STL
+  7. Validate final dimensions on every axis against the Snapmaker U1 build
+     volume (270 mm). If any axis exceeds, exit non-zero unless
+     allow_oversize is passed.
+  8. Write a sidecar `&lt;output&gt;.print_meta.json` with dims/fits info that
+     print.sh reads to emit its --json result.
+  9. Export binary STL.
 
 Run from print.sh, or manually:
   /Applications/Blender.app/Contents/MacOS/Blender --background \\
-    --python prepare_for_print.py -- INPUT.glb OUTPUT.stl SIZE_MM ORIENTATION
+    --python prepare_for_print.py -- \\
+        INPUT.glb OUTPUT.stl SIZE_MM ORIENTATION ALLOW_OVERSIZE
 &quot;&quot;&quot;
 import bpy
+import json
 import sys
 from mathutils import Matrix
 
@@ -2782,6 +2844,7 @@ input_path = argv[0]
 output_path = argv[1]
 target_size_mm = float(argv[2])
 orientation = argv[3].lower() if len(argv) &gt; 3 else &quot;auto&quot;
+allow_oversize = (argv[4].lower() in (&quot;true&quot;, &quot;1&quot;, &quot;yes&quot;)) if len(argv) &gt; 4 else False
 
 
 # ---------- enable 3D Print Toolbox if available ----------
@@ -2884,17 +2947,54 @@ obj.data.transform(Matrix.Translation((0, 0, -local_min_z)))
 obj.location = (0, 0, 0)
 
 
-# ---------- check final dimensions ----------
+# ---------- check final dimensions on every axis ----------
 dims_mm = tuple(round(d, 2) for d in obj.dimensions)
 poly_count = len(obj.data.polygons)
 vert_count = len(obj.data.vertices)
 
-# Warn if any dimension exceeds the Snapmaker U1 build volume
+# Snapmaker U1 build volume: 270 mm cube. Validate X, Y, AND Z.
 U1_LIMIT = 270.0
 oversized_axes = [a for a, d in zip(&quot;XYZ&quot;, dims_mm) if d &gt; U1_LIMIT]
-if oversized_axes:
-    print(f&quot;[prepare_for_print] WARNING: dimensions {dims_mm} mm exceed &quot;
+fits = not oversized_axes
+
+
+def write_meta(fits: bool):
+    &quot;&quot;&quot;Write a sidecar JSON file alongside the STL output so print.sh can
+    read the structured results without parsing this script&#x27;s stdout.&quot;&quot;&quot;
+    meta = {
+        &quot;final_dimensions_mm&quot;: {
+            &quot;x&quot;: float(dims_mm[0]),
+            &quot;y&quot;: float(dims_mm[1]),
+            &quot;z&quot;: float(dims_mm[2]),
+        },
+        &quot;fits_snapmaker_u1&quot;: fits,
+        &quot;oversized_axes&quot;: oversized_axes,
+        &quot;u1_limit_mm&quot;: U1_LIMIT,
+        &quot;polygons&quot;: int(poly_count),
+        &quot;vertices&quot;: int(vert_count),
+        &quot;print_toolbox_enabled&quot;: bool(has_3dprint),
+    }
+    try:
+        with open(output_path + &quot;.print_meta.json&quot;, &quot;w&quot;) as fh:
+            json.dump(meta, fh, indent=2, sort_keys=True)
+            fh.write(&quot;\n&quot;)
+    except OSError as exc:  # don&#x27;t kill the run just because we can&#x27;t write meta
+        print(f&quot;[prepare_for_print] could not write sidecar meta: {exc}&quot;)
+
+
+if oversized_axes and not allow_oversize:
+    # Fail BEFORE exporting STL so we don&#x27;t leave a misleading file behind.
+    print(f&quot;[prepare_for_print] ERROR: dimensions {dims_mm} mm exceed &quot;
           f&quot;Snapmaker U1 build volume ({U1_LIMIT} mm) on axes: {oversized_axes}&quot;)
+    print(&quot;[prepare_for_print] Re-run with --allow-oversize to bypass this check.&quot;)
+    write_meta(fits=False)
+    sys.exit(3)
+
+if oversized_axes:
+    # allow_oversize: keep the warning but proceed.
+    print(f&quot;[prepare_for_print] WARNING: dimensions {dims_mm} mm exceed &quot;
+          f&quot;Snapmaker U1 build volume ({U1_LIMIT} mm) on axes: {oversized_axes}. &quot;
+          f&quot;Continuing because --allow-oversize was passed.&quot;)
 
 
 # ---------- export STL ----------
@@ -2929,6 +3029,9 @@ def export_stl_compat(filepath):
 
 
 api_used = export_stl_compat(output_path)
+
+# Sidecar JSON is the authoritative source for print.sh&#x27;s --json result.
+write_meta(fits=fits)
 
 
 # ---------- report ----------
