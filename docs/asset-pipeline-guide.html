@@ -1557,9 +1557,10 @@ resolve_project_context() {
         AUTO_INCREMENT=&quot;0&quot;
     fi
 
-    # Make sure all needed dirs exist
+    # Make sure all needed dirs exist (textures/ added in v0.2 for texture.sh).
     mkdir -p &quot;$ASSETS_ROOT/concept&quot; &quot;$ASSETS_ROOT/raw&quot; \
-             &quot;$ASSETS_ROOT/clean&quot; &quot;$ASSETS_ROOT/print&quot;
+             &quot;$ASSETS_ROOT/clean&quot; &quot;$ASSETS_ROOT/print&quot; \
+             &quot;$ASSETS_ROOT/textures&quot;
     [[ -n &quot;$ENGINE_PATH&quot; ]] &amp;&amp; mkdir -p &quot;$ENGINE_PATH&quot;
 
     return 0
@@ -3723,6 +3724,472 @@ if __name__ == &quot;__main__&quot;:
     sys.exit(main())
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/model_bakeoff.py</pre></div>
+            </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>texture.sh</code>
+                <span class="script-summary-desc">v0.2 texture inspect / Real-ESRGAN upscale wrapper (experimental)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/texture.sh << 'PIPELINE_EOF'
+#!/usr/bin/env bash
+#
+# texture.sh — texture inspection + upscale wrapper (v0.2, experimental).
+#
+# Modes:
+#   inspect   Report stats about an input image, GLB, or texture folder.
+#             No filesystem changes.
+#   upscale   Run a 2x / 4x upscale via real-esrgan-ncnn-vulkan if installed.
+#             Fails clearly when the binary is missing — does NOT silently
+#             degrade to a different upscaler.
+#
+# This wrapper is deliberately scoped. PBR generation, normal-map synthesis,
+# and Hunyuan3D-Paint are NOT here yet — they require separate licence review
+# and have higher failure rates. See SKILL.md and the studio docs for the
+# longer-term plan.
+
+set -euo pipefail
+
+SCRIPT_DIR=&quot;$(cd &quot;$(dirname &quot;${BASH_SOURCE[0]}&quot;)&quot; &amp;&amp; pwd)&quot;
+# shellcheck source=/dev/null
+source &quot;$SCRIPT_DIR/_pipeline_lib.sh&quot;
+
+PIPELINE_ROOT=&quot;${PIPELINE_ROOT:-$HOME/3d-pipeline}&quot;
+
+EXPLICIT_PROJECT=&quot;&quot;
+INPUT=&quot;&quot;
+OUTPUT=&quot;&quot;
+MODE=&quot;inspect&quot;
+SCALE=4
+ENGINE_STAGE=0
+JSON_MODE=0
+
+usage() {
+    cat &lt;&lt;EOF
+Usage: $(basename &quot;$0&quot;) -i INPUT [options]
+
+Required:
+  -i, --input PATH         GLB / image / directory to inspect or upscale.
+
+Project context:
+  --project PATH           Force a project root (skips auto-detection).
+
+Mode:
+      --mode MODE          inspect (default) | upscale
+      --scale N            2 or 4 (default: 4) — used in upscale mode.
+
+I/O:
+  -o, --output NAME_OR_PATH  Output name or path. Defaults to a name
+                              derived from the input filename in upscale
+                              mode; ignored in inspect mode.
+      --engine-stage       Copy upscaled outputs into the engine&#x27;s texture
+                              folder if it can be inferred. Off by default.
+      --json               Emit a final JSON object on stdout. Human logs
+                              are routed to stderr.
+
+  -h, --help               This help.
+
+Examples:
+  # Quick inspection of a GLB
+  $(basename &quot;$0&quot;) -i assets/clean/chest_clean.glb
+
+  # Inspect a texture folder
+  $(basename &quot;$0&quot;) -i assets/textures/
+
+  # 4x upscale a concept image
+  $(basename &quot;$0&quot;) -i assets/concept/chest.png --mode upscale --scale 4
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case &quot;$1&quot; in
+        --project)         EXPLICIT_PROJECT=&quot;$2&quot;; shift 2 ;;
+        -i|--input)        INPUT=&quot;$2&quot;;            shift 2 ;;
+        -o|--output)       OUTPUT=&quot;$2&quot;;           shift 2 ;;
+        --mode)            MODE=&quot;$2&quot;;             shift 2 ;;
+        --scale)           SCALE=&quot;$2&quot;;            shift 2 ;;
+        --engine-stage)    ENGINE_STAGE=1;        shift   ;;
+        --json)            JSON_MODE=1;           shift   ;;
+        -h|--help)         usage; exit 0 ;;
+        *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
+    esac
+done
+
+[[ -z &quot;$INPUT&quot; ]] &amp;&amp; { echo &quot;ERROR: -i/--input is required&quot; &gt;&amp;2; usage; exit 1; }
+[[ -e &quot;$INPUT&quot; ]] || { echo &quot;ERROR: input does not exist: $INPUT&quot; &gt;&amp;2; exit 1; }
+case &quot;$MODE&quot;  in inspect|upscale) ;;
+    *) echo &quot;ERROR: --mode must be inspect or upscale (got: $MODE)&quot; &gt;&amp;2; exit 1 ;;
+esac
+case &quot;$SCALE&quot; in 2|4) ;;
+    *) echo &quot;ERROR: --scale must be 2 or 4 (got: $SCALE)&quot; &gt;&amp;2; exit 1 ;;
+esac
+
+# Under --json: route subcommand stdout to stderr so the JSON line is alone.
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
+
+resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
+
+# Always make sure the textures directory exists for the project / global root.
+TEXTURES_DIR=&quot;$ASSETS_ROOT/textures&quot;
+mkdir -p &quot;$TEXTURES_DIR&quot;
+
+COL_BLUE=&#x27;\033[0;34m&#x27;; COL_GREEN=&#x27;\033[0;32m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[texture]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[texture]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+err()   { printf &quot;${COL_RED}[texture]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
+
+START_TS=$(date +%s)
+CREATED_AT=&quot;$(iso_now)&quot;
+MACHINE=&quot;$(hostname_safe)&quot;
+HW_TIER=&quot;$(hardware_tier)&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    print_context &gt;&amp;2
+else
+    print_context
+fi
+info &quot;Mode:    $MODE&quot;
+info &quot;Input:   $INPUT&quot;
+info &quot;Tier:    $HW_TIER  (machine: $MACHINE)&quot;
+
+# Convert input to absolute so the JSON has stable paths.
+if [[ -d &quot;$INPUT&quot; ]]; then
+    INPUT_ABS=&quot;$(cd &quot;$INPUT&quot; &amp;&amp; pwd)&quot;
+else
+    INPUT_ABS=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(basename &quot;$INPUT&quot;)&quot;
+fi
+
+# Always run inspect first so we have stats for the JSON output (and so
+# upscale mode doesn&#x27;t try to scale something that isn&#x27;t an image).
+INSPECT_JSON=&quot;$(python3 &quot;$SCRIPT_DIR/texture_inspect.py&quot; --input &quot;$INPUT_ABS&quot;)&quot;
+
+if [[ &quot;$MODE&quot; == &quot;inspect&quot; ]]; then
+    END_TS=$(date +%s)
+    DURATION=$((END_TS - START_TS))
+    done_ &quot;Inspect complete in ${DURATION}s&quot;
+
+    if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+        json_mode_end
+        python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+            status=ok \
+            stage=texture_inspect \
+            mode=inspect \
+            input=&quot;$INPUT_ABS&quot; \
+            --object inspect=&quot;$INSPECT_JSON&quot; \
+            --int duration_seconds=&quot;$DURATION&quot; \
+            assets_root=&quot;$ASSETS_ROOT&quot; \
+            machine=&quot;$MACHINE&quot; \
+            hardware_tier=&quot;$HW_TIER&quot; \
+            created=&quot;$CREATED_AT&quot;
+    else
+        # Pretty-print to stdout for human eyes.
+        echo &quot;$INSPECT_JSON&quot; | python3 -m json.tool
+    fi
+    exit 0
+fi
+
+# ---------- upscale mode ----------
+# Detect a real-esrgan-ncnn-vulkan binary. Different distributions name it
+# differently; check both common forms.
+ESRGAN_BIN=&quot;&quot;
+for candidate in real-esrgan-ncnn-vulkan realesrgan-ncnn-vulkan; do
+    if command -v &quot;$candidate&quot; &gt;/dev/null 2&gt;&amp;1; then
+        ESRGAN_BIN=&quot;$candidate&quot;
+        break
+    fi
+done
+
+if [[ -z &quot;$ESRGAN_BIN&quot; ]]; then
+    err &quot;real-esrgan-ncnn-vulkan binary not found in PATH.&quot;
+    err &quot;  Install one of:&quot;
+    err &quot;    https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases&quot;
+    err &quot;    https://github.com/nihui/realesrgan-ncnn-vulkan/releases&quot;
+    err &quot;  Place the binary on your PATH as one of:&quot;
+    err &quot;    real-esrgan-ncnn-vulkan&quot;
+    err &quot;    realesrgan-ncnn-vulkan&quot;
+    if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+        json_mode_end
+        python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+            status=error \
+            stage=texture_upscale \
+            error=not_installed \
+            tool=real-esrgan-ncnn-vulkan \
+            input=&quot;$INPUT_ABS&quot; \
+            assets_root=&quot;$ASSETS_ROOT&quot; \
+            machine=&quot;$MACHINE&quot; \
+            hardware_tier=&quot;$HW_TIER&quot; \
+            created=&quot;$CREATED_AT&quot;
+    fi
+    exit 2
+fi
+
+# Refuse to upscale directories / GLBs.
+KIND=&quot;$(echo &quot;$INSPECT_JSON&quot; | python3 -c &#x27;import json,sys; print(json.load(sys.stdin).get(&quot;kind&quot;,&quot;&quot;))&#x27;)&quot;
+if [[ &quot;$KIND&quot; != &quot;image&quot; ]]; then
+    err &quot;Upscale mode currently supports image inputs only (got kind=$KIND).&quot;
+    err &quot;Run inspect mode first to confirm the input is an image.&quot;
+    exit 2
+fi
+
+# Resolve the output path.
+INPUT_BASE=&quot;$(basename &quot;$INPUT_ABS&quot;)&quot;
+INPUT_STEM=&quot;${INPUT_BASE%.*}&quot;
+INPUT_EXT=&quot;${INPUT_BASE##*.}&quot;
+if [[ -z &quot;$OUTPUT&quot; ]]; then
+    OUT_PATH=&quot;$TEXTURES_DIR/${INPUT_STEM}_x${SCALE}.${INPUT_EXT}&quot;
+elif [[ &quot;$OUTPUT&quot; == */* ]]; then
+    OUT_PATH=&quot;$OUTPUT&quot;
+else
+    OUT_PATH=&quot;$TEXTURES_DIR/${OUTPUT}.${INPUT_EXT}&quot;
+fi
+mkdir -p &quot;$(dirname &quot;$OUT_PATH&quot;)&quot;
+
+info &quot;Tool:    $ESRGAN_BIN&quot;
+info &quot;Scale:   ${SCALE}x&quot;
+info &quot;Output:  $OUT_PATH&quot;
+
+# Run the upscaler. Both common builds accept -i / -o / -s.
+&quot;$ESRGAN_BIN&quot; -i &quot;$INPUT_ABS&quot; -o &quot;$OUT_PATH&quot; -s &quot;$SCALE&quot;
+
+[[ -f &quot;$OUT_PATH&quot; ]] || { err &quot;upscaler did not produce $OUT_PATH&quot;; exit 1; }
+
+# Optional engine staging.
+ENGINE_STAGED=&quot;&quot;
+if [[ $ENGINE_STAGE -eq 1 &amp;&amp; -n &quot;${ENGINE_PATH:-}&quot; ]]; then
+    ENGINE_TEX_DIR=&quot;$ENGINE_PATH/Textures&quot;
+    mkdir -p &quot;$ENGINE_TEX_DIR&quot;
+    ENGINE_STAGED=&quot;$ENGINE_TEX_DIR/$(basename &quot;$OUT_PATH&quot;)&quot;
+    cp &quot;$OUT_PATH&quot; &quot;$ENGINE_STAGED&quot;
+    info &quot;Engine-staged: $ENGINE_STAGED&quot;
+fi
+
+END_TS=$(date +%s)
+DURATION=$((END_TS - START_TS))
+done_ &quot;Upscale complete in ${DURATION}s&quot;
+done_ &quot;Output: $OUT_PATH&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    OUT_INSPECT_JSON=&quot;$(python3 &quot;$SCRIPT_DIR/texture_inspect.py&quot; --input &quot;$OUT_PATH&quot;)&quot;
+    json_mode_end
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        status=ok \
+        stage=texture_upscale \
+        mode=upscale \
+        tool=&quot;$ESRGAN_BIN&quot; \
+        --int scale=&quot;$SCALE&quot; \
+        input=&quot;$INPUT_ABS&quot; \
+        output=&quot;$OUT_PATH&quot; \
+        engine_path=&quot;$ENGINE_STAGED&quot; \
+        --object input_inspect=&quot;$INSPECT_JSON&quot; \
+        --object output_inspect=&quot;$OUT_INSPECT_JSON&quot; \
+        --int duration_seconds=&quot;$DURATION&quot; \
+        assets_root=&quot;$ASSETS_ROOT&quot; \
+        machine=&quot;$MACHINE&quot; \
+        hardware_tier=&quot;$HW_TIER&quot; \
+        created=&quot;$CREATED_AT&quot;
+else
+    echo &quot;$OUT_PATH&quot;
+fi
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/texture.sh</pre></div>
+            </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>texture_inspect.py</code>
+                <span class="script-summary-desc">v0.2 GLB / image / directory inspection helper for <code>texture.sh</code></span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/texture_inspect.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Texture-inspection helper for texture.sh.
+
+Two input shapes are supported:
+
+  * Image file (.png / .jpg / .jpeg / .webp): reports width / height /
+    mode / file size. Uses PIL when available, falls back to a tiny
+    stdlib PNG/JPEG header parser otherwise.
+
+  * Binary glTF (.glb): reads the JSON chunk directly with struct and
+    counts meshes / materials / textures / images.
+
+  * Directory: counts image files inside and reports their dimensions
+    where possible.
+
+Emits a single JSON object on stdout with the fields texture.sh expects.
+
+Why not Blender? Blender works but starts in ~3-5s. For a quick &quot;what&#x27;s
+in this GLB?&quot; call we&#x27;d rather not pay that. This helper is honest about
+what it can&#x27;t determine (e.g. PBR maps) and leaves those fields null
+for a later, deeper pass.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import struct
+import sys
+from pathlib import Path
+from typing import Any
+
+GLB_JSON_CHUNK = 0x4E4F534A  # &quot;JSON&quot; little-endian
+IMG_EXTS = {&quot;.png&quot;, &quot;.jpg&quot;, &quot;.jpeg&quot;, &quot;.webp&quot;, &quot;.tga&quot;, &quot;.bmp&quot;}
+
+
+def _image_dims_pil(path: Path) -&gt; tuple[int, int, str] | None:
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            return im.width, im.height, im.mode
+    except Exception:
+        return None
+
+
+def _png_dims(path: Path) -&gt; tuple[int, int, str] | None:
+    with open(path, &quot;rb&quot;) as f:
+        head = f.read(24)
+    if head[:8] != b&quot;\x89PNG\r\n\x1a\n&quot;:
+        return None
+    width, height = struct.unpack(&quot;&gt;II&quot;, head[16:24])
+    return int(width), int(height), &quot;png&quot;
+
+
+def _jpeg_dims(path: Path) -&gt; tuple[int, int, str] | None:
+    with open(path, &quot;rb&quot;) as f:
+        if f.read(2) != b&quot;\xff\xd8&quot;:
+            return None
+        while True:
+            byte = f.read(1)
+            while byte == b&quot;\xff&quot;:
+                byte = f.read(1)
+            marker = byte[0] if byte else 0
+            if 0xC0 &lt;= marker &lt;= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                f.read(3)
+                height, width = struct.unpack(&quot;&gt;HH&quot;, f.read(4))
+                return int(width), int(height), &quot;jpeg&quot;
+            seg_len_bytes = f.read(2)
+            if len(seg_len_bytes) &lt; 2:
+                return None
+            seg_len = struct.unpack(&quot;&gt;H&quot;, seg_len_bytes)[0]
+            f.read(seg_len - 2)
+
+
+def _image_dims(path: Path) -&gt; tuple[int, int, str] | None:
+    dims = _image_dims_pil(path)
+    if dims:
+        return dims
+    suffix = path.suffix.lower()
+    if suffix == &quot;.png&quot;:
+        return _png_dims(path)
+    if suffix in (&quot;.jpg&quot;, &quot;.jpeg&quot;):
+        return _jpeg_dims(path)
+    return None
+
+
+def _inspect_image(path: Path) -&gt; dict[str, Any]:
+    dims = _image_dims(path)
+    return {
+        &quot;kind&quot;: &quot;image&quot;,
+        &quot;input&quot;: str(path),
+        &quot;file_size_bytes&quot;: path.stat().st_size,
+        &quot;width&quot;: dims[0] if dims else None,
+        &quot;height&quot;: dims[1] if dims else None,
+        &quot;mode&quot;: dims[2] if dims else None,
+    }
+
+
+def _inspect_glb(path: Path) -&gt; dict[str, Any]:
+    with open(path, &quot;rb&quot;) as f:
+        magic = f.read(12)
+        if magic[:4] != b&quot;glTF&quot;:
+            return {&quot;kind&quot;: &quot;glb&quot;, &quot;input&quot;: str(path),
+                    &quot;error&quot;: &quot;not a binary glTF (magic mismatch)&quot;}
+        chunk_len, chunk_type = struct.unpack(&quot;&lt;II&quot;, f.read(8))
+        if chunk_type != GLB_JSON_CHUNK:
+            return {&quot;kind&quot;: &quot;glb&quot;, &quot;input&quot;: str(path),
+                    &quot;error&quot;: f&quot;first chunk is not JSON (got 0x{chunk_type:08x})&quot;}
+        try:
+            gltf = json.loads(f.read(chunk_len))
+        except json.JSONDecodeError as exc:
+            return {&quot;kind&quot;: &quot;glb&quot;, &quot;input&quot;: str(path),
+                    &quot;error&quot;: f&quot;JSON chunk parse failed: {exc}&quot;}
+    return {
+        &quot;kind&quot;: &quot;glb&quot;,
+        &quot;input&quot;: str(path),
+        &quot;file_size_bytes&quot;: path.stat().st_size,
+        &quot;mesh_count&quot;: len(gltf.get(&quot;meshes&quot;, [])),
+        &quot;material_count&quot;: len(gltf.get(&quot;materials&quot;, [])),
+        &quot;texture_count&quot;: len(gltf.get(&quot;textures&quot;, [])),
+        &quot;image_count&quot;: len(gltf.get(&quot;images&quot;, [])),
+        &quot;node_count&quot;: len(gltf.get(&quot;nodes&quot;, [])),
+        &quot;scene_count&quot;: len(gltf.get(&quot;scenes&quot;, [])),
+        &quot;asset_version&quot;: gltf.get(&quot;asset&quot;, {}).get(&quot;version&quot;, &quot;&quot;),
+        &quot;generator&quot;: gltf.get(&quot;asset&quot;, {}).get(&quot;generator&quot;, &quot;&quot;),
+        # Subjective fields we can&#x27;t infer from JSON alone — leave null.
+        &quot;pbr_maps_present&quot;: None,
+    }
+
+
+def _inspect_dir(path: Path) -&gt; dict[str, Any]:
+    files = sorted(
+        p for p in path.iterdir()
+        if p.is_file() and p.suffix.lower() in IMG_EXTS
+    )
+    images: list[dict[str, Any]] = []
+    for p in files:
+        d = _image_dims(p)
+        images.append({
+            &quot;path&quot;: str(p),
+            &quot;file_size_bytes&quot;: p.stat().st_size,
+            &quot;width&quot;: d[0] if d else None,
+            &quot;height&quot;: d[1] if d else None,
+            &quot;mode&quot;: d[2] if d else None,
+        })
+    return {
+        &quot;kind&quot;: &quot;directory&quot;,
+        &quot;input&quot;: str(path),
+        &quot;image_count&quot;: len(images),
+        &quot;images&quot;: images,
+    }
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser()
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--json-only&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Print only the JSON object (default).&quot;)
+    args = p.parse_args()
+
+    in_path = Path(os.path.expanduser(args.input))
+    if not in_path.exists():
+        print(json.dumps({&quot;kind&quot;: &quot;error&quot;,
+                          &quot;error&quot;: f&quot;input not found: {in_path}&quot;}))
+        return 1
+
+    if in_path.is_dir():
+        result = _inspect_dir(in_path)
+    elif in_path.suffix.lower() == &quot;.glb&quot;:
+        result = _inspect_glb(in_path)
+    elif in_path.suffix.lower() in IMG_EXTS:
+        result = _inspect_image(in_path)
+    else:
+        result = {
+            &quot;kind&quot;: &quot;unknown&quot;,
+            &quot;input&quot;: str(in_path),
+            &quot;error&quot;: f&quot;unsupported extension: {in_path.suffix}&quot;,
+        }
+
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/texture_inspect.py</pre></div>
             </details>
 
 

@@ -181,9 +181,10 @@ resolve_project_context() {
         AUTO_INCREMENT="0"
     fi
 
-    # Make sure all needed dirs exist
+    # Make sure all needed dirs exist (textures/ added in v0.2 for texture.sh).
     mkdir -p "$ASSETS_ROOT/concept" "$ASSETS_ROOT/raw" \
-             "$ASSETS_ROOT/clean" "$ASSETS_ROOT/print"
+             "$ASSETS_ROOT/clean" "$ASSETS_ROOT/print" \
+             "$ASSETS_ROOT/textures"
     [[ -n "$ENGINE_PATH" ]] && mkdir -p "$ENGINE_PATH"
 
     return 0
