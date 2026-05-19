@@ -1,0 +1,1487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Technical context document for AI assistants helping with Ken Allred's local 2D/3D/print asset generation pipeline. Architecture, rationale, trade-offs, failure modes.">
+<title>Asset Pipeline · AI Context Document</title>
+<style>
+:root {
+  /* Catppuccin Mocha */
+  --bg: #1e1e2e; --mantle: #181825; --crust: #11111b;
+  --surface0: #313244; --surface1: #45475a; --surface2: #585b70;
+  --overlay0: #6c7086; --overlay1: #7f849c; --overlay2: #9399b2;
+  --subtext0: #a6adc8; --subtext1: #bac2de; --text: #cdd6f4;
+  --peach: #fab387; --green: #a6e3a1; --yellow: #f9e2af;
+  --red: #f38ba8; --mauve: #cba6f7; --blue: #89b4fa;
+  --teal: #94e2d5; --sapphire: #74c7ec; --lavender: #b4befe;
+  --rule: rgba(205, 214, 244, 0.07);
+  --rule-strong: rgba(205, 214, 244, 0.13);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+  font-size: 14px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--lavender); text-decoration: none; border-bottom: 1px dotted var(--overlay0); }
+a:hover { color: var(--peach); border-bottom-color: var(--peach); }
+
+code {
+  background: var(--surface0);
+  color: var(--peach);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.93em;
+  border: 1px solid var(--rule-strong);
+}
+
+pre {
+  background: var(--mantle);
+  color: var(--subtext1);
+  padding: 14px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--rule-strong);
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin: 14px 0;
+}
+pre code { background: none; border: none; color: inherit; padding: 0; }
+
+/* --- Layout --- */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  max-width: 1280px;
+  margin: 0 auto;
+  gap: 48px;
+  padding: 32px 40px;
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; gap: 24px; padding: 24px; }
+  aside { position: static !important; }
+}
+
+aside {
+  position: sticky;
+  top: 32px;
+  align-self: start;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+main.content {
+  padding: 16px 0 160px;
+  max-width: 900px;
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+/* --- Sidebar --- */
+.sidebar-brand {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--peach);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.sidebar-subbrand {
+  font-size: 12px;
+  color: var(--overlay1);
+  margin-bottom: 24px;
+}
+.sidebar-section { margin-bottom: 22px; }
+.sidebar-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--overlay0);
+  padding: 0 8px 6px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 8px;
+}
+.sidebar-toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sidebar-toc li { margin: 0; }
+.sidebar-toc a {
+  display: flex;
+  gap: 10px;
+  padding: 5px 8px 5px 12px;
+  font-size: 12.5px;
+  color: var(--subtext0);
+  border: none;
+  border-left: 2px solid transparent;
+  transition: all 0.12s;
+}
+.sidebar-toc a:hover { color: var(--text); border-left-color: var(--rule-strong); }
+.sidebar-toc a .num {
+  font-size: 10px;
+  color: var(--overlay0);
+  flex-shrink: 0;
+  width: 22px;
+  letter-spacing: 0.08em;
+  padding-top: 2px;
+}
+
+/* --- Headings --- */
+h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 8px;
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  font-size: 14px;
+  color: var(--overlay1);
+  margin-bottom: 36px;
+  font-style: italic;
+}
+h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--peach);
+  margin: 56px 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule-strong);
+  letter-spacing: -0.005em;
+}
+h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--mauve);
+  margin: 28px 0 10px;
+  letter-spacing: 0.01em;
+}
+h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--blue);
+  margin: 18px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+p { margin: 10px 0; color: var(--subtext1); }
+ul, ol { margin: 12px 0; padding-left: 22px; }
+li { margin: 4px 0; color: var(--subtext1); }
+li > strong { color: var(--text); }
+li > code:first-child { color: var(--green); }
+
+/* --- Document banner --- */
+.banner {
+  background: linear-gradient(135deg, rgba(250, 179, 135, 0.06), rgba(180, 190, 254, 0.06));
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--peach);
+  border-radius: 6px;
+  padding: 18px 22px;
+  margin: 0 0 36px;
+}
+.banner-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--peach);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.banner p { margin: 0; font-size: 13px; color: var(--subtext1); line-height: 1.6; }
+
+/* --- Section number --- */
+.sec-num {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--overlay0);
+  margin-bottom: 4px;
+}
+
+/* --- Definition lists for fact-tables --- */
+dl.facts {
+  margin: 16px 0;
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 4px 16px;
+  font-size: 13px;
+}
+dl.facts dt {
+  color: var(--peach);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  padding-top: 4px;
+}
+dl.facts dd {
+  margin: 0;
+  color: var(--subtext1);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* --- Callout boxes --- */
+.callout {
+  border-left: 3px solid var(--overlay0);
+  background: var(--mantle);
+  border-radius: 0 4px 4px 0;
+  padding: 12px 16px;
+  margin: 16px 0;
+  font-size: 13px;
+}
+.callout-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--overlay1);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.callout-rationale { border-left-color: var(--mauve); }
+.callout-rationale .callout-label { color: var(--mauve); }
+.callout-warn { border-left-color: var(--yellow); background: rgba(249, 226, 175, 0.04); }
+.callout-warn .callout-label { color: var(--yellow); }
+.callout-gotcha { border-left-color: var(--red); background: rgba(243, 139, 168, 0.04); }
+.callout-gotcha .callout-label { color: var(--red); }
+.callout-context { border-left-color: var(--sapphire); background: rgba(116, 199, 236, 0.04); }
+.callout-context .callout-label { color: var(--sapphire); }
+.callout-decision { border-left-color: var(--green); background: rgba(166, 227, 161, 0.04); }
+.callout-decision .callout-label { color: var(--green); }
+
+/* --- Tables --- */
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+th, td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+th {
+  color: var(--peach);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--rule-strong);
+}
+td { color: var(--subtext1); }
+td code { font-size: 0.92em; }
+
+/* --- Trade-off blocks --- */
+.tradeoff {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 16px 0;
+}
+@media (max-width: 700px) { .tradeoff { grid-template-columns: 1fr; } }
+.tradeoff > div {
+  background: var(--mantle);
+  border-radius: 4px;
+  border: 1px solid var(--rule);
+  padding: 14px 18px;
+  font-size: 13px;
+}
+.tradeoff .gained { border-left: 3px solid var(--green); }
+.tradeoff .sacrificed { border-left: 3px solid var(--yellow); }
+.tradeoff h5 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.tradeoff .gained h5 { color: var(--green); }
+.tradeoff .sacrificed h5 { color: var(--yellow); }
+.tradeoff ul { margin: 0; padding-left: 18px; font-size: 12.5px; }
+
+/* --- ASCII diagrams --- */
+.diagram {
+  background: var(--crust);
+  color: var(--subtext1);
+  padding: 18px 20px;
+  border-radius: 6px;
+  border: 1px solid var(--rule-strong);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  margin: 16px 0;
+  white-space: pre;
+}
+
+/* --- Key concept callout --- */
+.key-concept {
+  background: var(--surface0);
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin: 16px 0;
+  border-top: 2px solid var(--peach);
+}
+.key-concept-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--peach);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.key-concept-body { font-size: 13px; color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<aside>
+  <div class="sidebar-brand">Asset Pipeline</div>
+  <div class="sidebar-subbrand">AI Context Document</div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Context</div>
+    <ul class="sidebar-toc">
+      <li><a href="#audience"><span class="num">00</span>Audience &amp; purpose</a></li>
+      <li><a href="#user"><span class="num">01</span>The user</a></li>
+      <li><a href="#problem"><span class="num">02</span>Problem space</a></li>
+      <li><a href="#platform"><span class="num">03</span>Hardware &amp; platform</a></li>
+    </ul>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Stack</div>
+    <ul class="sidebar-toc">
+      <li><a href="#models-2d"><span class="num">04</span>2D models</a></li>
+      <li><a href="#models-3d"><span class="num">05</span>3D models</a></li>
+      <li><a href="#cleanup"><span class="num">06</span>Cleanup &amp; repair</a></li>
+      <li><a href="#printing"><span class="num">07</span>Print stack</a></li>
+      <li><a href="#licensing"><span class="num">08</span>Licensing landscape</a></li>
+    </ul>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Architecture</div>
+    <ul class="sidebar-toc">
+      <li><a href="#overview"><span class="num">09</span>System overview</a></li>
+      <li><a href="#wrappers"><span class="num">10</span>Bash wrappers</a></li>
+      <li><a href="#shared-lib"><span class="num">11</span>Shared library</a></li>
+      <li><a href="#project-aware"><span class="num">12</span>Project awareness</a></li>
+      <li><a href="#skill"><span class="num">13</span>Claude Code skill</a></li>
+      <li><a href="#manifest"><span class="num">14</span>The manifest</a></li>
+    </ul>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Decisions</div>
+    <ul class="sidebar-toc">
+      <li><a href="#why-bash"><span class="num">15</span>Why bash, not Python</a></li>
+      <li><a href="#why-venvs"><span class="num">16</span>One venv per tool</a></li>
+      <li><a href="#why-skill"><span class="num">17</span>Why a skill, not a wrapper</a></li>
+      <li><a href="#why-mflux"><span class="num">18</span>Why mflux, not diffusers</a></li>
+      <li><a href="#why-trellis-optional"><span class="num">19</span>Why TRELLIS is optional</a></li>
+    </ul>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Rough edges</div>
+    <ul class="sidebar-toc">
+      <li><a href="#failures"><span class="num">20</span>Setup failures we've hit</a></li>
+      <li><a href="#runtime-issues"><span class="num">21</span>Runtime failure modes</a></li>
+      <li><a href="#known-limits"><span class="num">22</span>Known limitations</a></li>
+    </ul>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="sidebar-label">Working with this</div>
+    <ul class="sidebar-toc">
+      <li><a href="#how-to-help"><span class="num">23</span>How to help the user</a></li>
+      <li><a href="#extension-points"><span class="num">24</span>Extension points</a></li>
+    </ul>
+  </div>
+</aside>
+
+<main class="content">
+
+<h1>Asset Pipeline</h1>
+<div class="subtitle">A technical context document for AI assistants helping Ken with his local 2D/3D/print asset generation pipeline.</div>
+
+<div class="banner">
+  <div class="banner-eyebrow">For AI assistants</div>
+  <p>This document is intentionally dense. It transfers the architectural reasoning, trade-offs, and failure history of a working pipeline so a future AI can help maintain, extend, or troubleshoot it without needing follow-up context. Read top-to-bottom for the full mental model; sections are designed to be reasonably self-contained for targeted lookup. Throughout, "Ken" refers to the human user.</p>
+</div>
+
+<!-- ============ 00 — AUDIENCE & PURPOSE ============ -->
+<section id="audience">
+  <div class="sec-num">00 · CONTEXT</div>
+  <h2>Audience &amp; purpose</h2>
+
+  <p>This document exists because the asset pipeline has accumulated non-obvious architectural decisions over a long development arc, and most of the reasoning isn't visible in the code itself. The setup guide and workflows guide tell users <em>what</em> and <em>how</em>; this document tells future AI assistants <em>why</em>.</p>
+
+  <p>If an AI assistant — Claude, GPT, Gemini, or any successor — is asked to extend, modify, troubleshoot, or explain this pipeline, this document should provide enough context to reason productively about the system without re-deriving every decision from scratch.</p>
+
+  <h3>Companion documents</h3>
+  <ul>
+    <li><code>asset-pipeline-guide.html</code> — user-facing setup instructions, step-by-step</li>
+    <li><code>asset-pipeline-workflows.html</code> — click-by-click usage scenarios in conversational form</li>
+    <li><code>asset-pipeline-upgrade-guide.md</code> — migration path for pre-project-aware installs</li>
+    <li><code>~/.claude/skills/asset-pipeline/SKILL.md</code> — the skill that drives Claude Code's behavior with this pipeline</li>
+  </ul>
+
+  <p>Those documents are authoritative for usage; this one is authoritative for reasoning.</p>
+</section>
+
+<!-- ============ 01 — THE USER ============ -->
+<section id="user">
+  <div class="sec-num">01 · CONTEXT</div>
+  <h2>The user</h2>
+
+  <p>Knowing who's using this matters because it shaped many design decisions. The pipeline is built for a specific person with a specific working style, not a hypothetical "general developer."</p>
+
+  <dl class="facts">
+    <dt>Identity</dt><dd>Ken Allred — experienced entrepreneur (previously founded and sold Primary Intelligence / TruVoice), now builds software products independently using AI-assisted development.</dd>
+    <dt>Location</dt><dd>Draper, Utah.</dd>
+    <dt>Primary tool</dt><dd>Claude Code on Apple Silicon Mac.</dd>
+    <dt>Workflow style</dt><dd>Multi-agent prompt pipelines, git worktrees, Beads task tracking, the "Olympian Protocol" multi-agent system. High familiarity with AI-assisted development but is <em>not</em> a traditional software engineer — leans heavily on AI for implementation details.</dd>
+    <dt>Active projects</dt><dd>Grithkin Battle Forge (game), GripCraft (pickleball paddle wrap business), pickleball management/tournament app (Kitchen Krew / Trushot / Court Boss).</dd>
+    <dt>Hardware</dt><dd>MacBook Pro M-series with 128 GB unified memory; Snapmaker U1 4-toolhead 3D printer.</dd>
+    <dt>Operating context</dt><dd>Almost always working inside Claude Code with the asset-pipeline skill enabled. Rarely runs wrappers directly from the terminal.</dd>
+  </dl>
+
+  <div class="callout callout-rationale">
+    <div class="callout-label">Why this matters</div>
+    The pipeline optimizes for a Claude Code-driven workflow, not for bash power users. Wrappers are designed to print helpful context lines and produce predictable filenames so the AI driver can reason about state. The "<code>--project</code> flag is just a flag" mentality matters less than "the wrapper auto-detects sensibly so the AI doesn't have to pre-think about it."
+  </div>
+</section>
+
+<!-- ============ 02 — PROBLEM SPACE ============ -->
+<section id="problem">
+  <div class="sec-num">02 · CONTEXT</div>
+  <h2>Problem space</h2>
+
+  <h3>What Ken is trying to do</h3>
+  <p>Generate game-ready 3D assets — and occasionally 3D-printable physical assets — from text or 2D images, locally, without subscription dependencies, and without ceding rights to the output. The pipeline supports three independent flows that chain:</p>
+
+  <ol>
+    <li><strong>Text → 2D image</strong> (concept art, game UI elements, reference imagery)</li>
+    <li><strong>2D image → 3D mesh</strong> (props, characters, environments for Unity/Unreal)</li>
+    <li><strong>3D mesh → printable STL</strong> (tabletop figures, props, hero display pieces)</li>
+  </ol>
+
+  <p>Flows 1+2 chain ("make me a 3D treasure chest"); flows 1+2+3 chain ("make me a 50mm printable treasure chest"). Each can also run standalone.</p>
+
+  <h3>What he is <em>not</em> trying to do</h3>
+  <ul>
+    <li><strong>Real-time generation</strong> — minute-scale latency is fine; this isn't a live tool</li>
+    <li><strong>Photorealistic rendering</strong> — outputs are stylized game/print assets, not film-grade</li>
+    <li><strong>Mass production at scale</strong> — single-user workflow, not a service</li>
+    <li><strong>Character rigging or animation</strong> — static meshes only</li>
+    <li><strong>Texture authoring from scratch</strong> — relies on model-generated PBR or vertex colors</li>
+  </ul>
+
+  <h3>Hard constraints</h3>
+  <dl class="facts">
+    <dt>Commercial use</dt><dd>Output must be shippable in commercial games. This rules out FLUX dev (non-commercial), TRELLIS (CC BY-NC), and certain LoRAs. Models chosen carefully — see <a href="#licensing">section 08</a>.</dd>
+    <dt>Local execution</dt><dd>No cloud API calls in the hot path. Privacy, cost, latency, and rights ownership all benefit. Acceptable to use HuggingFace as a one-time weights distribution channel.</dd>
+    <dt>Mac native</dt><dd>Apple Silicon, MLX or Metal/MPS where possible. No CUDA. This excludes many state-of-the-art models that haven't been ported.</dd>
+    <dt>AI-driveable</dt><dd>Every component must be callable by Claude Code with predictable I/O. CLI tools win over GUI tools. Filename conventions matter.</dd>
+    <dt>Frictionless reuse</dt><dd>Asset created today must be reproducible tomorrow with the same prompt + seed. Manifest tracks generation metadata.</dd>
+  </dl>
+
+  <h3>Soft preferences</h3>
+  <ul>
+    <li><strong>Apache 2.0 / MIT / permissive licenses</strong> preferred over copyleft when comparable models exist</li>
+    <li><strong>Speed over fidelity</strong> for concept work (Z-Image Turbo's 8 steps over FLUX dev's 30+)</li>
+    <li><strong>Engine awareness</strong> — outputs should land where Unity / Unreal expect them, not in some intermediate folder the user has to manually move</li>
+  </ul>
+</section>
+
+<!-- ============ 03 — PLATFORM ============ -->
+<section id="platform">
+  <div class="sec-num">03 · CONTEXT</div>
+  <h2>Hardware &amp; platform</h2>
+
+  <p>Apple Silicon dominates this design. Every architectural choice was filtered through "does this run well on M-series with unified memory?"</p>
+
+  <dl class="facts">
+    <dt>Architecture</dt><dd>Apple M-series (M2 Ultra / M3 / M4 family). ARM64.</dd>
+    <dt>Memory</dt><dd>128 GB unified memory on Ken's primary machine. Unified means GPU and CPU share the same memory pool — different from PC where GPU VRAM is a hard limit on model size.</dd>
+    <dt>Compute</dt><dd>Metal (low-level) and MPS (PyTorch's Metal backend). MLX (Apple's array framework) used directly by mflux for 2D models.</dd>
+    <dt>OS</dt><dd>macOS 14 Sonoma or later. Some tools assume macOS-specific commands (<code>open</code>, <code>brew</code>, <code>sed -i ''</code>).</dd>
+    <dt>Python</dt><dd>3.10–3.12 supported. SF3D is brittle outside this range. Homebrew Python preferred; venvs for everything.</dd>
+    <dt>Off-platform deps</dt><dd>Blender (cask install), Snapmaker Orca (manual install), Git LFS for some model checkpoints.</dd>
+  </dl>
+
+  <h3>What unified memory enables</h3>
+  <p>On a 24 GB PC GPU, FLUX dev quantized to int8 barely fits. On a 128 GB Mac, you can run unquantized FLUX dev, SF3D, TRELLIS.2, and Blender concurrently. This is the key enabler — the pipeline assumes you can hold large models in memory without aggressive swap or offload, which makes the "just run everything locally" thesis viable.</p>
+
+  <div class="callout callout-context">
+    <div class="callout-label">Memory budget by tool (rough, at runtime)</div>
+    <ul>
+      <li><code>mflux + FLUX schnell q8</code>: ~14 GB</li>
+      <li><code>mflux + FLUX dev q8</code>: ~16 GB</li>
+      <li><code>mflux + Z-Image Turbo q8</code>: ~10 GB</li>
+      <li><code>SF3D inference</code>: ~6 GB</li>
+      <li><code>TRELLIS.2 inference</code>: ~10–14 GB depending on stage</li>
+      <li><code>Blender headless cleanup</code>: ~2 GB</li>
+    </ul>
+    None of these run concurrently in the current pipeline — each wrapper activates its venv, runs, deactivates. Memory pressure is sequential, not parallel. Still, the headroom matters because users with less RAM hit swap aggressively.
+  </div>
+
+  <h3>What unified memory <em>doesn't</em> give us</h3>
+  <p>Apple Silicon's MPS backend is still less mature than CUDA. Some operations fall back to CPU silently, dramatically slowing things down. Both SF3D and TRELLIS were ported with explicit MPS workarounds (<code>PYTORCH_ENABLE_MPS_FALLBACK=1</code> is required for SF3D). Some operations — notably <code>nvdiffrast</code> in TRELLIS — have no Mac port at all and are stubbed out, which is why TRELLIS produces vertex colors only (no PBR textures) on Mac.</p>
+</section>
+
+<!-- ============ 04 — 2D MODELS ============ -->
+<section id="models-2d">
+  <div class="sec-num">04 · STACK</div>
+  <h2>2D models</h2>
+
+  <p>Three 2D models supported, in order of preference:</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Model</th><th>License</th><th>Steps</th><th>Speed</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Z-Image Turbo</strong><br>(default)</td>
+        <td>Apache 2.0</td>
+        <td>8 (typically 9)</td>
+        <td>10–30s</td>
+        <td>Default for everything. Commercial-safe. High quality. Fast. No LoRA support.</td>
+      </tr>
+      <tr>
+        <td><strong>FLUX schnell</strong></td>
+        <td>Apache 2.0</td>
+        <td>4</td>
+        <td>5–15s</td>
+        <td>When a LoRA is needed (and the LoRA is FLUX-compatible). Stylization, character consistency.</td>
+      </tr>
+      <tr>
+        <td><strong>FLUX dev</strong></td>
+        <td>FLUX.1 Non-Commercial</td>
+        <td>20–50</td>
+        <td>30–90s</td>
+        <td>Reserved for non-commercial work or evaluation. <strong>Never</strong> used for assets shipping in Ken's commercial games.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Why these three, not others</h3>
+
+  <h4>Why Z-Image Turbo is default</h4>
+  <p>It's the rare model that combines Apache 2.0 licensing (no commercial use restrictions, no waterfall licensing of LoRAs to worry about), strong image quality competitive with FLUX schnell, and very fast inference. Released by Alibaba in mid-2025. The "Turbo" variant is distilled from a larger model and runs in 8 steps. <em>Default for new generations unless a specific reason exists to use FLUX.</em></p>
+
+  <h4>Why FLUX schnell still matters</h4>
+  <p>The FLUX LoRA ecosystem is enormous — hundreds of trained styles, characters, art directions on Civitai. Z-Image has almost no LoRA ecosystem yet. When Ken wants to use a specific LoRA, that LoRA was almost certainly trained against FLUX, so we need FLUX schnell to use it. Schnell is Apache 2.0, distilled to 4 steps, and most LoRAs trained on FLUX dev work transparently with schnell with minor scale adjustments.</p>
+
+  <h4>Why FLUX dev is still listed but rarely used</h4>
+  <p>FLUX dev produces the highest-quality output of the three but its license forbids commercial use of the output. Including it makes the pipeline complete (some users <em>do</em> have non-commercial use cases), but the SKILL.md is explicit: never use FLUX dev for Ken's commercial work. If asked to generate something for Grithkin or GripCraft, the AI should refuse FLUX dev or warn aggressively.</p>
+
+  <h3>What about other models?</h3>
+  <ul>
+    <li><strong>SDXL</strong> — older, lower quality than current FLUX/Z-Image, but Apache 2.0. We don't use it because schnell + Z-Image dominate it on every metric except LoRA ecosystem (where SDXL is still huge — but FLUX is catching up fast).</li>
+    <li><strong>SD3 / SD3.5</strong> — Stability's licensing requires revenue-based commercial licensing. Hard pass for a pipeline that wants "set it and forget it" commercial safety.</li>
+    <li><strong>Qwen-Image, Kolors</strong> — explored but didn't make the cut. Qwen-Image is permissively licensed but underwhelming; Kolors has murky commercial terms.</li>
+    <li><strong>Closed APIs (DALL-E 3, Imagen, Midjourney)</strong> — disqualified on the local-execution constraint and the rights-ownership constraint.</li>
+  </ul>
+
+  <h3>Runtime: mflux</h3>
+  <p>The runtime for all three models is <strong>mflux</strong>, an MLX-native port. See <a href="#why-mflux">section 18</a> for why mflux and not diffusers.</p>
+</section>
+
+<!-- ============ 05 — 3D MODELS ============ -->
+<section id="models-3d">
+  <div class="sec-num">05 · STACK</div>
+  <h2>3D models</h2>
+
+  <p>Two 3D generators supported. SF3D is default; TRELLIS.2 is optional.</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Model</th><th>License</th><th>Output</th><th>Speed</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>SF3D</strong><br>(default)</td>
+        <td>Stability Community License<br>(commercial OK under $1M ARR)</td>
+        <td>Textured GLB with PBR materials</td>
+        <td>~10–20s per asset after weights cached</td>
+        <td>Default for everything. Game assets, props, decorations. Solid for stylized work.</td>
+      </tr>
+      <tr>
+        <td><strong>TRELLIS.2</strong><br>(optional)</td>
+        <td>CC BY-NC 4.0 (non-commercial)</td>
+        <td>GLB with <strong>vertex colors only</strong> on Mac (PBR textures need nvdiffrast which has no Mac port)</td>
+        <td>~30–60s per asset</td>
+        <td>Higher-fidelity geometry for hero assets when textures don't matter. Non-commercial use only.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Why SF3D as default</h3>
+  <p>Three considerations stacked up:</p>
+
+  <ol>
+    <li><strong>Commercial safe at Ken's scale.</strong> Stability Community License permits commercial use up to $1M ARR. Ken's projects are far below that ceiling and likely to stay that way for years.</li>
+    <li><strong>PBR materials.</strong> SF3D outputs textured GLBs with full PBR maps (baseColor, normal, roughness, metallic). These import cleanly into Unity (with glTFast) and Unreal 5.1+ (native GLB support). TRELLIS on Mac gives vertex colors only, which look adequate in some engines and bad in others.</li>
+    <li><strong>Speed.</strong> SF3D is genuinely fast — sub-20-second generation after weights are cached. TRELLIS is 2–3× slower and produces inferior textures on Mac.</li>
+  </ol>
+
+  <h3>Why TRELLIS is still in the pipeline (and why it's optional)</h3>
+  <p>TRELLIS produces denser, sharper geometry than SF3D — sometimes meaningfully so for organic shapes (creatures, characters, sculptural pieces). When geometry quality matters more than commercial-safety (e.g., a personal art project), TRELLIS is the better tool. We keep it as an opt-in install because:</p>
+  <ul>
+    <li>The license blocks commercial use, so it can't be default</li>
+    <li>The Mac port is mature for geometry but stubs out texturing</li>
+    <li>The 15+ GB weight download is heavy if you're not going to use it</li>
+  </ul>
+
+  <h3>What about Hunyuan3D, InstantMesh, others?</h3>
+  <ul>
+    <li><strong>Hunyuan3D 2 / 2mini</strong> — explored extensively. Hunyuan3D-2mini is Apache 2.0 and produces great geometry, but the Mac port is less mature than SF3D's and the texture stage requires a separate pass. Currently not in the default pipeline but a reasonable future addition.</li>
+    <li><strong>InstantMesh</strong> — older. Surpassed by SF3D on quality.</li>
+    <li><strong>3DTopia, OpenLRM</strong> — explored, lower quality than SF3D or TRELLIS.</li>
+    <li><strong>Closed services (Meshy, CSM)</strong> — disqualified on local-execution.</li>
+  </ul>
+
+  <h3>The view-quality contract</h3>
+  <p>Both SF3D and TRELLIS work from a single 2D image. They internally compute multi-view representations but the input is one image. This means the 2D prompt has to convey enough 3D form information:</p>
+  <ul>
+    <li><strong>3/4 view</strong> is dramatically better than pure front or pure side</li>
+    <li><strong>Clean white/neutral background</strong> reduces background-bleed into geometry</li>
+    <li><strong>Even diffuse lighting</strong> avoids baked-in shadows that read as geometry</li>
+    <li><strong>Single subject, centered</strong> — multi-subject scenes confuse the back-projection</li>
+  </ul>
+  <p>The default game-asset prompt suffix in <code>concept.sh</code> encodes these — "3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed". This is intentionally opinionated for game-asset use; the <code>--no-game-prompt</code> flag disables it.</p>
+</section>
+
+<!-- ============ 06 — CLEANUP ============ -->
+<section id="cleanup">
+  <div class="sec-num">06 · STACK</div>
+  <h2>Cleanup &amp; repair</h2>
+
+  <p>Both SF3D and TRELLIS produce meshes that are <em>almost</em> game-ready but not quite. Cleanup happens via headless Blender Python scripts. Two distinct cleanup paths exist:</p>
+
+  <h3>Game-asset cleanup — <code>clean_asset.py</code></h3>
+  <p>Invoked automatically by <code>generate.sh</code> unless <code>--no-clean</code> is passed. Five-pass cleanup:</p>
+  <ol>
+    <li><strong>Import</strong> raw GLB</li>
+    <li><strong>Remove duplicate vertices</strong> (often produced by the 3D model's mesh extraction)</li>
+    <li><strong>Recalculate normals</strong> (outside, consistent)</li>
+    <li><strong>Decimate to target polycount</strong> (default 3000, configurable via <code>-p</code>)</li>
+    <li><strong>Apply transforms</strong> + normalize scale + center at origin</li>
+    <li><strong>Export</strong> as Y-up GLB (Unity / Unreal convention)</li>
+  </ol>
+
+  <h3>Print prep — <code>prepare_for_print.py</code></h3>
+  <p>Invoked by <code>print.sh</code>. Different concerns from game cleanup — game assets care about polycount and texturing; print assets care about manifold geometry and physical dimensions.</p>
+  <ol>
+    <li><strong>Import</strong> clean GLB</li>
+    <li><strong>Merge by distance</strong> (vertex weld)</li>
+    <li><strong>Recalculate normals + face orientation</strong></li>
+    <li><strong>Fill holes</strong> (size limit to avoid filling intentional gaps)</li>
+    <li><strong>3D Print Toolbox <code>print3d_clean_non_manifold</code></strong> if available — handles overlapping faces, self-intersections, internal walls</li>
+    <li><strong>Scale to mm</strong> — resize longest axis to <code>--size</code> in millimeters</li>
+    <li><strong>Translate</strong> lowest vertex to Z=0 (so Snapmaker Orca places it flat on the bed)</li>
+    <li><strong>Export</strong> binary STL</li>
+  </ol>
+
+  <h3>Why Blender, not pure Python (trimesh, open3d)?</h3>
+  <p>Three reasons:</p>
+  <ul>
+    <li><strong>Blender's mesh editing operators are battle-tested.</strong> Edge-collapse decimation, manifold repair, hole-filling — pure-Python equivalents exist but each has edge cases. Blender's been refined over decades.</li>
+    <li><strong>The 3D Print Toolbox</strong> ships with Blender and handles real-world print failure modes (zero-area faces, intersecting volumes, thin walls) better than anything else free.</li>
+    <li><strong>One install, two scripts.</strong> Adding trimesh + open3d + their dependencies (which conflict with the SF3D venv) just to avoid a Blender call isn't worth it.</li>
+  </ul>
+
+  <p>Tradeoff: Blender's startup time adds ~3–5 seconds per cleanup call. Acceptable in a pipeline where the model inference is the dominant cost.</p>
+
+  <h3>Blender version compatibility</h3>
+  <p>Both scripts handle the API differences between Blender 4.x (uses <code>wm.stl_export</code>) and 3.x (uses <code>export_mesh.stl</code>) with try/except blocks. Tested on 4.0–4.3.</p>
+</section>
+
+<!-- ============ 07 — PRINT STACK ============ -->
+<section id="printing">
+  <div class="sec-num">07 · STACK</div>
+  <h2>3D print stack</h2>
+
+  <p>The print path produces single-mesh STL files; coloring happens in the slicer, not the mesh.</p>
+
+  <h3>Why STL, not 3MF or OBJ</h3>
+  <ul>
+    <li><strong>STL is universally supported</strong> — every slicer handles it. 3MF is technically richer (embeds color, metadata) but adoption is uneven across slicers and the workflow benefit is small when Snapmaker Orca handles painting in-slicer anyway.</li>
+    <li><strong>Snapmaker Orca's per-region paint workflow</strong> means the source mesh doesn't need to carry color information — the user paints regions onto the imported model with a brush. So whatever color we'd encode in a 3MF would get thrown away.</li>
+    <li><strong>STL is simpler to debug</strong> — opens cleanly in Quick Look, in Preview, in countless online viewers.</li>
+  </ul>
+
+  <h3>Why Snapmaker U1 / Snapmaker Orca specifically</h3>
+  <dl class="facts">
+    <dt>Hardware</dt><dd>Ken owns a Snapmaker U1 — 4-toolhead, multi-color FDM printer. 270×270×270 mm build volume. Up to 300°C hotends supporting PLA, PETG, TPU, PVA.</dd>
+    <dt>Slicer</dt><dd>Snapmaker Orca is based on OrcaSlicer with U1-specific machine profiles. Plain OrcaSlicer works but loses the auto-calibration features.</dd>
+    <dt>Multi-color workflow</dt><dd>Paint regions of the imported STL with brush/triangle/fill tools. Each painted region maps to one filament. This is why the print script copies the original concept image alongside the STL — it's a visual reference for the painting step.</dd>
+  </dl>
+
+  <h3>Build-volume guardrails</h3>
+  <p>The print script enforces U1's 270 mm build limit:</p>
+  <ul>
+    <li>Above 270 mm on the longest axis: reject with error</li>
+    <li>Above 250 mm: warn but proceed (some non-longest axis might still exceed if the asset is awkward-shaped)</li>
+    <li>Below 250 mm: proceed silently</li>
+  </ul>
+
+  <p>The script does <em>not</em> currently check whether the non-longest axis exceeds 270 mm. This is a known gap — if a model is 200mm tall but 280mm wide, the script accepts it but the user finds out only in Orca. A future improvement would query the GLB's bounding box pre-scale and validate all three axes.</p>
+</section>
+
+<!-- ============ 08 — LICENSING ============ -->
+<section id="licensing">
+  <div class="sec-num">08 · STACK</div>
+  <h2>Licensing landscape</h2>
+
+  <p>This is the part most easily gotten wrong. The pipeline is engineered around a specific licensing thesis — commercial-safe by default, with explicit opt-in for non-commercial paths.</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Component</th><th>License</th><th>Commercial use?</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Z-Image Turbo</td><td>Apache 2.0</td><td><strong>Yes</strong>, unrestricted</td></tr>
+      <tr><td>FLUX schnell</td><td>Apache 2.0</td><td><strong>Yes</strong>, unrestricted</td></tr>
+      <tr><td>FLUX dev</td><td>FLUX.1 NC</td><td><strong>No</strong> — non-commercial only</td></tr>
+      <tr><td>SF3D</td><td>Stability Community License</td><td><strong>Yes</strong>, up to $1M ARR</td></tr>
+      <tr><td>TRELLIS.2</td><td>CC BY-NC 4.0</td><td><strong>No</strong> — non-commercial only</td></tr>
+      <tr><td>mflux runtime</td><td>MIT</td><td>Yes, unrestricted</td></tr>
+      <tr><td>Blender</td><td>GPL</td><td>Yes — outputs are not infected (free use of files Blender produced)</td></tr>
+      <tr><td>3D Print Toolbox</td><td>GPL (Blender add-on)</td><td>Yes — same as Blender; outputs aren't GPL'd</td></tr>
+      <tr><td>FLUX LoRAs</td><td>varies — usually CC-BY or MIT, sometimes NC</td><td>Per-LoRA review required</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>The commercial-safe default path</h3>
+  <p>Pipeline defaults are chosen so that running with no options produces commercial-safe output:</p>
+  <ul>
+    <li>2D default: Z-Image Turbo (Apache 2.0)</li>
+    <li>3D default: SF3D (Stability Community License, well under $1M)</li>
+    <li>Cleanup: Blender + 3D Print Toolbox (GPL, outputs not infected)</li>
+  </ul>
+
+  <p>The user has to explicitly opt into FLUX dev or TRELLIS to leave the commercial-safe zone. The SKILL.md instructs Claude to refuse these for Ken's commercial projects (Grithkin, GripCraft) or to warn loudly if asked.</p>
+
+  <h3>What the SKILL.md says vs. what Ken can override</h3>
+  <p>The skill is opinionated — if asked to "make a 3D model for Grithkin" using FLUX dev, the skill should either refuse or pivot to a commercial-safe alternative. If Ken explicitly says "use FLUX dev, I know it's non-commercial, this is just for me," the skill complies but notes the constraint. The default is protective.</p>
+
+  <div class="callout callout-decision">
+    <div class="callout-label">Why we don't include high-quality non-commercial options as defaults</div>
+    A pipeline that produces non-commercial output by default is a footgun. Even if the user knows the license today, an asset generated three months ago and used a year later in a commercial context creates legal risk. The asset manifest tracks which model produced each asset, so the constraint is queryable — but defaults still need to be safe.
+  </div>
+</section>
+
+<!-- ============ 09 — SYSTEM OVERVIEW ============ -->
+<section id="overview">
+  <div class="sec-num">09 · ARCHITECTURE</div>
+  <h2>System overview</h2>
+
+  <p>The pipeline is structured as three independent halves that chain, each with a CLI wrapper. The wrappers know about each other only through file outputs and the shared library.</p>
+
+  <div class="diagram">
+    user / Claude Code
+           │
+           ▼
+   ┌───────────────────┐
+   │  concept.sh       │  text → 2D image
+   │  generate.sh      │  2D image → 3D mesh (chained)
+   │  print.sh         │  3D mesh → STL (chained)
+   └───────────────────┘
+           │   sources
+           ▼
+   ┌───────────────────┐
+   │  _pipeline_lib.sh │  project detection, path resolution, config
+   └───────────────────┘
+           │   invokes
+           ▼
+   ┌──────────┬────────────┬──────────┐
+   │ mflux    │ SF3D       │ Blender  │
+   │ venv     │ TRELLIS.2  │ headless │
+   │          │ venv(s)    │          │
+   └──────────┴────────────┴──────────┘
+           │   produces
+           ▼
+   ┌───────────────────────────────────────────┐
+   │  outputs/
+   │    concept/  raw/  clean/  print/         │
+   │    asset_manifest.json                    │
+   └───────────────────────────────────────────┘
+           │   stages to (project mode only)
+           ▼
+   ┌──────────────────────────┐
+   │  Unity: Assets/Models/AI/
+   │  Unreal: Content/Models/AI/
+   └──────────────────────────┘
+  </div>
+
+  <h3>Component layers</h3>
+
+  <ol>
+    <li><strong>Drivers</strong> — Claude Code skill (primary), CLI direct invocation (secondary). Both go through the wrappers.</li>
+    <li><strong>Wrappers</strong> — <code>concept.sh</code>, <code>generate.sh</code>, <code>print.sh</code>. Provide CLI surface, parse args, resolve project context, invoke tool venvs, manage paths.</li>
+    <li><strong>Shared library</strong> — <code>_pipeline_lib.sh</code>. Project detection, JSON parsing, config defaults, name resolution. Sourced by all three wrappers.</li>
+    <li><strong>Tool runtimes</strong> — mflux (in mflux-env), SF3D (in stable-fast-3d/.venv), TRELLIS.2 (in trellis-mac/.venv), Blender (system-installed, called via subprocess). Each isolated.</li>
+    <li><strong>Blender helpers</strong> — <code>clean_asset.py</code> and <code>prepare_for_print.py</code>. Python scripts invoked by <code>blender --background --python</code>. Not directly callable.</li>
+    <li><strong>Manifest</strong> — <code>asset_manifest.json</code>. JSON index of every generated asset with provenance metadata.</li>
+    <li><strong>Auxiliary</strong> — <code>migrate_assets.sh</code> for moving global assets into projects; <code>update_manifest.py</code> as the manifest updater (lives in skill).</li>
+  </ol>
+
+  <h3>What flows where</h3>
+  <ul>
+    <li><strong>Text → concept.sh</strong> → PNG in <code>concept/</code></li>
+    <li><strong>PNG → generate.sh</strong> → GLB in <code>raw/</code>, then cleaned GLB in <code>clean/</code>, then (project mode) copied to engine folder</li>
+    <li><strong>GLB → print.sh</strong> → STL in <code>print/</code>, color reference PNG copied alongside</li>
+    <li><strong>Every generation → update_manifest.py</strong> → row added to <code>asset_manifest.json</code></li>
+  </ul>
+</section>
+
+<!-- ============ 10 — WRAPPERS ============ -->
+<section id="wrappers">
+  <div class="sec-num">10 · ARCHITECTURE</div>
+  <h2>Bash wrappers</h2>
+
+  <p>Three wrappers, each in <code>~/3d-pipeline/workspace/</code>. They follow a consistent structure.</p>
+
+  <h3>Common pattern</h3>
+  <ol>
+    <li>Parse args (long-form GNU-style: <code>--project</code>, <code>--model</code>, etc., with short aliases)</li>
+    <li>Source <code>_pipeline_lib.sh</code></li>
+    <li>Call <code>resolve_project_context</code> to set output paths</li>
+    <li>Print context to stdout (so the user / AI sees where outputs go)</li>
+    <li>Activate the relevant tool venv</li>
+    <li>Invoke the underlying tool (mflux command, SF3D run.py, Blender)</li>
+    <li>Deactivate venv</li>
+    <li>(Optional) Copy outputs to engine path if Unity/Unreal detected</li>
+    <li>Print final output path on last stdout line for shell chaining</li>
+  </ol>
+
+  <h3><code>concept.sh</code> — text to 2D</h3>
+  <dl class="facts">
+    <dt>Default model</dt><dd>Z-Image Turbo (configurable via <code>-m</code> or config <code>defaults.generator_2d</code>)</dd>
+    <dt>Default size</dt><dd>1024×1024 (configurable)</dd>
+    <dt>Prompt suffix</dt><dd>Appends game-asset suffix unless <code>--no-game-prompt</code></dd>
+    <dt>LoRA support</dt><dd>FLUX models only, via <code>-l</code> path</dd>
+    <dt>Output path</dt><dd><code>$ASSETS_ROOT/concept/&lt;name&gt;.png</code></dd>
+  </dl>
+
+  <h3><code>generate.sh</code> — 2D to 3D</h3>
+  <dl class="facts">
+    <dt>Default generator</dt><dd>SF3D (configurable via <code>-g</code> or config <code>defaults.generator_3d</code>)</dd>
+    <dt>Polycount</dt><dd>3000 default (configurable via <code>-p</code>)</dd>
+    <dt>Texture resolution</dt><dd>2048 default (SF3D only, configurable via <code>-t</code>)</dd>
+    <dt>Outputs</dt><dd><code>raw/&lt;name&gt;_raw.glb</code>, then <code>clean/&lt;name&gt;_clean.glb</code></dd>
+    <dt>Engine staging</dt><dd>In project mode with Unity/Unreal detected, also copies clean GLB to <code>$ENGINE_PATH/&lt;name&gt;.glb</code>. Suppress with <code>--no-engine-stage</code>.</dd>
+  </dl>
+
+  <h3><code>print.sh</code> — clean GLB to printable STL</h3>
+  <dl class="facts">
+    <dt>Required input</dt><dd>Clean GLB (typically from <code>clean/</code>)</dd>
+    <dt>Required size</dt><dd><code>-s</code> in mm (longest axis). No good default.</dd>
+    <dt>Outputs</dt><dd><code>print/&lt;name&gt;.stl</code> + <code>print/&lt;name&gt;_color_ref.png</code> (copy of concept image if present)</dd>
+    <dt>Hard limit</dt><dd>270 mm (U1 build volume); rejects sizes above</dd>
+  </dl>
+
+  <h3>Why bash, not Python or a CLI framework</h3>
+  <p>See <a href="#why-bash">section 15</a>.</p>
+</section>
+
+<!-- ============ 11 — SHARED LIB ============ -->
+<section id="shared-lib">
+  <div class="sec-num">11 · ARCHITECTURE</div>
+  <h2>Shared library: <code>_pipeline_lib.sh</code></h2>
+
+  <p>Pure bash, sourced (not run) by all three wrappers. Encapsulates everything related to project detection and configuration.</p>
+
+  <h3>Exported functions</h3>
+  <ul>
+    <li><code>is_unity_project &lt;dir&gt;</code> — checks for <code>Assets/</code> and <code>ProjectSettings/</code></li>
+    <li><code>is_unreal_project &lt;dir&gt;</code> — checks for <code>Content/</code> and <code>*.uproject</code></li>
+    <li><code>find_project_root &lt;starting_dir&gt;</code> — walks up looking for any project marker</li>
+    <li><code>json_get &lt;file&gt; &lt;dotted.path&gt;</code> — reads JSON via embedded Python (no jq dep)</li>
+    <li><code>resolve_project_context &lt;explicit_project&gt; &lt;pwd&gt;</code> — main entry, sets all path globals</li>
+    <li><code>config_default &lt;key&gt; &lt;fallback&gt;</code> — read <code>defaults.X</code> from config with fallback</li>
+    <li><code>resolve_name &lt;base&gt; &lt;dir&gt; &lt;ext&gt;</code> — applies prefix + collision suffix</li>
+    <li><code>print_context</code> — prints the "Project:" / "Assets:" header</li>
+  </ul>
+
+  <h3>Exported globals after <code>resolve_project_context</code></h3>
+  <ul>
+    <li><code>PROJECT_ROOT</code> — absolute path, or empty in global mode</li>
+    <li><code>PROJECT_MODE</code> — <code>"project"</code> or <code>"global"</code></li>
+    <li><code>PROJECT_ENGINE</code> — <code>"unity"</code>, <code>"unreal"</code>, or <code>"none"</code></li>
+    <li><code>PROJECT_CONFIG</code> — path to <code>.asset-pipeline.json</code> (may not exist)</li>
+    <li><code>ASSETS_ROOT</code> — where to write concept/raw/clean/print</li>
+    <li><code>ENGINE_PATH</code> — final engine destination (empty if engine="none")</li>
+    <li><code>MANIFEST_PATH</code> — where to read/write the manifest</li>
+    <li><code>NAME_PREFIX</code> — optional filename prefix from config</li>
+    <li><code>AUTO_INCREMENT</code> — <code>"1"</code> or <code>"0"</code></li>
+  </ul>
+
+  <h3>Why Python-via-bash-heredoc for JSON, not jq?</h3>
+  <p>jq is fast and elegant but requires a separate install. Python 3 is guaranteed to be present (the user already has it for SF3D / mflux). The <code>json_get</code> function embeds a small Python script via heredoc — adds maybe 50ms per call. Acceptable when called a handful of times per wrapper invocation.</p>
+
+  <div class="callout callout-context">
+    <div class="callout-label">Performance note</div>
+    Each <code>json_get</code> call spawns a Python interpreter. In a wrapper that reads 4-5 config values, that's ~250ms total. Not a problem for interactive use but would be if anything ran in a tight loop. The wrappers never do, so this is fine.
+  </div>
+</section>
+
+<!-- ============ 12 — PROJECT AWARE ============ -->
+<section id="project-aware">
+  <div class="sec-num">12 · ARCHITECTURE</div>
+  <h2>Project awareness</h2>
+
+  <p>The single biggest architectural decision after the initial pipeline shipped. The original version had hardcoded <code>~/3d-pipeline/workspace/</code> paths. Project awareness was added to support a more natural workflow when working on specific games.</p>
+
+  <h3>What problem it solves</h3>
+  <p>Before: every asset went into one shared workspace. Names collided. Project boundaries didn't exist. Assets for Grithkin and the pickleball app mingled. Git couldn't version assets with their source project.</p>
+
+  <p>After: outputs land in <code>&lt;project&gt;/assets/</code>. Unity / Unreal projects also get auto-staging into their native engine folders. Each project gets its own manifest. Naming prefix lets projects assert ownership of their assets.</p>
+
+  <h3>Detection priority (in order)</h3>
+  <ol>
+    <li><code>--project PATH</code> explicit flag</li>
+    <li><code>PROJECT_ROOT</code> environment variable</li>
+    <li>Walk up from <code>$PWD</code> looking for <code>.asset-pipeline.json</code></li>
+    <li>Walk up looking for Unity markers (<code>Assets/</code> + <code>ProjectSettings/</code>)</li>
+    <li>Walk up looking for Unreal markers (<code>Content/</code> + <code>*.uproject</code>)</li>
+    <li>Fall back to global workspace</li>
+  </ol>
+
+  <p>Each step short-circuits on first match. "Closest match wins" — a nested <code>.asset-pipeline.json</code> beats a parent Unity project root.</p>
+
+  <h3>Configuration: <code>.asset-pipeline.json</code></h3>
+  <p>All fields optional. <code>{}</code> is valid and useful — it just marks a directory as a project.</p>
+  <pre>{
+  "engine": "unity" | "unreal" | "none",
+  "engine_path": "Assets/Models/AI",
+  "defaults": {
+    "generator_2d": "z-image-turbo",
+    "generator_3d": "sf3d",
+    "polycount": 3000,
+    "texture_resolution": 2048,
+    "lora": null
+  },
+  "naming": {
+    "prefix": "",
+    "auto_increment_collisions": true
+  }
+}</pre>
+
+  <h3>Why Option A: <code>project/assets/...</code> + engine override</h3>
+  <p>Three layouts were considered:</p>
+  <ul>
+    <li><strong>A</strong> — <code>project/assets/{concept,raw,clean,print}/</code> with engine override hook (chosen)</li>
+    <li><strong>B</strong> — <code>project/.pipeline/...</code> hidden; clean GLBs go straight into engine folder</li>
+    <li><strong>C</strong> — <code>project/asset-pipeline/...</code> with explicit folder name</li>
+  </ul>
+
+  <p>A won because:</p>
+  <ul>
+    <li><strong>Intermediates are inspectable.</strong> A hidden <code>.pipeline/</code> folder makes "what did the AI generate?" harder.</li>
+    <li><strong>Engine staging is additive.</strong> Clean GLBs live in <code>assets/clean/</code> (the canonical version) <em>and</em> are copied into <code>Assets/Models/AI/</code>. Both files exist. The canonical one is preserved even if the user accidentally deletes the engine copy.</li>
+    <li><strong>Non-engine projects work.</strong> A folder with just <code>.asset-pipeline.json</code> and no engine markers still gets <code>assets/</code> structure.</li>
+  </ul>
+
+  <h3>The auto-staging design</h3>
+  <p>When <code>generate.sh</code> runs in project mode with Unity or Unreal detected, the cleaned GLB is automatically copied to the engine's native folder. The user doesn't need to do a separate copy step. This is a meaningful UX win — the file appears in the Unity / Unreal editor's Project window without intervention.</p>
+
+  <p>The engine copy is named <code>&lt;name&gt;.glb</code> (without the <code>_clean</code> suffix) — the engine doesn't care about internal naming and the cleaner filename is what'll show up in the editor.</p>
+
+  <p><code>--no-engine-stage</code> opts out per-invocation; <code>"engine": "none"</code> in config opts out per-project.</p>
+
+  <h3>Cross-project sharing</h3>
+  <p>Currently not supported. Ken noted this as a future possibility but said "most projects are in one git repo each, sharing is uncommon." When the need arises, the right solution is probably symlinks or a shared <code>~/3d-pipeline/library/</code> that projects reference by symlink. Don't build this until there's a clear use case — symlinks complicate migration scripts and manifest paths.</p>
+</section>
+
+<!-- ============ 13 — SKILL ============ -->
+<section id="skill">
+  <div class="sec-num">13 · ARCHITECTURE</div>
+  <h2>The Claude Code skill</h2>
+
+  <p>Lives at <code>~/.claude/skills/asset-pipeline/</code>. Two files: <code>SKILL.md</code> and <code>scripts/update_manifest.py</code>.</p>
+
+  <h3>SKILL.md role</h3>
+  <p>SKILL.md is what Claude Code loads when the skill triggers. It's <em>opinionated documentation</em> aimed at Claude itself — describing when to use the skill, what flows exist, how to handle project context, what defaults to apply, and what to refuse.</p>
+
+  <p>Critical things SKILL.md tells Claude:</p>
+  <ul>
+    <li><strong>Don't try to detect projects yourself</strong> — the wrappers do this; let them.</li>
+    <li><strong>Tell the user where outputs land</strong> before running, so they can object before files are created in the wrong place.</li>
+    <li><strong>Refuse non-commercial models</strong> for Ken's commercial projects (Grithkin, GripCraft) unless explicitly overridden.</li>
+    <li><strong>Suggest <code>.asset-pipeline.json</code> creation</strong> when the user repeats the same overrides multiple times.</li>
+    <li><strong>Update the manifest after every generation</strong> via <code>update_manifest.py</code>.</li>
+    <li><strong>Ask about print size</strong> before running <code>print.sh</code> — don't default silently to 50mm without confirmation.</li>
+  </ul>
+
+  <h3>Why a skill, not a wrapper Claude calls?</h3>
+  <p>See <a href="#why-skill">section 17</a>.</p>
+
+  <h3>Skill triggers</h3>
+  <p>The <code>description</code> field in SKILL.md frontmatter determines when Claude activates the skill. It includes triggers for:</p>
+  <ul>
+    <li>Direct asset-generation requests: "make a 3D X", "generate a 2D X", "convert this image to 3D"</li>
+    <li>Print requests: "make me an STL", "print this", "Snapmaker"</li>
+    <li>Tool mentions: "SF3D", "FLUX", "Z-Image", "TRELLIS"</li>
+    <li>Engine-related: "import this into Unity", "put this in Unreal"</li>
+  </ul>
+
+  <p>The skill is intentionally hungry — it activates broadly because the cost of activating when the user didn't mean to is small (Claude can decide not to use the wrappers), but the cost of <em>not</em> activating when the user wanted it is meaningful (Claude tries to do everything by hand and gets it wrong).</p>
+</section>
+
+<!-- ============ 14 — MANIFEST ============ -->
+<section id="manifest">
+  <div class="sec-num">14 · ARCHITECTURE</div>
+  <h2>The asset manifest</h2>
+
+  <p><code>asset_manifest.json</code> is a JSON index of every generated asset. Lives in <code>$ASSETS_ROOT/asset_manifest.json</code> — global workspace in global mode, project's <code>assets/</code> in project mode.</p>
+
+  <h3>Schema</h3>
+  <pre>{
+  "version": 1,
+  "assets": [
+    {
+      "name": "treasure_chest",
+      "concept_path": "concept/treasure_chest.png",
+      "raw_path": "raw/treasure_chest_raw.glb",
+      "clean_path": "clean/treasure_chest_clean.glb",
+      "stl_path": "print/treasure_chest.stl",
+      "stl_size_mm": 50,
+      "engine_path": "Assets/Models/AI/treasure_chest.glb",
+      "generator": "sf3d",
+      "polycount": 3000,
+      "category": "prop",
+      "notes": "Wooden chest with iron bands",
+      "created": "2026-05-18T20:13:42Z"
+    }
+  ]
+}</pre>
+
+  <h3>Updater: <code>update_manifest.py</code></h3>
+  <p>Lives in the skill, not the workspace. Called by Claude after each generation. Idempotent — re-running with the same <code>--name</code> updates the existing entry rather than duplicating. Optional fields (e.g., <code>stl_path</code> on a 2D-only asset) are omitted.</p>
+
+  <h3>Why it lives in the skill, not the workspace</h3>
+  <p>The manifest updater is part of the AI driver layer, not the pipeline tools. The wrappers don't update the manifest themselves — they just write asset files. The skill makes the call. This separation lets the user run wrappers manually without polluting the manifest if they're just experimenting.</p>
+
+  <p>Downside: the skill needs to know the manifest path, which means the skill needs to know about project context. SKILL.md describes the manifest-path-resolution logic in plain prose so Claude can construct the right path.</p>
+</section>
+
+<!-- ============ 15 — WHY BASH ============ -->
+<section id="why-bash">
+  <div class="sec-num">15 · DECISIONS</div>
+  <h2>Why bash, not Python</h2>
+
+  <p>The wrappers are written in bash. This is a deliberate choice. Three reasons.</p>
+
+  <div class="tradeoff">
+    <div class="gained">
+      <h5>Why bash wins</h5>
+      <ul>
+        <li>Bash is the lingua franca of CLI tools — every developer reads it</li>
+        <li>Activating venvs is trivial (<code>source venv/bin/activate</code>) vs. Python's <code>subprocess.run</code> dance</li>
+        <li>No "which Python version does this wrapper run with" question</li>
+        <li>Chaining outputs across tools is idiomatic (<code>$(concept.sh ...)</code>)</li>
+        <li>Bash heredocs let us embed Python snippets for JSON parsing inline</li>
+        <li>The pipeline crosses Python venvs that have <em>different</em> Python versions and conflicting deps — orchestrating from outside any of them is cleaner</li>
+      </ul>
+    </div>
+    <div class="sacrificed">
+      <h5>What we sacrifice</h5>
+      <ul>
+        <li>Type safety on args (we get strings, period)</li>
+        <li>Sophisticated arg parsing (no argparse / click — we hand-roll case statements)</li>
+        <li>Cross-platform portability (we're macOS-only anyway)</li>
+        <li>Easy unit testing (bash is harder to test than Python)</li>
+        <li>Helper libraries (no requests, no pathlib — we use coreutils)</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>The decisive factor: orchestrating across multiple isolated Python venvs is awkward from any single one of them. Bash sits outside all of them and activates each as needed.</p>
+
+  <h3>What about a Python "outer" wrapper?</h3>
+  <p>Considered. The objection is that the outer wrapper would itself need a Python install with its own deps (yaml? toml? click?), creating a fifth Python environment for users to set up. The benefit is marginal — we don't have complex enough arg parsing to need argparse. Bash's <code>case</code> on long options is verbose but readable.</p>
+
+  <h3>What about Just / Make / Task?</h3>
+  <p>Also considered. They'd add a tool dependency for users to install. For three wrappers that are mostly straight-line scripts, the indirection isn't worth it.</p>
+
+  <h3>When this would change</h3>
+  <p>If the wrappers grew significantly more complex — say, parallel sub-tasks, progress tracking, retry logic, structured output — Python with click would start to win. We're well below that threshold today.</p>
+</section>
+
+<!-- ============ 16 — WHY VENVS ============ -->
+<section id="why-venvs">
+  <div class="sec-num">16 · DECISIONS</div>
+  <h2>Why one venv per tool</h2>
+
+  <p>The pipeline maintains separate venvs for SF3D, TRELLIS.2, and mflux. Not one shared "asset pipeline" venv. Reasons:</p>
+
+  <h3>Dependency conflicts</h3>
+  <p>SF3D pins <code>setuptools==69.5.1</code>, <code>numpy==1.26.4</code>, <code>gpytoolbox==0.3.3</code>, and a specific torch version. mflux is built on MLX and prefers more recent numpy. TRELLIS has its own constraints. Putting them in one venv hits version conflicts immediately.</p>
+
+  <h3>Failure isolation</h3>
+  <p>If SF3D's install breaks (and it often does — see <a href="#failures">section 20</a>), it doesn't affect mflux. The user can have a working 2D generator while debugging the 3D side.</p>
+
+  <h3>Upgrade independence</h3>
+  <p>Each tool ships releases on its own schedule. Upgrading SF3D shouldn't risk breaking the FLUX install. Independent venvs make per-tool upgrade safe.</p>
+
+  <h3>Cost</h3>
+  <p>Three venvs ≈ 4-5 GB of disk for duplicated PyTorch installs. Negligible on a Mac with 4 TB SSD. Worth it for the isolation.</p>
+
+  <div class="callout callout-rationale">
+    <div class="callout-label">Why not a single fat venv with extras_require?</div>
+    Considered. The blocker is that some of these tools (notably SF3D) have unstable installs that need workarounds (gpytoolbox version bump, --no-build-isolation flag, cmake prerequisite). Asking users to run all of those during a single shared install is far more error-prone than three independent install steps. Plus, mflux uses MLX which depends on Apple's specific Python build — mixing it with vendored CUDA-flavor torch wheels gets weird fast.
+  </div>
+</section>
+
+<!-- ============ 17 — WHY SKILL ============ -->
+<section id="why-skill">
+  <div class="sec-num">17 · DECISIONS</div>
+  <h2>Why a Claude Code skill, not a CLI Claude can call</h2>
+
+  <p>The pipeline could be exposed to Claude in two ways:</p>
+  <ul>
+    <li><strong>As tool calls</strong> — Claude invokes <code>concept.sh</code> / <code>generate.sh</code> / <code>print.sh</code> directly via bash tool. No skill needed.</li>
+    <li><strong>As a skill</strong> — SKILL.md sits in <code>~/.claude/skills/</code> and provides Claude with structured instructions about <em>when</em> and <em>how</em> to use the pipeline.</li>
+  </ul>
+
+  <p>We chose the skill approach.</p>
+
+  <h3>Why</h3>
+  <ul>
+    <li><strong>The pipeline has opinions.</strong> "Refuse FLUX dev for commercial projects." "Ask about print size before running print.sh." "Don't try to detect projects yourself — the wrappers do it." Without a skill, Claude has to derive these opinions from context every time. With a skill, they're encoded once and apply consistently.</li>
+    <li><strong>The flows have implicit structure.</strong> Text → 2D → 3D → STL is five distinct flows that share intermediates. A skill can describe them as a coherent set. Tool-call-only would force Claude to re-derive the flow structure each time.</li>
+    <li><strong>The skill becomes documentation.</strong> Even when not actively driving, SKILL.md is the canonical description of how to use the pipeline. The setup guide tells humans; SKILL.md tells AIs.</li>
+    <li><strong>Triggers extend reach.</strong> SKILL.md's description field tells Claude when to engage. Without it, Claude needs explicit "use the pipeline for this" prompts.</li>
+  </ul>
+
+  <h3>The hybrid reality</h3>
+  <p>Inside the skill, Claude still does tool calls — it runs the wrappers via bash. The skill provides structured guidance; the bash tool provides execution. Skill + tools is the right composition.</p>
+</section>
+
+<!-- ============ 18 — WHY MFLUX ============ -->
+<section id="why-mflux">
+  <div class="sec-num">18 · DECISIONS</div>
+  <h2>Why mflux, not diffusers</h2>
+
+  <p>HuggingFace's <code>diffusers</code> library is the standard for running Stable Diffusion-family models in Python. We use <code>mflux</code> instead. Reasons:</p>
+
+  <h3>MLX-native vs. MPS</h3>
+  <p>diffusers runs on PyTorch with the MPS backend. MPS is Apple's PyTorch backend that delegates to Metal — but it's incomplete. Many ops fall back to CPU silently, dragging down performance. mflux uses Apple's MLX directly, which is purpose-built for Apple Silicon.</p>
+
+  <p>Concrete impact: FLUX schnell takes ~5-15s per image on mflux. On diffusers with MPS, it's 30-60s for the same image. The speed difference is the whole reason the workflow feels interactive.</p>
+
+  <h3>Quantization built-in</h3>
+  <p>mflux ships with int4 / int8 quantization that just works (<code>-q 4</code> or <code>-q 8</code>). diffusers requires bitsandbytes which has spotty Mac support.</p>
+
+  <h3>Memory efficiency</h3>
+  <p>mflux is engineered for unified memory. It releases weights aggressively between generation steps. diffusers tends to hold more state and can OOM on Mac with smaller RAM.</p>
+
+  <h3>Coverage</h3>
+  <p>mflux supports FLUX schnell, FLUX dev, Z-Image Turbo, Qwen Image, and a growing list of models. The maintainer is responsive to new releases — Z-Image support landed within weeks of the model's release.</p>
+
+  <div class="callout callout-context">
+    <div class="callout-label">What we lose</div>
+    diffusers has more knobs (advanced schedulers, custom pipelines, attention mechanisms). mflux is opinionated about what it exposes. For our use case (text-to-image with optional LoRA), that's fine — the simpler API helps more than the missing knobs hurt.
+  </div>
+</section>
+
+<!-- ============ 19 — TRELLIS OPTIONAL ============ -->
+<section id="why-trellis-optional">
+  <div class="sec-num">19 · DECISIONS</div>
+  <h2>Why TRELLIS is optional</h2>
+
+  <p>TRELLIS.2 is listed as "Step 04 (optional)" in the setup guide. Three reasons it's not default:</p>
+
+  <h3>License blocks commercial use</h3>
+  <p>CC BY-NC 4.0. Can't ship TRELLIS-generated assets in Grithkin or GripCraft. For Ken's primary use case, it's blocked.</p>
+
+  <h3>Mac port is incomplete</h3>
+  <p>The original TRELLIS uses nvdiffrast for texture baking. nvdiffrast has no Mac port. The Mac fork stubs it out, falling back to vertex colors. The result is sharper geometry but visibly worse surface appearance than SF3D's full PBR. For most game-asset uses, this is a meaningful step down.</p>
+
+  <h3>15 GB+ of weights to download</h3>
+  <p>SF3D ships ~2 GB. TRELLIS is closer to 15 GB. Including TRELLIS by default would significantly extend first-run setup time. Making it optional means users who don't need it don't pay the cost.</p>
+
+  <h3>When TRELLIS still earns its keep</h3>
+  <ul>
+    <li>Personal / non-commercial art projects where geometry matters more than texture</li>
+    <li>Organic shapes (creatures, characters) where TRELLIS's denser triangulation reads better</li>
+    <li>Source meshes for further sculpting in Blender / ZBrush — when texture won't survive anyway</li>
+  </ul>
+</section>
+
+<!-- ============ 20 — FAILURES ============ -->
+<section id="failures">
+  <div class="sec-num">20 · ROUGH EDGES</div>
+  <h2>Setup failures we've already hit</h2>
+
+  <p>These are real failure modes encountered during Ken's setup. Each is now baked into the setup guide as either a prerequisite step or a troubleshooting card. Future AIs should know these are <em>not</em> hypothetical — they will happen again.</p>
+
+  <h3>PEP 668 — "externally-managed-environment"</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    <code>pip3 install --user huggingface_hub</code> fails with "externally-managed-environment" error on modern macOS.
+  </div>
+  <p><strong>Cause:</strong> Homebrew's Python now enforces PEP 668, blocking system-wide pip installs.</p>
+  <p><strong>Fix:</strong> Use <code>pipx install huggingface_hub</code> instead. After <code>brew install pipx &amp;&amp; pipx ensurepath</code>, the user must <strong>close and reopen Terminal</strong> for the new PATH to take effect.</p>
+
+  <h3>Python 3.11 not found by Homebrew</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    <code>python3.11 -m venv .venv</code> reports command not found, even after <code>brew install python@3.11</code>.
+  </div>
+  <p><strong>Cause:</strong> Homebrew installed Python 3.12, 3.13, or 3.14 instead of 3.11, or installed 3.11 as keg-only.</p>
+  <p><strong>Fix:</strong> Check what's available with <code>ls /opt/homebrew/bin/python3*</code> and use whichever Python 3.10-3.12 is on PATH. SF3D works with all three. The setup guide is version-agnostic.</p>
+
+  <h3>SF3D fails: "No module named 'torch'" during texture_baker build</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    <code>pip install -r requirements.txt</code> fails compiling <code>texture_baker</code> with ModuleNotFoundError: torch.
+  </div>
+  <p><strong>Cause:</strong> texture_baker's build script imports torch at compile time but doesn't declare torch as a build dependency. PEP 517 build isolation hides the venv's torch from the build subprocess.</p>
+  <p><strong>Fix:</strong> Add <code>--no-build-isolation</code> to the pip command.</p>
+
+  <h3>gpytoolbox build fails: "CMake must be installed"</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    Building wheel for gpytoolbox fails with CMake not found.
+  </div>
+  <p><strong>Cause:</strong> gpytoolbox uses CMake for its C++ extensions. CMake isn't a default Homebrew install.</p>
+  <p><strong>Fix:</strong> <code>brew install cmake</code> before retrying pip install.</p>
+
+  <h3>gpytoolbox 0.2.0 sdist missing CMakeLists.txt</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    Even with CMake installed, gpytoolbox 0.2.0 build fails with "no CMakeLists.txt" — the PyPI sdist is incomplete.
+  </div>
+  <p><strong>Cause:</strong> SF3D pins gpytoolbox 0.2.0, but that version's PyPI tarball is missing its C++ source files. Known upstream packaging bug.</p>
+  <p><strong>Fix:</strong> Before running pip install, <code>sed -i '' 's/gpytoolbox==0.2.0/gpytoolbox==0.3.3/' requirements.txt</code> to bump to a version with prebuilt wheels. 0.3.3 is API-compatible with what SF3D needs.</p>
+
+  <h3>zsh: comment-line parse errors when pasting multi-line blocks</h3>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Symptom</div>
+    Pasting a code block with <code>#</code> comments and brace expansions (<code>{a,b}</code>) into zsh produces "command not found: #" and "unknown file attribute" errors.
+  </div>
+  <p><strong>Cause:</strong> zsh's <code>INTERACTIVE_COMMENTS</code> is off by default, so <code>#</code> at the prompt is parsed as a command. And brace expansion mid-line-continuation confuses zsh.</p>
+  <p><strong>Fix:</strong> <code>echo 'setopt INTERACTIVE_COMMENTS' &gt;&gt; ~/.zshrc &amp;&amp; source ~/.zshrc</code>. The setup guide now recommends single-line forms for commands that need to be pasted directly.</p>
+
+  <div class="callout callout-rationale">
+    <div class="callout-label">Pattern</div>
+    These failures share a common theme: <strong>modern macOS and Homebrew have gotten stricter about Python installs, and SF3D's build system has accumulated bit-rot</strong>. The setup guide bakes every workaround into the linear instructions — users following the guide top-to-bottom shouldn't hit any of these. Users improvising will.
+  </div>
+</section>
+
+<!-- ============ 21 — RUNTIME ISSUES ============ -->
+<section id="runtime-issues">
+  <div class="sec-num">21 · ROUGH EDGES</div>
+  <h2>Runtime failure modes</h2>
+
+  <h3>Wrong project detected</h3>
+  <p>User is in a nested git checkout inside a Unity project. The wrapper detects the outer Unity project but the user wanted assets to land in the nested directory. Solutions:</p>
+  <ul>
+    <li>Pass <code>--project /correct/path</code> explicitly</li>
+    <li>Drop <code>.asset-pipeline.json</code> in the intended project root (closer match wins)</li>
+    <li>Tell Claude "use the global workspace for this" to bypass detection</li>
+  </ul>
+
+  <h3>Engine path collision</h3>
+  <p>Auto-staging copies cleaned GLB to <code>Assets/Models/AI/&lt;name&gt;.glb</code>. If the user already has a hand-authored asset there with the same name, the copy overwrites it. There's no warning. <strong>This is a known sharp edge.</strong></p>
+  <p>The intended mitigation: <code>auto_increment_collisions</code> in the config (which currently applies to intermediate filenames but not engine-staged copies). A future improvement would extend collision-checking to the engine path too.</p>
+
+  <h3>Out-of-memory during generation</h3>
+  <p>On a 16 GB Mac, FLUX schnell q8 + Blender background process can push past RAM. Symptoms: macOS aggressively swaps, generation takes 5-10x longer than expected.</p>
+  <p>Mitigations: use q4 quantization, close Blender between runs, or accept the slowdown. The 128 GB target machine doesn't have this problem.</p>
+
+  <h3>SF3D texture-baker stalls</h3>
+  <p>Rare but seen: SF3D's texture baking stage hangs indefinitely. Cause unknown — possibly a Metal kernel bug. Killing the process and re-running usually works.</p>
+
+  <h3>Mesh comes out flat / 1D</h3>
+  <p>SF3D and TRELLIS both occasionally produce degenerate output — a flat plane or a thin sliver instead of a recognizable 3D shape. Causes:</p>
+  <ul>
+    <li>2D input has too little 3D form information (pure front view, complex background)</li>
+    <li>2D input is a clipart-style image with hard edges and no gradients</li>
+    <li>Subject is at an unusual scale relative to the frame</li>
+  </ul>
+  <p>Fix: regenerate the 2D concept with the game-asset prompt suffix, ensure 3/4 view, clean background, even lighting. The default <code>concept.sh</code> suffix encodes these.</p>
+
+  <h3>STL won't slice in Snapmaker Orca</h3>
+  <p>Symptoms: Orca reports "model is not manifold," refuses to slice, or produces a path with visible gaps. Cause: the 3D Print Toolbox repair pass didn't catch all non-manifold geometry.</p>
+  <p>Mitigations: try Orca's own "Repair Model" right-click action, or regenerate with a higher polycount (lower decimation = fewer manifold issues).</p>
+</section>
+
+<!-- ============ 22 — KNOWN LIMITS ============ -->
+<section id="known-limits">
+  <div class="sec-num">22 · ROUGH EDGES</div>
+  <h2>Known limitations</h2>
+
+  <p>Things the pipeline doesn't do, by current design. Knowing these prevents an AI from making promises it can't keep.</p>
+
+  <h3>Architectural limits</h3>
+  <ul>
+    <li><strong>No cross-project asset sharing.</strong> One project, one assets folder. Symlinks aren't built in.</li>
+    <li><strong>No multi-image input.</strong> Both SF3D and TRELLIS take a single 2D image. There's no way to feed multiple views.</li>
+    <li><strong>No animation.</strong> Static meshes only. No rigging, no skinning, no keyframes.</li>
+    <li><strong>No texture editing.</strong> Generated textures are use-as-is. No upscaling pass, no detail enhancement.</li>
+    <li><strong>No "regenerate variation" of a 3D asset.</strong> If the chest came out wrong, you regenerate from a new 2D concept. There's no img2img-equivalent for 3D.</li>
+  </ul>
+
+  <h3>Hardware limits</h3>
+  <ul>
+    <li><strong>Mac only.</strong> No Linux, no Windows. PyTorch CUDA paths aren't supported.</li>
+    <li><strong>Tested on M-series.</strong> Intel Macs not supported (and would be too slow to be useful anyway).</li>
+    <li><strong>Snapmaker U1 only for print sizing.</strong> Other printers work fine for slicing the produced STLs but the 270mm build-volume check is U1-specific.</li>
+  </ul>
+
+  <h3>Software limits</h3>
+  <ul>
+    <li><strong>No web UI.</strong> CLI + AI driver only.</li>
+    <li><strong>No batch processing</strong> beyond <code>-n &lt;count&gt;</code> on concept generation.</li>
+    <li><strong>No undo.</strong> Generated files are real files. Manifest tracks them, but reverting to a previous state requires manual git.</li>
+    <li><strong>No remote execution.</strong> Pipeline runs on the local machine; no way to offload to a different machine.</li>
+    <li><strong>No incremental texture detail.</strong> Texture resolution is set once per generation. Want higher detail? Regenerate from scratch.</li>
+  </ul>
+
+  <h3>Print-quality limits</h3>
+  <ul>
+    <li><strong>The print prep does manifold repair, not artistic enhancement.</strong> If a model has thin filaments or impossible overhangs, the print prep won't fix them — it'll just make them manifold. The user has to design around print constraints in the 2D prompt.</li>
+    <li><strong>Color is slicer-side.</strong> Multi-color prints require manual painting in Snapmaker Orca. The pipeline doesn't auto-segment the mesh by color.</li>
+  </ul>
+</section>
+
+<!-- ============ 23 — HOW TO HELP ============ -->
+<section id="how-to-help">
+  <div class="sec-num">23 · WORKING WITH THIS</div>
+  <h2>How to help the user effectively</h2>
+
+  <p>If you're an AI assistant tasked with helping Ken use, modify, or extend this pipeline, here's the operational guidance distilled from everything above.</p>
+
+  <h3>When generating an asset</h3>
+  <ol>
+    <li><strong>Don't try to detect projects yourself.</strong> The wrappers do this. Just run them and let them report context.</li>
+    <li><strong>Announce where outputs will land</strong> before generating. "I'll route this into your Grithkin project under <code>assets/concept/</code>." Gives the user a chance to object before files are written.</li>
+    <li><strong>Use Z-Image Turbo for 2D unless there's a specific reason for FLUX.</strong> It's commercial-safe, fast, and the highest-leverage default.</li>
+    <li><strong>Use SF3D for 3D unless the user explicitly wants TRELLIS.</strong> Same reasoning.</li>
+    <li><strong>Ask about print size</strong> before running <code>print.sh</code>. Don't assume 50mm silently — it's a creative choice.</li>
+    <li><strong>Update the manifest</strong> after every generation via <code>update_manifest.py</code>.</li>
+  </ol>
+
+  <h3>When the user wants to modify the pipeline</h3>
+  <ol>
+    <li><strong>Read this document first.</strong> Many "modifications" the user might request are actually already supported (config file, env vars, flags). Check before building.</li>
+    <li><strong>Preserve the commercial-safe default path.</strong> Adding a new 3D model with a permissive license? Great. Adding one with a non-commercial restriction? It can be supported but should be opt-in, not default.</li>
+    <li><strong>Don't break the wrapper interfaces.</strong> Existing flags and behaviors are relied upon by both Ken's manual use and Claude's automated use. Additive changes are safe; subtractive changes break workflows.</li>
+    <li><strong>Test in both global and project modes.</strong> Any change to the wrappers should work in both. The library handles routing; the wrapper invokes it once and uses the resolved paths.</li>
+    <li><strong>Keep failure modes explicit.</strong> If a new feature can fail, document the failure in the troubleshooting cards in the setup guide.</li>
+  </ol>
+
+  <h3>When the user is debugging</h3>
+  <ol>
+    <li><strong>Check the wrapper's context header first.</strong> The first lines of stdout tell you which mode the wrapper detected and where it'll write. Half of "wrong output location" issues are project-detection surprises.</li>
+    <li><strong>Validate <code>.asset-pipeline.json</code> with <code>python3 -m json.tool</code></strong> — malformed config silently falls back to defaults, which looks like "config is ignored."</li>
+    <li><strong>Check the manifest.</strong> The manifest knows what was generated, with what model, at what size. Use it to retrace history.</li>
+    <li><strong>Don't suggest reinstalling everything.</strong> The setup is fragile to recreate (see <a href="#failures">section 20</a>). Diagnose surgically.</li>
+    <li><strong>For SF3D weirdness, regenerate the 2D first.</strong> Most 3D issues trace back to a low-quality 2D input.</li>
+  </ol>
+
+  <h3>When the user is exploring</h3>
+  <ol>
+    <li><strong>Generate inside a temporary directory or /tmp</strong> for experiments — keeps the project's assets folder clean.</li>
+    <li><strong>The global workspace is your friend for one-offs.</strong> <code>cd ~</code> + run wrappers = falls back to global.</li>
+    <li><strong>Use <code>-n &lt;count&gt;</code> for cheap variations.</strong> Z-Image at 8 steps is fast; trying 4 variations costs about a minute.</li>
+  </ol>
+</section>
+
+<!-- ============ 24 — EXTENSION POINTS ============ -->
+<section id="extension-points">
+  <div class="sec-num">24 · WORKING WITH THIS</div>
+  <h2>Extension points</h2>
+
+  <p>Places the pipeline is designed to be extended cleanly. If Ken wants to add functionality, here's where it should slot in.</p>
+
+  <h3>Adding a new 2D model</h3>
+  <ol>
+    <li>Confirm it's supported by mflux (or accept that you'll bypass mflux and have a separate wrapper path)</li>
+    <li>Add a case to <code>concept.sh</code>'s model validation and dispatch</li>
+    <li>Add the model to the SKILL.md description for licensing context</li>
+    <li>Document in the setup guide's Reference R1 (Model selection)</li>
+    <li>Pin its license clearly — commercial-safe goes to default tier; non-commercial gets opt-in tier</li>
+  </ol>
+
+  <h3>Adding a new 3D model</h3>
+  <ol>
+    <li>Install its venv at <code>~/3d-pipeline/&lt;tool-name&gt;/.venv</code></li>
+    <li>Add a case to <code>generate.sh</code>'s generator dispatch</li>
+    <li>If the tool has Mac compatibility issues, document them in section 19's pattern</li>
+    <li>Update SKILL.md to know when to choose it over SF3D / TRELLIS</li>
+  </ol>
+
+  <h3>Adding a new config field</h3>
+  <ol>
+    <li>Add it to <code>_pipeline_lib.sh</code>'s schema (read via <code>json_get</code>)</li>
+    <li>Wire it through <code>resolve_project_context</code> if it affects routing</li>
+    <li>Wire it through <code>config_default</code> if it's a default override</li>
+    <li>Document in setup guide Reference R3</li>
+    <li>Remember: validation is permissive — typos silently fail. Mention the field name verbatim in docs.</li>
+  </ol>
+
+  <h3>Adding a new engine target (e.g., Godot)</h3>
+  <ol>
+    <li>Add detection function to <code>_pipeline_lib.sh</code> (<code>is_godot_project</code> — check for <code>project.godot</code>)</li>
+    <li>Add to the detection cascade in <code>resolve_project_context</code></li>
+    <li>Set a default <code>ENGINE_PATH</code> for the new engine type</li>
+    <li>Test that <code>generate.sh</code>'s engine staging works without changes (it should — it's engine-agnostic given a path)</li>
+  </ol>
+
+  <h3>Adding a new output type (e.g., turntable video)</h3>
+  <ol>
+    <li>Create a new wrapper <code>turntable.sh</code> following the existing pattern</li>
+    <li>Source <code>_pipeline_lib.sh</code>; respect project detection</li>
+    <li>Add a <code>turntable/</code> subdirectory in <code>resolve_project_context</code>'s mkdir call</li>
+    <li>Add a flow to SKILL.md ("Flow 6: Clean GLB → turntable video")</li>
+    <li>Update <code>update_manifest.py</code> if turntable_path should be tracked</li>
+  </ol>
+
+  <h3>What not to extend without thinking carefully</h3>
+  <ul>
+    <li><strong>The detection cascade order.</strong> Changing priority can break existing users' setups.</li>
+    <li><strong>The default model selections.</strong> They're chosen for commercial safety. Don't change defaults to non-commercial models even if quality is "better."</li>
+    <li><strong>The wrapper CLI interface.</strong> Breaking changes require migration paths and SKILL.md updates.</li>
+    <li><strong>The manifest schema.</strong> Adding fields is fine. Removing or renaming requires migration logic.</li>
+  </ul>
+
+  <div class="key-concept">
+    <div class="key-concept-label">North star</div>
+    <div class="key-concept-body">The pipeline serves a single user who works through an AI driver. Every extension should make that workflow more capable without making it more brittle. When in doubt, optimize for "the AI doesn't have to think about it" rather than "the AI has more options."</div>
+  </div>
+</section>
+
+</main>
+
+</div>
+
+</body>
+</html>
