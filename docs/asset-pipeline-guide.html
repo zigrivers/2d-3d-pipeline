@@ -3467,83 +3467,255 @@ PIPELINE_EOF</pre></div>
 &quot;&quot;&quot;
 Idempotent updater for the asset pipeline manifest.
 
-Supports three kinds of records:
-  - 2D-only assets (concept image, no 3D)
-  - 3D assets (concept + 3D mesh)
-  - Print-ready variants (3D mesh prepared as STL for the Snapmaker U1)
+Schema versions
+---------------
+v1, v2 — flat per-asset fields (concept_path, raw_path, clean_path,
+         stl_path, polycount_target, generator, …). Still readable.
+v3     — adds nested objects (model{}, generation{}, print{}, eval{})
+         and an engine_path field, plus license bucket, hardware tier,
+         and timing/metadata. Flat fields stay at the top level for
+         tools that still read v1/v2-style.
 
-A single named asset can accumulate all three over time. Running the
-script with new --stl info on an existing 3D asset updates that record
-in place rather than creating a duplicate.
+Backward compatibility
+----------------------
+- Reads any of v1/v2/v3 transparently.
+- Writes v3 (`version: 3` on top-level dict, nested blocks per asset).
+- If the existing manifest has `&quot;assets&quot;: [...]` (list-of-assets legacy
+  shape), it&#x27;s converted to the dict-by-name shape and a backup is left
+  at `asset_manifest.json.bak.&lt;timestamp&gt;`.
+- All previously-supported args still work.
 
-Usage (2D only):
-  update_manifest.py --manifest &lt;path&gt; --name &lt;name&gt; --concept &lt;png&gt; \\
+Usage examples
+--------------
+
+  # v1/v2-style call still works (no new args required):
+  update_manifest.py --manifest &lt;p&gt; --name &lt;n&gt; --concept &lt;png&gt; \\
       --generator z-image-turbo --category 2d-only
 
-Usage (3D):
-  update_manifest.py --manifest &lt;path&gt; --name &lt;name&gt; --concept &lt;png&gt; \\
+  # v3-rich call with the new optional fields:
+  update_manifest.py --manifest &lt;p&gt; --name &lt;n&gt; --concept &lt;png&gt; \\
       --raw &lt;glb&gt; --clean &lt;glb&gt; --generator sf3d --polycount 3000 \\
-      --category prop
-
-Usage (after print prep):
-  update_manifest.py --manifest &lt;path&gt; --name &lt;name&gt; --concept &lt;png&gt; \\
-      --stl &lt;stl&gt; --stl-size-mm 50 --generator sf3d --category prop
+      --category prop \\
+      --license-bucket commercial_threshold --model-role default \\
+      --prompt &quot;...&quot; --final-prompt &quot;...&quot; --seed 12345 --steps 9 \\
+      --width 1024 --height 1024 --texture-resolution 2048 \\
+      --duration-seconds 42 --machine mac-studio-a --hardware-tier studio \\
+      --engine-path /path/to/engine/file.glb \\
+      --fits-snapmaker-u1 true \\
+      --final-dimensions-mm-json &#x27;{&quot;x&quot;:50.0,&quot;y&quot;:32.4,&quot;z&quot;:28.9}&#x27; \\
+      --oversized-axes-json &#x27;[]&#x27; \\
+      --eval-json &#x27;{&quot;prompt_match&quot;: null, ...}&#x27; \\
+      --source-wrapper-json &#x27;{&quot;status&quot;:&quot;ok&quot;, ...}&#x27;
 &quot;&quot;&quot;
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
+# 2D models flagged as generator_2d, 3D models as generator_3d. Anything else
+# leaves both slots empty and is recorded under its existing key only.
+GENERATOR_2D = {&quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;, &quot;qwen-image&quot;}
+GENERATOR_3D = {&quot;sf3d&quot;, &quot;trellis&quot;, &quot;spar3d&quot;}
 
-def main():
+
+def _strtobool(s: str) -&gt; bool:
+    return s.strip().lower() in (&quot;true&quot;, &quot;1&quot;, &quot;yes&quot;, &quot;y&quot;)
+
+
+def _json_or_default(s: str, default):
+    if not s:
+        return default
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as e:
+        print(f&quot;ERROR: invalid JSON in argument: {e}&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _size_or_explicit(path_str: str, explicit_bytes: int | None) -&gt; int | None:
+    &quot;&quot;&quot;Return explicit_bytes if provided (&gt;=0), else stat the file path, else None.&quot;&quot;&quot;
+    if explicit_bytes is not None and explicit_bytes &gt;= 0:
+        return explicit_bytes
+    if not path_str:
+        return None
+    p = Path(os.path.expanduser(path_str))
+    return p.stat().st_size if p.exists() else None
+
+
+def _migrate_list_to_dict(data: dict, manifest_path: Path) -&gt; dict:
+    &quot;&quot;&quot;If `data[&#x27;assets&#x27;]` is a list, back up the manifest and convert to dict.&quot;&quot;&quot;
+    if not isinstance(data.get(&quot;assets&quot;), list):
+        return data
+    # Back up before changing shape.
+    stamp = time.strftime(&quot;%Y%m%d-%H%M%S&quot;)
+    bak = manifest_path.with_suffix(manifest_path.suffix + f&quot;.bak.{stamp}&quot;)
+    shutil.copy2(manifest_path, bak)
+    print(f&quot;[manifest] migrated legacy list-of-assets shape; backup at {bak}&quot;,
+          file=sys.stderr)
+    out = {}
+    for entry in data[&quot;assets&quot;]:
+        if isinstance(entry, dict) and entry.get(&quot;name&quot;):
+            out[entry[&quot;name&quot;]] = entry
+    data[&quot;assets&quot;] = out
+    return data
+
+
+def _read_manifest(manifest_path: Path) -&gt; dict:
+    if not manifest_path.exists():
+        return {&quot;version&quot;: 3, &quot;assets&quot;: {}}
+    with open(manifest_path) as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f&quot;ERROR: existing manifest is not valid JSON: {e}&quot;, file=sys.stderr)
+            sys.exit(1)
+    data.setdefault(&quot;version&quot;, 2)
+    data.setdefault(&quot;assets&quot;, {})
+    data = _migrate_list_to_dict(data, manifest_path)
+    return data
+
+
+def _build_model_block(existing: dict, args, now: str) -&gt; dict:
+    &quot;&quot;&quot;Build/merge the `model` block from existing entry + new args.&quot;&quot;&quot;
+    model = dict(existing.get(&quot;model&quot;) or {})
+    if args.generator in GENERATOR_2D:
+        model[&quot;generator_2d&quot;] = args.generator
+    elif args.generator in GENERATOR_3D:
+        model[&quot;generator_3d&quot;] = args.generator
+    if args.license_bucket:
+        model[&quot;license_bucket&quot;] = args.license_bucket
+    if args.model_role:
+        model[&quot;model_role&quot;] = args.model_role
+    return model
+
+
+def _build_generation_block(existing: dict, args) -&gt; dict:
+    gen = dict(existing.get(&quot;generation&quot;) or {})
+    field_map = {
+        &quot;prompt&quot;: args.prompt,
+        &quot;final_prompt&quot;: args.final_prompt,
+        &quot;seed&quot;: args.seed,
+        &quot;steps&quot;: args.steps,
+        &quot;width&quot;: args.width,
+        &quot;height&quot;: args.height,
+        &quot;polycount_target&quot;: args.polycount if args.polycount else None,
+        &quot;texture_resolution&quot;: args.texture_resolution,
+        &quot;duration_seconds&quot;: args.duration_seconds,
+        &quot;machine&quot;: args.machine,
+        &quot;hardware_tier&quot;: args.hardware_tier,
+    }
+    for k, v in field_map.items():
+        if v is not None and v != &quot;&quot;:
+            gen[k] = v
+    return gen
+
+
+def _build_print_block(existing: dict, args) -&gt; dict:
+    prn = dict(existing.get(&quot;print&quot;) or {})
+    if args.stl:
+        prn[&quot;prepared_for_print&quot;] = True
+        prn[&quot;target_size_mm&quot;] = args.stl_size_mm
+    elif &quot;prepared_for_print&quot; not in prn:
+        prn.setdefault(&quot;prepared_for_print&quot;, False)
+    if args.final_dimensions_mm_json:
+        prn[&quot;final_dimensions_mm&quot;] = _json_or_default(args.final_dimensions_mm_json, {})
+    if args.fits_snapmaker_u1:
+        prn[&quot;fits_snapmaker_u1&quot;] = _strtobool(args.fits_snapmaker_u1)
+    if args.oversized_axes_json:
+        prn[&quot;oversized_axes&quot;] = _json_or_default(args.oversized_axes_json, [])
+    return prn
+
+
+def _build_eval_block(existing: dict, args) -&gt; dict:
+    if args.eval_json:
+        return _json_or_default(args.eval_json, {})
+    # Preserve any existing eval; otherwise stub the spec&#x27;s scaffold.
+    if existing.get(&quot;eval&quot;):
+        return dict(existing[&quot;eval&quot;])
+    return {
+        &quot;prompt_match&quot;: None,
+        &quot;front_accuracy&quot;: None,
+        &quot;backside_plausibility&quot;: None,
+        &quot;topology&quot;: None,
+        &quot;uv_quality&quot;: None,
+        &quot;texture_quality&quot;: None,
+        &quot;pbr_maps_present&quot;: None,
+        &quot;unity_import&quot;: &quot;not_tested&quot;,
+        &quot;unreal_import&quot;: &quot;not_tested&quot;,
+        &quot;print_prep&quot;: &quot;not_tested&quot;,
+        &quot;slicer_check&quot;: &quot;not_tested&quot;,
+        &quot;failure_type&quot;: &quot;&quot;,
+        &quot;review_notes&quot;: &quot;&quot;,
+    }
+
+
+def main() -&gt; int:
     p = argparse.ArgumentParser()
-    p.add_argument(&quot;--manifest&quot;, required=True, help=&quot;Path to asset_manifest.json&quot;)
-    p.add_argument(&quot;--name&quot;, required=True, help=&quot;Logical asset name (no extension)&quot;)
-    p.add_argument(&quot;--concept&quot;, required=True, help=&quot;Path to 2D concept image&quot;)
-    p.add_argument(&quot;--raw&quot;, default=&quot;&quot;, help=&quot;Path to raw 3D generator output (GLB)&quot;)
-    p.add_argument(&quot;--clean&quot;, default=&quot;&quot;, help=&quot;Path to cleaned 3D GLB&quot;)
-    p.add_argument(&quot;--stl&quot;, default=&quot;&quot;, help=&quot;Path to print-ready STL&quot;)
-    p.add_argument(&quot;--stl-size-mm&quot;, type=float, default=0.0,
-                   help=&quot;Longest dimension in mm of the STL (if provided)&quot;)
+    # --- v1/v2 args (preserved) ---
+    p.add_argument(&quot;--manifest&quot;, required=True)
+    p.add_argument(&quot;--name&quot;, required=True)
+    p.add_argument(&quot;--concept&quot;, required=True)
+    p.add_argument(&quot;--raw&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--clean&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--stl&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--stl-size-mm&quot;, type=float, default=0.0)
     p.add_argument(&quot;--generator&quot;, required=True,
-                   choices=[&quot;sf3d&quot;, &quot;trellis&quot;, &quot;z-image-turbo&quot;,
-                            &quot;flux-schnell&quot;, &quot;flux-dev&quot;, &quot;qwen-image&quot;])
-    p.add_argument(&quot;--polycount&quot;, type=int, default=0,
-                   help=&quot;Target polycount of the cleaned 3D mesh (0 for 2D-only)&quot;)
+                   choices=[&quot;sf3d&quot;, &quot;trellis&quot;, &quot;spar3d&quot;,
+                            &quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;,
+                            &quot;qwen-image&quot;])
+    p.add_argument(&quot;--polycount&quot;, type=int, default=0)
     p.add_argument(&quot;--category&quot;, required=True,
                    choices=[&quot;prop&quot;, &quot;character&quot;, &quot;hero&quot;, &quot;environment&quot;,
                             &quot;weapon&quot;, &quot;vehicle&quot;, &quot;2d-only&quot;])
-    p.add_argument(&quot;--notes&quot;, default=&quot;&quot;, help=&quot;One-line description&quot;)
+    p.add_argument(&quot;--notes&quot;, default=&quot;&quot;)
+    # --- v3 additions ---
+    p.add_argument(&quot;--license-bucket&quot;, default=&quot;&quot;,
+                   choices=[&quot;&quot;, &quot;commercial_safe&quot;, &quot;commercial_threshold&quot;,
+                            &quot;source_available_restricted&quot;, &quot;non_commercial&quot;,
+                            &quot;unclear_risky&quot;, &quot;unknown&quot;])
+    p.add_argument(&quot;--model-role&quot;, default=&quot;&quot;,
+                   help=&quot;default | optional | experimental | other free text&quot;)
+    p.add_argument(&quot;--prompt&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--final-prompt&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--seed&quot;, type=int, default=None)
+    p.add_argument(&quot;--steps&quot;, type=int, default=None)
+    p.add_argument(&quot;--width&quot;, type=int, default=None)
+    p.add_argument(&quot;--height&quot;, type=int, default=None)
+    p.add_argument(&quot;--texture-resolution&quot;, type=int, default=None)
+    p.add_argument(&quot;--duration-seconds&quot;, type=int, default=None)
+    p.add_argument(&quot;--machine&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--hardware-tier&quot;, default=&quot;&quot;,
+                   choices=[&quot;&quot;, &quot;laptop&quot;, &quot;studio&quot;])
+    p.add_argument(&quot;--engine-path&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--raw-size-bytes&quot;, type=int, default=None)
+    p.add_argument(&quot;--clean-size-bytes&quot;, type=int, default=None)
+    p.add_argument(&quot;--stl-size-bytes&quot;, type=int, default=None)
+    p.add_argument(&quot;--final-dimensions-mm-json&quot;, default=&quot;&quot;,
+                   help=&#x27;JSON object: {&quot;x&quot;:50.0,&quot;y&quot;:32.4,&quot;z&quot;:28.9}&#x27;)
+    p.add_argument(&quot;--fits-snapmaker-u1&quot;, default=&quot;&quot;,
+                   help=&quot;true/false/empty (empty leaves existing value)&quot;)
+    p.add_argument(&quot;--oversized-axes-json&quot;, default=&quot;&quot;,
+                   help=&#x27;JSON array of axis labels: [&quot;X&quot;,&quot;Z&quot;]&#x27;)
+    p.add_argument(&quot;--eval-json&quot;, default=&quot;&quot;,
+                   help=&quot;JSON object replacing the eval{} block&quot;)
+    p.add_argument(&quot;--source-wrapper-json&quot;, default=&quot;&quot;,
+                   help=&quot;JSON object from the wrapper&#x27;s --json output, kept for provenance&quot;)
     args = p.parse_args()
 
     manifest_path = Path(os.path.expanduser(args.manifest))
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if manifest_path.exists():
-        with open(manifest_path) as f:
-            try:
-                data = json.load(f)
-            except json.JSONDecodeError as e:
-                print(f&quot;ERROR: existing manifest is not valid JSON: {e}&quot;, file=sys.stderr)
-                sys.exit(1)
-    else:
-        data = {&quot;version&quot;: 2, &quot;assets&quot;: {}}
-
-    data.setdefault(&quot;version&quot;, 2)
-    data.setdefault(&quot;assets&quot;, {})
-
-    def size_or_none(path_str):
-        if not path_str:
-            return None
-        p = Path(os.path.expanduser(path_str))
-        return p.stat().st_size if p.exists() else None
-
-    now = datetime.now().isoformat(timespec=&quot;seconds&quot;)
+    data = _read_manifest(manifest_path)
     existing = data[&quot;assets&quot;].get(args.name, {})
+    now = datetime.now().isoformat(timespec=&quot;seconds&quot;)
 
-    # Preserve fields that aren&#x27;t part of this update
+    # ----- Top-level flat fields (kept readable for v1/v2 consumers) -----
     entry = dict(existing)
     entry.update({
         &quot;name&quot;: args.name,
@@ -3555,20 +3727,20 @@ def main():
         &quot;updated&quot;: now,
     })
 
-    # Only set 3D fields if the user is updating those
     if args.raw or &quot;raw_path&quot; not in entry:
         entry[&quot;raw_path&quot;] = args.raw or entry.get(&quot;raw_path&quot;, &quot;&quot;)
-        entry[&quot;raw_size_bytes&quot;] = size_or_none(args.raw) if args.raw else entry.get(&quot;raw_size_bytes&quot;)
+        entry[&quot;raw_size_bytes&quot;] = _size_or_explicit(args.raw, args.raw_size_bytes) \
+            if args.raw else entry.get(&quot;raw_size_bytes&quot;)
     if args.clean or &quot;clean_path&quot; not in entry:
         entry[&quot;clean_path&quot;] = args.clean or entry.get(&quot;clean_path&quot;, &quot;&quot;)
-        entry[&quot;clean_size_bytes&quot;] = size_or_none(args.clean) if args.clean else entry.get(&quot;clean_size_bytes&quot;)
+        entry[&quot;clean_size_bytes&quot;] = _size_or_explicit(args.clean, args.clean_size_bytes) \
+            if args.clean else entry.get(&quot;clean_size_bytes&quot;)
     if args.polycount or &quot;polycount_target&quot; not in entry:
         entry[&quot;polycount_target&quot;] = args.polycount or entry.get(&quot;polycount_target&quot;, 0)
 
-    # Print-output fields — only populated when this update includes --stl
     if args.stl:
         entry[&quot;stl_path&quot;] = args.stl
-        entry[&quot;stl_size_bytes&quot;] = size_or_none(args.stl)
+        entry[&quot;stl_size_bytes&quot;] = _size_or_explicit(args.stl, args.stl_size_bytes)
         entry[&quot;stl_target_size_mm&quot;] = args.stl_size_mm
         entry[&quot;prepared_for_print&quot;] = True
         entry[&quot;print_prepared_at&quot;] = now
@@ -3576,26 +3748,52 @@ def main():
         entry.setdefault(&quot;stl_path&quot;, &quot;&quot;)
         entry.setdefault(&quot;prepared_for_print&quot;, False)
 
+    if args.engine_path:
+        entry[&quot;engine_path&quot;] = args.engine_path
+
+    # ----- Nested v3 blocks -----
+    model_block = _build_model_block(existing, args, now)
+    if model_block:
+        entry[&quot;model&quot;] = model_block
+
+    generation_block = _build_generation_block(existing, args)
+    if generation_block:
+        entry[&quot;generation&quot;] = generation_block
+
+    print_block = _build_print_block(existing, args)
+    if print_block:
+        entry[&quot;print&quot;] = print_block
+
+    entry[&quot;eval&quot;] = _build_eval_block(existing, args)
+
+    if args.source_wrapper_json:
+        entry[&quot;source_wrapper&quot;] = _json_or_default(args.source_wrapper_json, {})
+
+    # ----- Persist -----
     action = &quot;updated&quot; if existing else &quot;added&quot;
     data[&quot;assets&quot;][args.name] = entry
+    data[&quot;version&quot;] = 3
 
     with open(manifest_path, &quot;w&quot;) as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write(&quot;\n&quot;)
 
-    # Summary line
     flags = []
     if entry.get(&quot;clean_path&quot;):
         flags.append(f&quot;3D:{entry.get(&#x27;polycount_target&#x27;)}p&quot;)
     if entry.get(&quot;prepared_for_print&quot;):
         flags.append(f&quot;PRINT:{entry.get(&#x27;stl_target_size_mm&#x27;)}mm&quot;)
+    bucket = (entry.get(&quot;model&quot;) or {}).get(&quot;license_bucket&quot;) or args.license_bucket
+    if bucket:
+        flags.append(f&quot;LIC:{bucket}&quot;)
     flags_str = &quot; &quot;.join(flags) or &quot;2D-only&quot;
-    print(f&quot;[manifest] {action}: {args.name} ({args.category}, {args.generator}, {flags_str}) &quot;
-          f&quot;-&gt; {manifest_path}&quot;)
+    print(f&quot;[manifest] {action}: {args.name} ({args.category}, {args.generator}, &quot;
+          f&quot;{flags_str}) -&gt; {manifest_path}&quot;)
+    return 0
 
 
 if __name__ == &quot;__main__&quot;:
-    main()
+    sys.exit(main())
 PIPELINE_EOF
 chmod +x ~/.claude/skills/asset-pipeline/scripts/update_manifest.py</pre></div>
             </details>
