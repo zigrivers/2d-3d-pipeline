@@ -88,26 +88,46 @@
         <div class="tagline">Documentation index — Mac-native 2D/3D/print asset pipeline.</div>
     </header>
 
-    <h2>For users</h2>
+    <h2>For users · Laptop tier</h2>
     <div class="card-list">
         <a class="card" href="asset-pipeline-guide.html">
-            <div class="title">Setup guide</div>
-            <div class="desc">Copy-paste install, environment setup, troubleshooting.</div>
+            <div class="title">Setup guide (laptop)</div>
+            <div class="desc">Apple Silicon Mac Laptop. Copy-paste install, environment setup, troubleshooting.</div>
         </a>
-        <a class="card missing" href="asset-pipeline-workflows.html">
-            <div class="title">Workflows (not yet in this repo)</div>
-            <div class="desc">Day-to-day recipes for concept &rarr; generate &rarr; print.</div>
+        <a class="card" href="UPGRADES-laptop.md">
+            <div class="title">v0.2 changes (laptop)</div>
+            <div class="desc">--json, license buckets, manifest v3, all-axis print validation, texture.sh, benchmark.sh — what the laptop user needs to know.</div>
+        </a>
+    </div>
+
+    <h2>For users · Studio tier</h2>
+    <div class="card-list">
+        <a class="card" href="asset-pipeline-guide-studio.html">
+            <div class="title">Setup guide (studio)</div>
+            <div class="desc">Two Apple M3 Ultra Mac Studios, 512&nbsp;GB unified memory each. Same scripts as the laptop guide, with the <code>hardware_tier=studio</code> config, full-suite bake-offs, and the two-machine queue.</div>
+        </a>
+        <a class="card" href="UPGRADES-studio.md">
+            <div class="title">v0.2 changes (studio)</div>
+            <div class="desc">Everything in the laptop UPGRADES plus the studio-only deltas: <code>.config</code>, queue, shared storage, headroom narrative.</div>
         </a>
     </div>
 
     <h2>For AI assistants</h2>
     <div class="card-list">
         <a class="card" href="../context/asset-pipeline-ai-context.md">
-            <div class="title">AI context (markdown, canonical)</div>
-            <div class="desc">Technical context doc — ingestion-friendly.</div>
+            <div class="title">AI context (laptop, markdown canonical)</div>
+            <div class="desc">Full pipeline architecture, decisions, and rationale. Read this first.</div>
         </a>
         <a class="card" href="../context/asset-pipeline-ai-context.html">
-            <div class="title">AI context (HTML mirror)</div>
+            <div class="title">AI context (laptop, HTML mirror)</div>
+            <div class="desc">Same content, browser-friendly.</div>
+        </a>
+        <a class="card" href="../context/asset-pipeline-ai-context-studio.md">
+            <div class="title">AI context (studio, markdown canonical)</div>
+            <div class="desc">Delta on top of the laptop AI context — hardware tier, queue, shared storage, full-suite bake-offs.</div>
+        </a>
+        <a class="card" href="../context/asset-pipeline-ai-context-studio.html">
+            <div class="title">AI context (studio, HTML mirror)</div>
             <div class="desc">Same content, browser-friendly.</div>
         </a>
     </div>

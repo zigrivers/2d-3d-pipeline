@@ -15,7 +15,16 @@ import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-GUIDE_PATH = PROJECT_ROOT / "docs" / "asset-pipeline-guide.html"
+
+# v0.2: two user-facing guides — one for each hardware tier. Both embed the
+# same canonical scripts, so the regen tool iterates over both.
+GUIDE_PATHS = [
+    PROJECT_ROOT / "docs" / "asset-pipeline-guide.html",
+    PROJECT_ROOT / "docs" / "asset-pipeline-guide-studio.html",
+]
+# Back-compat alias — verify_embeds/regenerate_embeds historically used a
+# single path. Kept so any external scripts still work.
+GUIDE_PATH = GUIDE_PATHS[0]
 
 # Map: project-relative canonical file -> path embedded in the HTML heredoc.
 # Order matches the order the blocks appear in the guide for readability.

@@ -76,6 +76,49 @@ sections, no decorative gradients, fewer collapsible affordances. Information
 density beats visual breathing room. Markdown is the primary form; the HTML
 mirror is for browsing convenience.
 
+## Per-tier docs (v0.2)
+
+The user runs the pipeline on two hardware tiers (`laptop` and `studio`),
+both Apple Silicon. Scripts and the Claude Code skill are **singular** —
+they read `~/3d-pipeline/.config` to learn which tier they're on. Docs
+are **dual** — one set for each tier.
+
+| Concern             | Singular         | Dual                                     |
+| ------------------- | ---------------- | ---------------------------------------- |
+| Scripts             | `/scripts`       |                                          |
+| Skill               | `/skill`         |                                          |
+| Tooling             | `/tools`         |                                          |
+| Setup guide         |                  | `docs/asset-pipeline-guide{,-studio}.html` |
+| AI context          |                  | `context/asset-pipeline-ai-context{,-studio}.{md,html}` |
+| UPGRADES summary    |                  | `docs/UPGRADES-{laptop,studio}.md`       |
+
+Filename rule: the laptop docs keep their original (unsuffixed) filenames
+so external links stay valid. The studio docs use the `-studio` suffix
+on the same stem.
+
+Both setup guides embed the **same canonical scripts** byte-for-byte via
+the heredoc blocks documented in this file. `tools/_embed_lib.py`'s
+`GUIDE_PATHS` list contains both; `make regenerate` and `make verify`
+iterate over both automatically.
+
+Both AI-context md/html pairs are enforced by
+`tools/check_context_parity.py`'s `PAIRS` list. Same rules per pair: H2
+sections in order, callout counts per type.
+
+Each setup guide is **independently complete**. A user on either tier
+should never have to read the other tier's doc to install or run. The
+guides differ only in:
+
+- Hero / title strings.
+- A `~/3d-pipeline/.config` setup step (studio only — laptop tier uses
+  the default `laptop` value).
+- Workflow sections for the queue (W12, studio only) and the full-suite
+  bake-off (W11, studio only).
+- A small pointer in each hero to the other-tier guide.
+
+All other content (install steps, troubleshooting, reference) is
+duplicated. Duplication is acceptable; ambiguity is not.
+
 ## The AI context: markdown is canonical for content
 
 `context/asset-pipeline-ai-context.md` is the canonical source for the AI

@@ -51,6 +51,37 @@
 
 ---
 
+## v0.2 hardware-tier notes (laptop)
+
+This is the **laptop-tier** AI context. The pipeline now also targets two Apple M3 Ultra Mac Studios; the additional studio-only decisions (queue, shared storage, full-suite bake-offs, 512 GB headroom narrative) live in [`asset-pipeline-ai-context-studio.md`](asset-pipeline-ai-context-studio.md). Read this file first; the studio doc is a delta.
+
+Tier detection: every wrapper and the Claude Code skill read `~/3d-pipeline/.config` for `hardware_tier = laptop | studio`. The default is `laptop` when the file is absent. The wrappers never sniff hostname — explicit config is the contract.
+
+License-bucket vocabulary (used in code, `--json`, manifest, docs — exact names):
+
+- `commercial_safe`: z-image-turbo, flux-schnell, qwen-image
+- `commercial_threshold`: sf3d, spar3d
+- `non_commercial`: flux-dev, trellis
+- `source_available_restricted`: reserved
+- `unclear_risky` / `unknown`: LoRAs, anything untagged
+
+New wrappers and flags in v0.2 (covered in detail throughout the architecture and decisions sections):
+
+- `concept.sh --json`, `generate.sh --json`, `print.sh --json` — structured output; subcommand stdout routes to stderr. Every JSON line includes `hardware_tier` and `machine`.
+- `print.sh --allow-oversize`, `--format stl|3mf` — per-axis 270 mm validation; 3mf currently fails with "not implemented yet".
+- `generate.sh --overwrite-engine` and the new collision-aware engine staging (auto-suffix `<name>_2.glb`, etc.) when `naming.auto_increment_collisions=true`.
+- `generate.sh -g spar3d` — optional, experimental, `commercial_threshold`.
+- `scripts/json_emit.py` — typed key=value → JSON helper used by every wrapper.
+- `scripts/texture.sh` (`--mode inspect|upscale`) + `scripts/texture_inspect.py` — GLB and image stats; Real-ESRGAN ncnn-vulkan integration.
+- `scripts/benchmark.sh` + `scripts/model_bakeoff.py` — model bake-off harness.
+- `scripts/queue_submit.py` + `scripts/queue_worker.py` — file-based job queue (studio-tier in practice; works single-machine but the operational recipe is in the studio doc).
+
+> **🔵 Context — Why the laptop guide isn't getting much smaller**
+>
+> v0.2's defaults are identical to v0.1 (Z-Image Turbo → SF3D → Blender → Snapmaker U1). The wrappers grew flags; they didn't change behaviour when those flags aren't used. So everything below in this document is still accurate for laptop-tier work. The studio doc covers what's actually new architecturally — multi-machine queue, full-suite bake-offs, shared storage.
+
+---
+
 ## 00 · Audience & purpose
 
 This document exists because the asset pipeline has accumulated non-obvious architectural decisions over a long development arc, and most of the reasoning isn't visible in the code itself. The setup guide and workflows guide tell users *what* and *how*; this document tells future AI assistants *why*.

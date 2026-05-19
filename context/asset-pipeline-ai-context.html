@@ -424,6 +424,42 @@ td code { font-size: 0.92em; }
   <p>This document is intentionally dense. It transfers the architectural reasoning, trade-offs, and failure history of a working pipeline so a future AI can help maintain, extend, or troubleshoot it without needing follow-up context. Read top-to-bottom for the full mental model; sections are designed to be reasonably self-contained for targeted lookup. Throughout, "Ken" refers to the human user.</p>
 </div>
 
+<!-- ============ v0.2 — HARDWARE TIER NOTES ============ -->
+<section id="v0-2-tier-notes">
+  <div class="sec-num">v0.2 · LAPTOP TIER</div>
+  <h2>v0.2 hardware-tier notes (laptop)</h2>
+
+  <p>This is the <strong>laptop-tier</strong> AI context. The pipeline now also targets two Apple M3 Ultra Mac Studios; the additional studio-only decisions (queue, shared storage, full-suite bake-offs, 512&nbsp;GB headroom narrative) live in <a href="asset-pipeline-ai-context-studio.html">asset-pipeline-ai-context-studio.html</a>. Read this file first; the studio doc is a delta.</p>
+
+  <p>Tier detection: every wrapper and the Claude Code skill read <code>~/3d-pipeline/.config</code> for <code>hardware_tier = laptop | studio</code>. The default is <code>laptop</code> when the file is absent. The wrappers never sniff hostname — explicit config is the contract.</p>
+
+  <p>License-bucket vocabulary (used in code, <code>--json</code>, manifest, docs — exact names):</p>
+  <ul>
+    <li><code>commercial_safe</code>: z-image-turbo, flux-schnell, qwen-image</li>
+    <li><code>commercial_threshold</code>: sf3d, spar3d</li>
+    <li><code>non_commercial</code>: flux-dev, trellis</li>
+    <li><code>source_available_restricted</code>: reserved</li>
+    <li><code>unclear_risky</code> / <code>unknown</code>: LoRAs, anything untagged</li>
+  </ul>
+
+  <p>New wrappers and flags in v0.2 (covered in detail throughout the architecture and decisions sections):</p>
+  <ul>
+    <li><code>concept.sh --json</code>, <code>generate.sh --json</code>, <code>print.sh --json</code> — structured output; subcommand stdout routes to stderr. Every JSON line includes <code>hardware_tier</code> and <code>machine</code>.</li>
+    <li><code>print.sh --allow-oversize</code>, <code>--format stl|3mf</code> — per-axis 270&nbsp;mm validation; 3mf currently fails with "not implemented yet".</li>
+    <li><code>generate.sh --overwrite-engine</code> and the new collision-aware engine staging (auto-suffix <code>&lt;name&gt;_2.glb</code>, etc.) when <code>naming.auto_increment_collisions=true</code>.</li>
+    <li><code>generate.sh -g spar3d</code> — optional, experimental, <code>commercial_threshold</code>.</li>
+    <li><code>scripts/json_emit.py</code> — typed key=value → JSON helper used by every wrapper.</li>
+    <li><code>scripts/texture.sh</code> (<code>--mode inspect|upscale</code>) + <code>scripts/texture_inspect.py</code> — GLB and image stats; Real-ESRGAN ncnn-vulkan integration.</li>
+    <li><code>scripts/benchmark.sh</code> + <code>scripts/model_bakeoff.py</code> — model bake-off harness.</li>
+    <li><code>scripts/queue_submit.py</code> + <code>scripts/queue_worker.py</code> — file-based job queue (studio-tier in practice; works single-machine but the operational recipe is in the studio doc).</li>
+  </ul>
+
+  <div class="callout callout-context">
+    <div class="callout-label">Context — Why the laptop guide isn't getting much smaller</div>
+    <p>v0.2's defaults are identical to v0.1 (Z-Image Turbo → SF3D → Blender → Snapmaker U1). The wrappers grew flags; they didn't change behaviour when those flags aren't used. So everything below in this document is still accurate for laptop-tier work. The studio doc covers what's actually new architecturally — multi-machine queue, full-suite bake-offs, shared storage.</p>
+  </div>
+</section>
+
 <!-- ============ 00 — AUDIENCE & PURPOSE ============ -->
 <section id="audience">
   <div class="sec-num">00 · CONTEXT</div>

@@ -20,8 +20,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MD = ROOT / "context" / "asset-pipeline-ai-context.md"
-HTML = ROOT / "context" / "asset-pipeline-ai-context.html"
+
+# v0.2: parity is enforced for every (markdown, html) pair. Add new tiers
+# here. If either side of a pair is missing, the pair is skipped (notice,
+# not error) so the Phase 11 bootstrap doesn't fail.
+PAIRS = [
+    (ROOT / "context" / "asset-pipeline-ai-context.md",
+     ROOT / "context" / "asset-pipeline-ai-context.html"),
+    (ROOT / "context" / "asset-pipeline-ai-context-studio.md",
+     ROOT / "context" / "asset-pipeline-ai-context-studio.html"),
+]
 
 # Emoji prefix in the markdown callout title -> CSS class suffix in the HTML
 CALLOUT_MAP = {
@@ -53,13 +61,10 @@ def normalize(s: str) -> str:
 MD_SECTIONS_WITHOUT_HTML_H2 = {"Table of contents"}
 
 
-def main() -> int:
-    if not MD.exists() or not HTML.exists():
-        print(f"ERROR: missing {MD if not MD.exists() else HTML}")
-        return 1
-
-    md_text = MD.read_text()
-    html_text = HTML.read_text()
+def _check_pair(md: Path, html: Path) -> tuple[bool, list[str], int, int]:
+    """Return (ok, error_lines, section_count, callout_count). ok=False if drift."""
+    md_text = md.read_text()
+    html_text = html.read_text()
 
     md_h2 = [
         h for h in (normalize(h) for h in H2_RE.findall(md_text))
@@ -100,16 +105,29 @@ def main() -> int:
         if m != h:
             errors.append(f"Callout drift: callout-{cls} appears {m}x in MD, {h}x in HTML")
 
-    if errors:
-        for e in errors:
-            print(e)
-        return 1
+    return (not errors), errors, len(md_h2), sum(md_callouts.values())
 
-    print(
-        f"OK: md and HTML in parity ({len(md_h2)} sections, "
-        f"{sum(md_callouts.values())} callouts)"
-    )
-    return 0
+
+def main() -> int:
+    any_errors = False
+    for md, html in PAIRS:
+        label = md.name
+        if not md.exists() and not html.exists():
+            print(f"SKIP [{label}]: neither md nor html present yet")
+            continue
+        if not md.exists() or not html.exists():
+            missing = md if not md.exists() else html
+            print(f"ERROR [{label}]: one half missing: {missing.relative_to(ROOT)}")
+            any_errors = True
+            continue
+        ok, errs, sections, callouts = _check_pair(md, html)
+        if ok:
+            print(f"OK [{label}]: md and HTML in parity ({sections} sections, {callouts} callouts)")
+        else:
+            for e in errs:
+                print(f"[{label}] {e}")
+            any_errors = True
+    return 1 if any_errors else 0
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Asset Pipeline · Setup & Workflows</title>
+<title>Asset Pipeline · Setup & Workflows · Studio tier</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
@@ -918,6 +918,8 @@ footer .signature { color: var(--peach); }
         <li><a href="#wf-unity"><span class="num">W8</span>Import into Unity</a></li>
         <li><a href="#wf-unreal"><span class="num">W9</span>Import into Unreal</a></li>
         <li><a href="#wf-skill"><span class="num">W10</span>Via Claude Code</a></li>
+        <li><a href="#wf-benchmark"><span class="num">W11</span>Model bake-off (studio)</a></li>
+        <li><a href="#wf-queue"><span class="num">W12</span>Two-machine queue (studio)</a></li>
       </ul>
     </div>
     <div class="sidebar-section">
@@ -936,21 +938,19 @@ footer .signature { color: var(--peach); }
 
     <!-- ======================== HERO ======================== -->
     <div class="hero" id="overview">
-      <div class="hero-eyebrow">Laptop tier · Local 2D &amp; 3D asset pipeline · Apple Silicon</div>
-      <h1>Asset <em>Pipeline</em></h1>
-      <div class="hero-sub">$ cat ~/3d-pipeline/README — setup once, generate forever.</div>
+      <div class="hero-eyebrow">Studio tier · Apple M3 Ultra · 512&nbsp;GB unified memory</div>
+      <h1>Asset <em>Pipeline</em> · Studio</h1>
+      <div class="hero-sub">$ cat ~/3d-pipeline/README — set <code>hardware_tier=studio</code>, then generate at scale.</div>
       <p class="hero-lead">
-        A click-by-click guide to installing a fully-local game asset pipeline on your Mac, plus
-        worked examples for every common scenario after setup is complete.
+        Same scripts, same skill, same project-aware wrappers as the laptop guide — but
+        sized for two M3 Ultra Mac Studios with 512&nbsp;GB unified memory and 8&nbsp;TB of
+        local storage each. This guide covers the install, the studio-only
+        <code>~/3d-pipeline/.config</code> setting, and the two extra recipes you unlock at
+        this tier: full-suite model bake-offs and the two-machine job queue.
       </p>
       <p class="hero-lead" style="margin-top: 12px; font-size: 0.95em; opacity: 0.85;">
-        On an M3 Ultra Mac Studio? See the
-        <a href="asset-pipeline-guide-studio.html">studio setup guide</a> — same scripts, but with the studio-tier <code>.config</code> step, full-suite bake-offs, and the two-machine queue.
-        v0.2 wrappers (<code>--json</code>, <code>--allow-oversize</code>,
-        <code>--overwrite-engine</code>, <code>--format</code>, <code>texture.sh</code>,
-        <code>benchmark.sh</code>) all work on the laptop tier too — see
-        <a href="UPGRADES-laptop.md"><code>UPGRADES-laptop.md</code></a> for the
-        laptop-relevant changes.
+        On a Mac laptop instead? See the
+        <a href="asset-pipeline-guide.html">laptop setup guide</a>.
       </p>
 
       <div class="spec-grid">
@@ -1356,6 +1356,35 @@ footer .signature { color: var(--peach); }
             <li><code>print/</code> — print-ready STLs and color reference images for the Snapmaker U1</li>
             <li><code>loras/</code> — FLUX LoRA <code>.safetensors</code> files (shared across all projects — these belong here even in project mode)</li>
           </ul>
+        </div>
+      </div>
+
+      <div class="step" data-step="ws-config">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Declare this machine as the <code>studio</code> tier</h3>
+          <p>
+            The wrappers and the Claude Code skill read
+            <code>~/3d-pipeline/.config</code> to learn which hardware tier this
+            machine is on. The file is a simple <code>key=value</code> list (not
+            JSON, to keep it distinct from per-project <code>.asset-pipeline.json</code>).
+            Set <code>hardware_tier=studio</code> on each of your Mac Studios so
+            <code>--json</code> output, manifest entries, and benchmark results
+            all carry the right label.
+          </p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/.config &lt;&lt; 'EOF'
+# Per-machine asset-pipeline config.
+# Values:
+#   hardware_tier = laptop | studio   (default: laptop)
+hardware_tier = studio
+EOF</pre></div>
+          <div class="callout callout-tip">
+            <div class="callout-label">Why explicit?</div>
+            The wrappers <em>never</em> guess the tier from the hostname.
+            Renaming a Mac or cloning a system image would silently change
+            behaviour if we did. Keep this file in sync if you ever
+            re-purpose a machine.
+          </div>
         </div>
       </div>
     </section>
@@ -6481,6 +6510,109 @@ mflux-generate \
         <div class="callout callout-tip">
           <div class="callout-label">Project-local skill behavior</div>
           Drop a <code>CLAUDE.md</code> file in your game project's root with conventions (engine, naming, asset folders) and the skill will use them. See the previous "Claude Code Integration Tips" report for the template.
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ W11: BENCHMARK HARNESS (STUDIO) ============ -->
+    <section id="wf-benchmark">
+      <div class="section-num">W11 / Workflow · Studio</div>
+      <h2>Model <em>bake-off</em></h2>
+      <p class="section-deck">Run the v0.2 benchmark harness across multiple 2D models and 3D generators on the same prompts. Built for the studio tier — the default 14-prompt suite is a real workload on a Mac Studio with 512&nbsp;GB unified memory.</p>
+
+      <div class="step" data-step="bench-quick">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Quick sanity check (3 prompts)</h3>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>~/3d-pipeline/workspace/benchmark.sh --suite quick</pre></div>
+          <p>Writes results to <code>~/3d-pipeline/workspace/benchmarks/&lt;timestamp&gt;/benchmark_results.json</code>. Each run records duration, file paths, license bucket, hardware tier, and machine.</p>
+        </div>
+      </div>
+
+      <div class="step" data-step="bench-default">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Full default suite across two 3D generators</h3>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>~/3d-pipeline/workspace/benchmark.sh \
+    --suite default \
+    --generators sf3d,spar3d \
+    --json</pre></div>
+          <p>14 prompts &times; 1 concept &times; 2 generators = 42 runs. The harness reuses the same concept image across generators so the 3D comparison is apples-to-apples.</p>
+          <p>Each run carries a manual scoring scaffold (<code>prompt_match</code>, <code>front_accuracy</code>, <code>topology</code>, <code>unity_import</code>, <code>print_prep</code>, &hellip;) initialised to <code>null</code> / <code>"not_tested"</code>. Walk through it later with Claude Code: <em>"Open the latest benchmark and help me score it."</em></p>
+        </div>
+      </div>
+
+      <div class="step" data-step="bench-licenses">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>License-aware comparisons</h3>
+          <p>The harness records the <strong>license bucket</strong> for every model so you can filter results before adopting one. The default lane stays commercial-safe; an opt-in lane like <code>flux-dev</code> or <code>trellis</code> will show as <code>non_commercial</code> in the results and must not be used as a Grithkin or GripCraft default without explicit acceptance.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ W12: TWO-MACHINE QUEUE (STUDIO) ============ -->
+    <section id="wf-queue">
+      <div class="section-num">W12 / Workflow · Studio</div>
+      <h2>Two-machine <em>queue</em>
+        <span style="font-size: 18px; color: var(--overlay0); font-style: normal;">(experimental)</span>
+      </h2>
+      <p class="section-deck">A file-based job queue you can run across both M3 Ultra Mac Studios. Studio-tier only; intentionally simple — no Redis, no Celery, no Airflow. Just <code>queue/{pending,running,done,failed}/</code> directories and atomic <code>mv</code>.</p>
+
+      <div class="callout callout-warn">
+        <div class="callout-label">Experimental</div>
+        The queue ships as scaffolding. It works end-to-end (smoke-tested), but
+        a real production deployment needs you to decide on shared storage
+        (rsync vs. SMB share vs. NFS) and add retry / dead-letter handling that
+        suits your workload. Use the queue when you have a batch of generations
+        and both Studios are available; for one-off work, run the wrappers
+        directly.
+      </div>
+
+      <div class="step" data-step="queue-shared-folder">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Pick a shared assets root</h3>
+          <p>Both Studios need to see the same <code>queue/</code> directory. The simplest deployment:</p>
+          <ul>
+            <li>Designate one Studio's <code>~/3d-pipeline/workspace/</code> as the canonical store, share it via SMB, mount it on the second Studio at the same path.</li>
+            <li>OR work inside a project (e.g. <code>~/games/grithkin/assets/</code>) and rsync the project tree both directions.</li>
+          </ul>
+          <p>POSIX guarantees <code>rename()</code> atomicity within a filesystem, including over NFS — that's what the worker uses to claim jobs without races.</p>
+        </div>
+      </div>
+
+      <div class="step" data-step="queue-submit">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Submit a job</h3>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>python3 ~/3d-pipeline/workspace/queue_submit.py \
+    --assets-root ~/3d-pipeline/workspace \
+    --stage image_to_3d \
+    --input ~/3d-pipeline/workspace/concept/chest.png \
+    --generator sf3d \
+    --polycount 3000 \
+    --json</pre></div>
+          <p>A JSON file lands in <code>queue/pending/&lt;uuid&gt;.json</code> with every field a worker needs to pick up the work.</p>
+        </div>
+      </div>
+
+      <div class="step" data-step="queue-worker">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Run a worker on each Studio</h3>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>python3 ~/3d-pipeline/workspace/queue_worker.py \
+    --assets-root ~/3d-pipeline/workspace \
+    --script-dir ~/3d-pipeline/workspace</pre></div>
+          <p>Use <code>--once</code> for one job and exit, <code>--max-jobs N</code> to cap the run, <code>--dry-run</code> to see the commands without invoking wrappers, or <code>--json</code> for one structured line per processed job. Signals (<code>SIGINT</code> / <code>SIGTERM</code>) finish the current job and exit cleanly — no half-claimed jobs left behind.</p>
+        </div>
+      </div>
+
+      <div class="step" data-step="queue-inspect">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Inspect results</h3>
+          <p>Finished jobs land in <code>queue/done/</code>; failures in <code>queue/failed/</code>. Each file is the full job record with the wrapper's <code>--json</code> output inlined under <code>result</code>, plus <code>machine</code> and <code>hardware_tier</code>. <code>cat queue/done/&lt;uuid&gt;.json | python3 -m json.tool</code> is enough to diagnose anything.</p>
         </div>
       </div>
     </section>

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Studio-tier technical context for AI assistants helping with Ken Allred's local 2D/3D/print pipeline. The delta on top of the laptop AI context — hardware tier, queue, shared storage, full-suite bake-offs.">
+<title>Asset Pipeline · AI Context · Studio tier</title>
+<style>
+:root {
+  --bg: #1e1e2e; --mantle: #181825; --crust: #11111b;
+  --surface0: #313244; --overlay0: #6c7086; --overlay1: #7f849c;
+  --subtext0: #a6adc8; --subtext1: #bac2de; --text: #cdd6f4;
+  --peach: #fab387; --green: #a6e3a1; --yellow: #f9e2af;
+  --red: #f38ba8; --mauve: #cba6f7; --blue: #89b4fa;
+  --sapphire: #74c7ec; --lavender: #b4befe;
+  --rule: rgba(205, 214, 244, 0.07);
+  --rule-strong: rgba(205, 214, 244, 0.13);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+  font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+  font-size: 14px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+main { max-width: 920px; margin: 0 auto; padding: 40px 28px 140px; }
+a { color: var(--lavender); text-decoration: none; border-bottom: 1px dotted var(--overlay0); }
+a:hover { color: var(--peach); border-bottom-color: var(--peach); }
+code { background: var(--surface0); color: var(--peach); padding: 1px 6px;
+  border-radius: 3px; font-size: 0.93em; border: 1px solid var(--rule-strong); }
+pre { background: var(--mantle); color: var(--subtext1); padding: 14px 18px;
+  border-radius: 6px; border: 1px solid var(--rule-strong); overflow-x: auto;
+  font-size: 12.5px; line-height: 1.55; margin: 14px 0; }
+pre code { background: none; border: none; color: inherit; padding: 0; }
+h1 { font-size: 28px; font-weight: 700; margin: 0 0 8px; letter-spacing: -0.01em; }
+.subtitle { font-size: 14px; color: var(--overlay1); margin-bottom: 36px; font-style: italic; }
+h2 { font-size: 20px; font-weight: 700; color: var(--peach); margin: 56px 0 16px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--rule-strong); letter-spacing: -0.005em; }
+h3 { font-size: 15px; font-weight: 700; color: var(--mauve); margin: 28px 0 10px; }
+p { margin: 10px 0; color: var(--subtext1); }
+ul, ol { margin: 12px 0; padding-left: 22px; }
+li { margin: 4px 0; color: var(--subtext1); }
+li > strong { color: var(--text); }
+.sec-num { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--overlay0); margin-bottom: 4px; }
+.banner { background: linear-gradient(135deg, rgba(250, 179, 135, 0.06), rgba(180, 190, 254, 0.06));
+  border: 1px solid var(--rule-strong); border-left: 3px solid var(--peach);
+  border-radius: 6px; padding: 18px 22px; margin: 0 0 36px; }
+.banner-eyebrow { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--peach); margin-bottom: 6px; font-weight: 600; }
+.banner p { margin: 0; font-size: 13px; color: var(--subtext1); line-height: 1.6; }
+.callout { border-left: 3px solid var(--overlay0); background: var(--mantle);
+  border-radius: 0 4px 4px 0; padding: 12px 16px; margin: 16px 0; font-size: 13px; }
+.callout-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--overlay1); margin-bottom: 6px; font-weight: 600; }
+.callout-rationale { border-left-color: var(--mauve); }
+.callout-rationale .callout-label { color: var(--mauve); }
+.callout-warn { border-left-color: var(--yellow); background: rgba(249, 226, 175, 0.04); }
+.callout-warn .callout-label { color: var(--yellow); }
+.callout-gotcha { border-left-color: var(--red); background: rgba(243, 139, 168, 0.04); }
+.callout-gotcha .callout-label { color: var(--red); }
+.callout-context { border-left-color: var(--sapphire); background: rgba(116, 199, 236, 0.04); }
+.callout-context .callout-label { color: var(--sapphire); }
+.callout-decision { border-left-color: var(--green); background: rgba(166, 227, 161, 0.04); }
+.callout-decision .callout-label { color: var(--green); }
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { color: var(--peach); font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--rule-strong); }
+td { color: var(--subtext1); }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Asset Pipeline · AI Context · Studio tier</h1>
+<div class="subtitle">A technical context document for AI assistants helping with the M3 Ultra Mac Studios. Reads as a delta on top of the <a href="asset-pipeline-ai-context.html">laptop AI context</a>.</div>
+
+<div class="banner">
+  <div class="banner-eyebrow">For AI assistants</div>
+  <p>This is the <em>delta</em> document for the studio tier. The full pipeline architecture (project detection, wrappers, manifest, Claude Code skill, decisions about bash vs Python, one-venv-per-tool, etc.) lives in <a href="asset-pipeline-ai-context.md">the laptop AI context</a> and is unchanged on the Studios. Read both — laptop first for the bulk of the system, then this file for what only matters when the active tier is <code>studio</code>.</p>
+</div>
+
+<section>
+  <div class="sec-num">00 · Context</div>
+  <h2>Audience &amp; purpose</h2>
+  <p>This document supplements the laptop-tier AI context with the studio-tier deltas. The pipeline architecture, wrappers, project detection, manifest schema, and the Claude Code skill are all <strong>the same</strong> on both tiers. The differences are bounded:</p>
+  <ul>
+    <li>The <code>.config</code> setting (<code>hardware_tier=studio</code>).</li>
+    <li>The default recommendations (which opt-in lanes become realistic).</li>
+    <li>The queue, which only makes sense with two machines.</li>
+    <li>The benchmark suite size you can sensibly run.</li>
+    <li>Some operational concerns (shared storage, rsync).</li>
+  </ul>
+  <p>If you find yourself wanting to re-derive the pipeline's decisions, read the laptop AI context first. Don't duplicate that thinking here.</p>
+</section>
+
+<section>
+  <div class="sec-num">01 · Context</div>
+  <h2>Hardware tier: studio</h2>
+  <p>Two Apple M3 Ultra Mac Studios. Each:</p>
+  <ul>
+    <li>512&nbsp;GB unified memory.</li>
+    <li>8&nbsp;TB local NVMe storage.</li>
+    <li>Apple Silicon (mflux/MLX-compatible).</li>
+  </ul>
+  <p>The user identifies the active tier by adding <code>hardware_tier = studio</code> to <code>~/3d-pipeline/.config</code> on each Studio. Wrappers and the Claude Code skill read that file; they <strong>never</strong> sniff hostname. Cloning or renaming a Studio should not silently change behaviour.</p>
+  <div class="callout callout-rationale">
+    <div class="callout-label">Rationale — Why an explicit config</div>
+    <p>Hostnames change. macOS image cloning, network rename, "we got a third Studio for the office" — any of these can silently flip behaviour if the system guesses. A single key=value file is trivially editable by the user and easy to audit.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">02 · Context</div>
+  <h2>How studio differs from laptop</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Concern</th><th>Laptop</th><th>Studio</th></tr></thead>
+    <tbody>
+      <tr><td>Default 2D model</td><td>Z-Image Turbo</td><td>Z-Image Turbo</td></tr>
+      <tr><td>Default 3D generator</td><td>SF3D</td><td>SF3D</td></tr>
+      <tr><td>Opt-in <code>non_commercial</code></td><td>Slow; rarely recommended</td><td>Comfortable; still requires explicit user accept</td></tr>
+      <tr><td><code>flux-dev</code>, <code>trellis</code></td><td>Possible; memory-tight</td><td>Trivial fit; <strong>still <code>non_commercial</code></strong></td></tr>
+      <tr><td><code>spar3d</code></td><td>Possible; memory-tight</td><td>Comfortable; benchmark before adopting</td></tr>
+      <tr><td>Benchmark suite</td><td><code>quick</code> is reasonable</td><td><code>default</code> is realistic</td></tr>
+      <tr><td>Two-machine queue</td><td>Not applicable</td><td>Primary motivation</td></tr>
+      <tr><td>Storage budget</td><td>Constrained</td><td>Liberal (8&nbsp;TB local)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout callout-decision">
+    <div class="callout-label">Decision — Defaults stay the same across tiers</div>
+    <p>The user prefers commercial-safe assets for Grithkin and GripCraft. The studio's headroom doesn't change the licence on FLUX dev or TRELLIS — those remain <code>non_commercial</code>. Memory permits using them; the licence still constrains them. Do not silently promote them to defaults at the studio tier just because they "fit."</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">03 · Stack</div>
+  <h2>Memory budget at 512 GB</h2>
+  <p>Wrappers run sequentially — they activate a tool's venv, run, deactivate. So memory pressure is still single-model, not concurrent. With 512&nbsp;GB available, none of the supported models come close:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Tool / stage</th><th>Approx. peak</th><th>Headroom (single Studio)</th></tr></thead>
+    <tbody>
+      <tr><td><code>mflux</code> + Z-Image Turbo (q8)</td><td>~10&nbsp;GB</td><td>50×</td></tr>
+      <tr><td><code>mflux</code> + FLUX schnell (q8)</td><td>~14&nbsp;GB</td><td>35×</td></tr>
+      <tr><td><code>mflux</code> + FLUX dev (q8)</td><td>~16&nbsp;GB</td><td>30×</td></tr>
+      <tr><td>SF3D inference</td><td>~6&nbsp;GB</td><td>80×</td></tr>
+      <tr><td>SPAR3D inference</td><td>~8–10&nbsp;GB</td><td>50×</td></tr>
+      <tr><td>TRELLIS.2 inference</td><td>~10–14&nbsp;GB</td><td>35×</td></tr>
+      <tr><td>Blender headless cleanup</td><td>~2&nbsp;GB</td><td>250×</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout callout-context">
+    <div class="callout-label">Context — Why this matters less than it looks</div>
+    <p>Memory ceilings are no longer the limiting factor for model selection at the studio tier; latency and licence are. A model that takes 60&nbsp;s on a Studio is still a 60-second wait if you need to chain 14 prompts × 2 generators. The queue exists partly to keep that wait usable.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">04 · Stack</div>
+  <h2>License buckets at studio scale</h2>
+  <p>The bucket names are exact (used in code, JSON, manifest, docs):</p>
+  <ul>
+    <li><code>commercial_safe</code>: z-image-turbo, flux-schnell, qwen-image</li>
+    <li><code>commercial_threshold</code>: sf3d, spar3d</li>
+    <li><code>non_commercial</code>: flux-dev, trellis</li>
+    <li><code>source_available_restricted</code>: reserved</li>
+    <li><code>unclear_risky</code> / <code>unknown</code>: LoRAs, anything untagged</li>
+  </ul>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Gotcha — Studio headroom does not change licensing</div>
+    <p>The whole reason the Studios exist is to make the pipeline faster, not to relax licensing. If a wrapper emits <code>[license] WARNING: flux-dev is non-commercial</code>, relay that warning. Do not interpret studio capacity as licence approval.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">05 · Architecture</div>
+  <h2>The two-machine queue</h2>
+  <p><code>scripts/queue_submit.py</code> writes job JSON to <code>&lt;assets_root&gt;/queue/pending/&lt;uuid&gt;.json</code>. <code>scripts/queue_worker.py</code> claims pending jobs atomically via <code>os.rename()</code> (POSIX rename is atomic on the same filesystem, including NFS), runs the appropriate wrapper under <code>--json</code>, and finalises the job to <code>done/</code> or <code>failed/</code>.</p>
+  <p>Layout:</p>
+  <pre>&lt;assets_root&gt;/queue/
+  pending/     # awaiting claim
+  running/     # claimed; in flight
+  done/        # successful, with wrapper JSON inlined
+  failed/      # non-zero exit or malformed JSON</pre>
+  <p>The worker:</p>
+  <ul>
+    <li>Sorts pending by (<code>priority</code>, mtime). Lower priority value runs earlier.</li>
+    <li>Inherits env so <code>PIPELINE_CONFIG_PATH</code>, <code>SPAR3D_DIR</code>, etc. flow through.</li>
+    <li>Honours <code>SIGINT</code> / <code>SIGTERM</code>: finishes the current job then exits cleanly.</li>
+    <li>Has <code>--once</code>, <code>--max-jobs N</code>, <code>--dry-run</code>, and <code>--json</code> modes.</li>
+  </ul>
+  <div class="callout callout-rationale">
+    <div class="callout-label">Rationale — Why file-based and not SQLite</div>
+    <p>SQLite would buy us indexed queries and transactions, but introduce a dependency and a schema-migration concern. The queue is experimental scaffolding; the user wants to observe state with <code>ls</code> and <code>cat</code> and recover with <code>mv</code>. File-based wins on debuggability. If/when the queue graduates from experimental, SQLite is a reasonable upgrade path.</p>
+  </div>
+  <p>Limitations the docs are explicit about:</p>
+  <ul>
+    <li>No retry policy. Failed jobs sit in <code>failed/</code> until manually moved.</li>
+    <li>Single filesystem only. Rsync-synced folders need a write-direction convention or a lock file to avoid double-claim.</li>
+    <li>No supervisor. For continuous operation, wrap the worker in a launchd plist or <code>caffeinate</code> loop.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-num">06 · Architecture</div>
+  <h2>Shared storage and rsync</h2>
+  <p>Three sensible options. The wrappers and queue tolerate any of them as long as the path is identical on both Studios:</p>
+  <ol>
+    <li><strong>SMB share.</strong> Host Studio shares its <code>~/3d-pipeline/workspace/</code>. The guest mounts at the same path. Simple, single-point-of-failure on the host. Atomic rename holds.</li>
+    <li><strong>Project rsync.</strong> Both Studios run independent pipelines. The active project (e.g. <code>~/games/grithkin/</code>) is rsync'd between them. Good for solo work; needs care if you also use the queue.</li>
+    <li><strong>NAS / NFS.</strong> Both Studios mount the same path from a NAS. Atomic rename holds on NFS. Most production-friendly, requires the NAS.</li>
+  </ol>
+  <p>Model caches (HuggingFace, mflux, SF3D weights) can live on the shared store (single download, ~50&nbsp;GB savings) or be duplicated locally on each Studio (faster reads, 8&nbsp;TB local makes the duplication trivial).</p>
+  <div class="callout callout-context">
+    <div class="callout-label">Context — Why "same path" matters</div>
+    <p>The wrappers record absolute paths in <code>--json</code> and the manifest. If the same asset appears at different absolute paths on each Studio, the manifest is confusing and the queue's <code>input</code> field is unreliable. Pick one path, mount or symlink to it on both machines.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">07 · Architecture</div>
+  <h2>Full-suite bake-offs</h2>
+  <p><code>benchmark.sh --suite default</code> is the primary tool. At studio scale, 14 prompts × {sf3d, spar3d} × 1 concept = 42 runs is a coffee-break job, not an overnight job. The results structure (<code>benchmark_results.json</code>) records:</p>
+  <ul>
+    <li>Suite, hardware_tier, machine, project context.</li>
+    <li>One entry per run with status, exit code, duration, paths, file sizes, license_bucket.</li>
+    <li>A manual scoring scaffold (<code>prompt_match</code>, <code>front_accuracy</code>, ...) initialised to <code>null</code> / <code>"not_tested"</code>.</li>
+  </ul>
+  <p>The harness deliberately does not auto-score. Subjective metrics (topology, backside plausibility, UV quality) require a human or a specialised tool that doesn't yet exist in the pipeline. The structure exists so a later review pass (often via Claude Code) can fill it in systematically.</p>
+  <p>For parallel bake-offs across both Studios:</p>
+  <ol>
+    <li>Submit one job per (prompt, generator, model_2d) tuple to the queue.</li>
+    <li>Run a worker on each Studio.</li>
+    <li>Aggregate results from <code>queue/done/</code> after both workers idle.</li>
+  </ol>
+</section>
+
+<section>
+  <div class="sec-num">08 · Rough edges</div>
+  <h2>Studio-specific failure modes</h2>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Gotcha — Queue jobs stuck in running/</div>
+    <p>If a worker crashes or is killed with <code>kill -9</code>, the job file sits in <code>running/</code> forever. The pipeline has no health-check yet. Manual recovery: identify the stuck job's age, decide if it's actually stuck (vs slow), and <code>mv queue/running/X.json queue/pending/X.json</code> to resubmit.</p>
+  </div>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Gotcha — Two workers double-claim on rsync</div>
+    <p>If both Studios independently rsync <code>queue/pending/</code> in both directions, two workers can see the same job and rename succeeds on each because they're operating on local copies. The shared-storage options above avoid this; the rsync option requires single-direction sync of <code>queue/pending/</code>.</p>
+  </div>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Gotcha — Studio runs FLUX dev because it can</div>
+    <p>The wrappers warn but don't block. If the user picks <code>flux-dev</code> for a commercial project on the studio tier, the warning still fires; the output is still <code>non_commercial</code>. Don't let the studio's comfort with the model imply licence approval. Confirm with the user whenever a <code>non_commercial</code> model is selected.</p>
+  </div>
+  <div class="callout callout-gotcha">
+    <div class="callout-label">Gotcha — Model cache divergence between Studios</div>
+    <p>Two Studios with independent caches will sometimes diverge on minor model version updates (HuggingFace re-uploads, etc.). Bake-off comparisons can be confused by this. Either use a shared cache, or pin model versions in each environment and re-pin in sync.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-num">09 · Working with this</div>
+  <h2>How to help the user effectively</h2>
+  <p>When the active tier is <code>studio</code>, prefer:</p>
+  <ul>
+    <li>The <code>default</code> suite over <code>quick</code> for benchmarks.</li>
+    <li>SPAR3D as a realistic comparison candidate (always with benchmark evidence).</li>
+    <li>The queue for batches of &gt;5 generations.</li>
+    <li>Full studio-doc references (<code>docs/asset-pipeline-guide-studio.html</code>, <code>docs/UPGRADES-studio.md</code>) when pointing the user at install or upgrade docs.</li>
+  </ul>
+  <p>Avoid:</p>
+  <ul>
+    <li>Suggesting <code>flux-dev</code> or <code>trellis</code> as a default just because they fit.</li>
+    <li>Skipping the licence-bucket call-out when recommending anything outside the default lane.</li>
+    <li>Recommending the queue for single-asset work — it's overhead for nothing.</li>
+  </ul>
+  <p>Always:</p>
+  <ul>
+    <li>Mention <code>hardware_tier=studio</code> is the only manual config required on each new Studio.</li>
+    <li>Relay non-commercial warnings.</li>
+    <li>Ask for print size on print.sh runs unless already specified.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-num">10 · Working with this</div>
+  <h2>Cross-references</h2>
+  <ul>
+    <li><a href="asset-pipeline-ai-context.html">asset-pipeline-ai-context.html</a> — the full pipeline architecture, decisions, and rationale. Unchanged for studio.</li>
+    <li><a href="../docs/asset-pipeline-guide-studio.html">asset-pipeline-guide-studio.html</a> — user-facing install guide for the studio tier.</li>
+    <li><a href="../docs/UPGRADES-studio.md">UPGRADES-studio.md</a> — the v0.2 upgrade summary for the studio tier.</li>
+    <li><a href="../skill/SKILL.md">SKILL.md</a> — the Claude Code skill, tier-aware.</li>
+    <li>The shared <code>~/3d-pipeline/workspace/</code> scripts — same on both tiers; the studio guide installs them identically to the laptop guide.</li>
+  </ul>
+</section>
+
+</main>
+</body>
+</html>
