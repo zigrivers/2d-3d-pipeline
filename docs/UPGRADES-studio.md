@@ -123,10 +123,42 @@ forensic record.
 - Workers honour `SIGINT` / `SIGTERM`: they finish the current job and exit
   cleanly; no half-claimed jobs.
 - Failed jobs stay in `failed/` until you move them back. The queue
-  intentionally has no retry policy yet — surfaces failures rather than
-  hiding them.
+  intentionally has no automated retry; the only recovery is the
+  reclaim flag (below) for jobs that got stuck in `running/`.
 - For long-running deployments, wrap the worker in a launchd plist or a
   small supervisor script. The scaffold doesn't ship one.
+
+### Stuck-job reclaim
+
+If a worker is killed with `kill -9`, OS-crashes, or otherwise dies
+mid-job, the job file sits in `running/` indefinitely. Two flags on the
+worker make recovery cheap without a real supervisor:
+
+```bash
+python3 ~/3d-pipeline/workspace/queue_worker.py \
+    --assets-root /shared/path/workspace \
+    --script-dir ~/3d-pipeline/workspace \
+    --reclaim-stuck-after 30 \
+    --max-claims 3
+```
+
+- `--reclaim-stuck-after MINUTES` — at the start of every poll cycle,
+  the worker scans `running/` for jobs whose mtime is older than
+  MINUTES. Each gets its `claim_count` incremented and is moved back
+  to `pending/` (resetting `started` and `machine` so the next worker
+  picks it up fresh). 0 (the default) disables reclaim entirely.
+- `--max-claims N` (default 3) — jobs that have been claimed this
+  many times move to `failed/` instead of `pending/`, with a
+  structured error describing the reclaim history.
+
+Pick MINUTES based on your longest expected job. Typical mflux + SF3D +
+Blender end-to-end is well under 5 minutes on a Studio, so
+`--reclaim-stuck-after 30` is a conservative default that won't
+prematurely re-claim a job that's just slow.
+
+This is intentionally the **cheap** version of retry: no exponential
+backoff, no per-stage policy, no dead-letter queue. Enough to recover
+from worker crashes; not enough to call production-grade.
 
 ---
 

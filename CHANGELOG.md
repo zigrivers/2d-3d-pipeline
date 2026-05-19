@@ -14,6 +14,14 @@ Small clean-ups landed after the v0.2.0 tag:
   documented as a design choice ("Why STL, not 3MF or OBJ" already lives
   in the AI context). The JSON `format` field stays at "stl" as a stable
   schema constant.
+- Queue worker gains an optional stuck-job reclaim:
+  `queue_worker.py --reclaim-stuck-after MINUTES --max-claims N`.
+  When enabled (off by default), each poll cycle scans `running/` for
+  stale jobs, bumps their `claim_count`, and moves them back to
+  `pending/` — or to `failed/` once they pass `--max-claims`. Cheap
+  recovery from worker crashes; intentionally not a full retry policy.
+  `queue_submit.py` now seeds `claim_count: 0` on new jobs. Documented
+  in `UPGRADES-studio.md` and the studio AI context.
 
 ## 2026-05-19 — v0.2.0
 

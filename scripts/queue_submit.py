@@ -100,6 +100,7 @@ def main() -> int:
         "license_bucket": args.license_bucket,
         "priority": args.priority,
         "status": "pending",
+        "claim_count": 0,
         "created": now,
         "started": None,
         "finished": None,

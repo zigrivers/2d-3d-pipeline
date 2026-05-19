@@ -153,6 +153,7 @@ The worker:
 - Inherits env so `PIPELINE_CONFIG_PATH`, `SPAR3D_DIR`, etc. flow through.
 - Honours `SIGINT` / `SIGTERM`: finishes the current job then exits cleanly.
 - Has `--once`, `--max-jobs N`, `--dry-run`, and `--json` modes.
+- Optional stuck-job reclaim via `--reclaim-stuck-after MINUTES` (and `--max-claims N`, default 3). When enabled, every poll cycle scans `running/` for stale jobs, bumps their `claim_count`, and moves them back to `pending/` — or to `failed/` once they pass `--max-claims`. Disabled by default so the worker remains exactly as Phase 9 shipped unless explicitly opted into.
 
 > **🧠 Rationale — Why file-based and not SQLite**
 >
@@ -222,7 +223,7 @@ For parallel bake-offs across both Studios:
 
 > **🔴 Gotcha — Queue jobs stuck in `running/`**
 >
-> If a worker crashes or is killed with `kill -9`, the job file sits in `running/` forever. The pipeline has no health-check yet. Manual recovery: identify the stuck job's age, decide if it's actually stuck (vs slow), and `mv queue/running/X.json queue/pending/X.json` to resubmit.
+> If a worker crashes or is killed with `kill -9`, the job file sits in `running/` indefinitely. Automated recovery: run the worker with `--reclaim-stuck-after MINUTES` so each poll cycle scans for stale jobs and re-queues them (capped by `--max-claims`). Manual recovery still works the same way: identify the stuck job's age, decide if it's actually stuck (vs slow), and `mv queue/running/X.json queue/pending/X.json` to resubmit.
 
 > **🔴 Gotcha — Two workers double-claim on rsync**
 >

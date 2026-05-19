@@ -190,6 +190,7 @@ td { color: var(--subtext1); }
     <li>Inherits env so <code>PIPELINE_CONFIG_PATH</code>, <code>SPAR3D_DIR</code>, etc. flow through.</li>
     <li>Honours <code>SIGINT</code> / <code>SIGTERM</code>: finishes the current job then exits cleanly.</li>
     <li>Has <code>--once</code>, <code>--max-jobs N</code>, <code>--dry-run</code>, and <code>--json</code> modes.</li>
+    <li>Optional stuck-job reclaim via <code>--reclaim-stuck-after MINUTES</code> (and <code>--max-claims N</code>, default 3). When enabled, every poll cycle scans <code>running/</code> for stale jobs, bumps their <code>claim_count</code>, and moves them back to <code>pending/</code> — or to <code>failed/</code> once they pass <code>--max-claims</code>. Disabled by default so the worker remains exactly as Phase 9 shipped unless explicitly opted into.</li>
   </ul>
   <div class="callout callout-rationale">
     <div class="callout-label">Rationale — Why file-based and not SQLite</div>
@@ -242,7 +243,7 @@ td { color: var(--subtext1); }
   <h2>Studio-specific failure modes</h2>
   <div class="callout callout-gotcha">
     <div class="callout-label">Gotcha — Queue jobs stuck in running/</div>
-    <p>If a worker crashes or is killed with <code>kill -9</code>, the job file sits in <code>running/</code> forever. The pipeline has no health-check yet. Manual recovery: identify the stuck job's age, decide if it's actually stuck (vs slow), and <code>mv queue/running/X.json queue/pending/X.json</code> to resubmit.</p>
+    <p>If a worker crashes or is killed with <code>kill -9</code>, the job file sits in <code>running/</code> indefinitely. Automated recovery: run the worker with <code>--reclaim-stuck-after MINUTES</code> so each poll cycle scans for stale jobs and re-queues them (capped by <code>--max-claims</code>). Manual recovery still works the same way: identify the stuck job's age, decide if it's actually stuck (vs slow), and <code>mv queue/running/X.json queue/pending/X.json</code> to resubmit.</p>
   </div>
   <div class="callout callout-gotcha">
     <div class="callout-label">Gotcha — Two workers double-claim on rsync</div>

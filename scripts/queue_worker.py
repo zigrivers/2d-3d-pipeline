@@ -11,6 +11,19 @@ POSIX guarantees rename atomicity on the same filesystem, including NFS.
 For rsync-synced folders, run only one rsync direction at a time or use
 a lock file to avoid double-claim.
 
+Stuck-job reclaim (v0.2 post-release polish):
+
+  --reclaim-stuck-after MINUTES   (default 0 = disabled)
+  --max-claims N                  (default 3)
+
+When reclaim is enabled, the worker scans running/ before each polling
+sleep. Jobs whose 'started' timestamp is older than MINUTES get their
+`claim_count` incremented and are moved back to pending/ — UNLESS
+claim_count has already reached --max-claims, in which case they're
+moved to failed/ with a structured error. This is the cheap version
+of retry: no exponential backoff, no dead-letter queue, no supervisor.
+Enough to recover from worker crashes; not enough to call production.
+
 Studio-tier feature. Single-machine laptop use works but the docs only
 ship the operational recipe for the two-Studio setup.
 """
@@ -70,6 +83,83 @@ def _list_pending(qr: Path) -> list[Path]:
             return (999, p.stat().st_mtime)
     files.sort(key=key)
     return files
+
+
+def _reclaim_stuck(qr: Path, threshold_minutes: float, max_claims: int,
+                   json_mode: bool) -> None:
+    """Move jobs in running/ older than `threshold_minutes` back to pending/
+    (with incremented claim_count) or to failed/ when they've already been
+    claimed max_claims times. Best-effort: races and missing files are
+    swallowed since another worker may have grabbed the same file.
+    """
+    running = qr / "running"
+    if not running.exists():
+        return
+    threshold_seconds = threshold_minutes * 60.0
+    now = time.time()
+    for job_path in list(running.iterdir()):
+        if not job_path.is_file() or job_path.suffix != ".json":
+            continue
+        if job_path.name.endswith(".tmp"):
+            continue
+        try:
+            age = now - job_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if age < threshold_seconds:
+            continue
+        try:
+            job = json.loads(job_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        claim_count = int(job.get("claim_count", 0))
+        job["claim_count"] = claim_count + 1
+        job["error"] = (
+            f"reclaimed after {threshold_minutes:.1f} minutes "
+            f"(claim_count was {claim_count}, mtime age was {age:.0f}s)"
+        )
+
+        if job["claim_count"] > max_claims:
+            target = qr / "failed" / job_path.name
+            job["status"] = "failed"
+            job["error"] = (
+                f"exceeded max claims ({max_claims}); last error: {job['error']}"
+            )
+        else:
+            target = qr / "pending" / job_path.name
+            job["status"] = "pending"
+            job["started"] = None
+            job["machine"] = None
+
+        tmp = job_path.with_suffix(".json.tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(job, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, job_path)
+            os.rename(job_path, target)
+        except OSError:
+            # Another worker may have grabbed it; that's fine.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+
+        if json_mode:
+            print(json.dumps({
+                "status": "ok",
+                "stage": "queue_worker_reclaim",
+                "job_id": job.get("id", ""),
+                "target": str(target),
+                "claim_count": job["claim_count"],
+                "outcome": job["status"],
+            }))
+        else:
+            print(f"[queue-worker] reclaimed {job_path.name} "
+                  f"(claim_count={job['claim_count']}, "
+                  f"outcome={job['status']})")
 
 
 def _try_claim(job_path: Path, qr: Path) -> Path | None:
@@ -178,6 +268,13 @@ def main() -> int:
                    help="Do not actually invoke wrappers; record cmd only.")
     p.add_argument("--json", action="store_true",
                    help="Emit a JSON status line per processed job.")
+    p.add_argument("--reclaim-stuck-after", type=float, default=0.0,
+                   metavar="MINUTES",
+                   help="Reclaim jobs stuck in running/ for longer than this many "
+                        "minutes. 0 (default) disables reclaim entirely.")
+    p.add_argument("--max-claims", type=int, default=3,
+                   help="If reclaim is enabled, jobs that have been claimed this many "
+                        "times move to failed/ instead of pending/ (default: 3).")
     args = p.parse_args()
 
     assets_root = Path(os.path.expanduser(args.assets_root))
@@ -201,6 +298,10 @@ def main() -> int:
 
     processed = 0
     while not stop["flag"]:
+        if args.reclaim_stuck_after > 0:
+            _reclaim_stuck(qr, args.reclaim_stuck_after, args.max_claims,
+                           json_mode=args.json)
+
         pending = _list_pending(qr)
         if not pending:
             if args.once or stop["flag"]:
