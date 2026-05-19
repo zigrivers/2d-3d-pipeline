@@ -18,6 +18,7 @@ help:
 
 verify:
 	@$(PYTHON) tools/verify_embeds.py
+	@$(PYTHON) tools/check_context_parity.py
 
 regenerate:
 	@$(PYTHON) tools/regenerate_embeds.py

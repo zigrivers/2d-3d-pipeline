@@ -76,6 +76,34 @@ sections, no decorative gradients, fewer collapsible affordances. Information
 density beats visual breathing room. Markdown is the primary form; the HTML
 mirror is for browsing convenience.
 
+## The AI context: markdown is canonical for content
+
+`context/asset-pipeline-ai-context.md` is the canonical source for the AI
+context document's **content**. `context/asset-pipeline-ai-context.html` is
+a polished mirror with additional hand-authored semantics that the markdown
+does not encode (custom side-by-side `<div class="tradeoff">` grids,
+section-number labels, the sticky sidebar nav).
+
+Because the relationship is asymmetric, the HTML is **not** auto-generated
+from the markdown today. Instead, `tools/check_context_parity.py` (wired
+into `make verify` and the pre-commit hook) enforces structural parity:
+
+- Every H2 section in the markdown (after stripping the `NN ·` prefix and
+  inline-code backticks) appears as an `<h2>` in the HTML, in the same order.
+- Callout counts match: `> **🧠 Rationale — ...**` blocks in markdown have
+  matching `class="callout-rationale"` elements in the HTML (and similarly
+  for `🔵`/Context, `🟢`/Decision, `🔴`/Gotcha, `⚠️`/Warn).
+
+When you edit either file, run `make verify` before committing. The
+pre-commit hook will block a commit that touches the AI context files
+without keeping them in parity.
+
+Promoting this to a full markdown→HTML generator (with extensions for the
+custom block types) is a future-work item — not done today because the
+HTML's polish exceeds what a stock converter produces, and a faithful
+generator is a real project. See `tools/check_context_parity.py` for the
+exact rules currently enforced.
+
 ## When to use HTML vs markdown
 
 | Use HTML for                            | Use markdown for                       |

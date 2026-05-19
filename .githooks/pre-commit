@@ -9,16 +9,30 @@ cd "$repo_root"
 
 changed_canonical=$(git diff --cached --name-only --diff-filter=ACMR \
     | grep -E '^(scripts/|skill/)' || true)
+changed_context=$(git diff --cached --name-only --diff-filter=ACMR \
+    | grep -E '^context/asset-pipeline-ai-context\.(md|html)$' || true)
 
-if [ -z "$changed_canonical" ]; then
-    exit 0
+fail=0
+
+if [ -n "$changed_canonical" ]; then
+    if ! python3 tools/verify_embeds.py >/dev/null 2>&1; then
+        echo "pre-commit: HTML embeds in docs/asset-pipeline-guide.html are out of sync."
+        echo "Canonical files in this commit:"
+        echo "$changed_canonical" | sed 's/^/  - /'
+        echo
+        echo "Run 'make regenerate' and stage docs/asset-pipeline-guide.html before committing."
+        fail=1
+    fi
 fi
 
-if ! python3 tools/verify_embeds.py >/dev/null 2>&1; then
-    echo "pre-commit: HTML embeds in docs/asset-pipeline-guide.html are out of sync."
-    echo "Canonical files in this commit:"
-    echo "$changed_canonical" | sed 's/^/  - /'
-    echo
-    echo "Run 'make regenerate' and stage docs/asset-pipeline-guide.html before committing."
-    exit 1
+if [ -n "$changed_context" ]; then
+    if ! python3 tools/check_context_parity.py >/dev/null 2>&1; then
+        echo "pre-commit: AI context md and HTML are out of structural parity."
+        python3 tools/check_context_parity.py | sed 's/^/  /'
+        echo
+        echo "Update both files so sections and callouts stay in sync."
+        fail=1
+    fi
 fi
+
+exit $fail

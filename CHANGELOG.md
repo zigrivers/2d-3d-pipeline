@@ -2,6 +2,20 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-19 — v0.1.0
+
+First tagged release. Includes:
+
+- AI context: `context/asset-pipeline-ai-context.md` declared canonical for
+  content. `tools/check_context_parity.py` enforces H2-section and callout
+  count parity with the HTML mirror, wired into `make verify` and the
+  pre-commit hook. Full markdown→HTML auto-generation deferred — the HTML
+  has hand-authored polish (tradeoff grids, sec-num labels) that exceeds
+  what a stock converter produces.
+- CI: `.github/workflows/verify.yml` runs `make verify` on push and PR.
+- Release bundle attached as `asset-pipeline-bundle.zip` (scripts + skill
+  + setup guide).
+
 ## 2026-05-19 — tooling
 
 Maintenance tooling added on top of the initial import:
