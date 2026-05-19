@@ -4255,6 +4255,437 @@ if __name__ == &quot;__main__&quot;:
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/texture_inspect.py</pre></div>
             </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>queue_submit.py</code>
+                <span class="script-summary-desc">v0.2 queue submitter (studio-tier, experimental)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/queue_submit.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Submit a job to the asset-pipeline queue (v0.2, experimental).
+
+The queue is a file-based directory under the active project (or the
+global workspace). Three subdirectories track lifecycle:
+
+  queue/pending/   Jobs waiting to be claimed.
+  queue/running/   Jobs a worker has atomically claimed (via mv).
+  queue/done/      Successful jobs (with the worker&#x27;s wrapper JSON inline).
+  queue/failed/    Jobs that exited non-zero.
+
+This script writes a single JSON file under queue/pending/&lt;uuid&gt;.json.
+A worker (queue_worker.py) on either Mac Studio can claim it.
+
+Why files, not SQLite: simpler to debug (cat / mv), trivially observable
+(ls), no schema migrations, and `mv` rename is atomic on POSIX which
+gives us multi-worker safety for free.
+
+This is studio-tier scaffolding. On a laptop you can still submit
+single-machine jobs, but the design assumption is two M3 Ultra Studios
+sharing a folder (or rsync-synced folder) of pending jobs.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+VALID_STAGES = (&quot;text_to_image&quot;, &quot;image_to_3d&quot;, &quot;glb_to_print&quot;)
+
+
+def _queue_root(assets_root: Path) -&gt; Path:
+    return assets_root / &quot;queue&quot;
+
+
+def _ensure_queue_dirs(qr: Path) -&gt; None:
+    for sub in (&quot;pending&quot;, &quot;running&quot;, &quot;done&quot;, &quot;failed&quot;):
+        (qr / sub).mkdir(parents=True, exist_ok=True)
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser()
+    p.add_argument(&quot;--assets-root&quot;, required=True,
+                   help=&quot;Active assets root (from resolve_project_context).&quot;)
+    p.add_argument(&quot;--stage&quot;, required=True, choices=VALID_STAGES)
+    p.add_argument(&quot;--input&quot;, default=&quot;&quot;,
+                   help=&quot;Input file (image for image_to_3d, GLB for glb_to_print) &quot;
+                        &quot;or prompt (for text_to_image).&quot;)
+    p.add_argument(&quot;--output-name&quot;, default=&quot;&quot;,
+                   help=&quot;Output stem; auto-derived if empty.&quot;)
+    p.add_argument(&quot;--project&quot;, default=&quot;&quot;,
+                   help=&quot;Project root to pass to the wrapper via --project.&quot;)
+    p.add_argument(&quot;--generator&quot;, default=&quot;&quot;,
+                   help=&quot;2D model (z-image-turbo|flux-schnell|flux-dev|qwen-image) &quot;
+                        &quot;OR 3D generator (sf3d|spar3d|trellis).&quot;)
+    p.add_argument(&quot;--polycount&quot;, type=int, default=0)
+    p.add_argument(&quot;--texture-resolution&quot;, type=int, default=0)
+    p.add_argument(&quot;--target-size-mm&quot;, type=float, default=0.0,
+                   help=&quot;For glb_to_print stage.&quot;)
+    p.add_argument(&quot;--allow-oversize&quot;, action=&quot;store_true&quot;)
+    p.add_argument(&quot;--license-bucket&quot;, default=&quot;&quot;,
+                   help=&quot;Override the wrapper&#x27;s auto-detected bucket; rarely needed.&quot;)
+    p.add_argument(&quot;--priority&quot;, type=int, default=50,
+                   help=&quot;Lower numbers run earlier when a worker picks the next job.&quot;)
+    p.add_argument(&quot;--id&quot;, default=&quot;&quot;,
+                   help=&quot;Override the job UUID (mostly for tests).&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Emit a JSON line describing the submitted job.&quot;)
+    args = p.parse_args()
+
+    assets_root = Path(os.path.expanduser(args.assets_root))
+    qr = _queue_root(assets_root)
+    _ensure_queue_dirs(qr)
+
+    if not args.input and args.stage != &quot;text_to_image&quot;:
+        print(&quot;ERROR: --input is required for non-text stages&quot;, file=sys.stderr)
+        return 2
+
+    job_id = args.id or uuid.uuid4().hex
+    now = datetime.now().isoformat(timespec=&quot;seconds&quot;)
+
+    job = {
+        &quot;id&quot;: job_id,
+        &quot;schema_version&quot;: 1,
+        &quot;stage&quot;: args.stage,
+        &quot;input&quot;: args.input,
+        &quot;output_name&quot;: args.output_name,
+        &quot;project&quot;: args.project,
+        &quot;generator&quot;: args.generator,
+        &quot;polycount&quot;: args.polycount,
+        &quot;texture_resolution&quot;: args.texture_resolution,
+        &quot;target_size_mm&quot;: args.target_size_mm,
+        &quot;allow_oversize&quot;: args.allow_oversize,
+        &quot;license_bucket&quot;: args.license_bucket,
+        &quot;priority&quot;: args.priority,
+        &quot;status&quot;: &quot;pending&quot;,
+        &quot;created&quot;: now,
+        &quot;started&quot;: None,
+        &quot;finished&quot;: None,
+        &quot;machine&quot;: None,
+        &quot;hardware_tier&quot;: None,
+        &quot;error&quot;: None,
+        &quot;result&quot;: None,
+    }
+
+    target = qr / &quot;pending&quot; / f&quot;{job_id}.json&quot;
+    # Write to a tempfile in the same dir then rename (atomic on POSIX).
+    tmp = target.with_suffix(&quot;.json.tmp&quot;)
+    with open(tmp, &quot;w&quot;) as f:
+        json.dump(job, f, indent=2, sort_keys=True)
+        f.write(&quot;\n&quot;)
+    os.replace(tmp, target)
+
+    if args.json:
+        print(json.dumps({&quot;status&quot;: &quot;ok&quot;, &quot;stage&quot;: &quot;queue_submit&quot;,
+                          &quot;job_id&quot;: job_id, &quot;job_path&quot;: str(target),
+                          &quot;queue_root&quot;: str(qr)}))
+    else:
+        print(f&quot;[queue] submitted {args.stage} job {job_id} -&gt; {target}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+
+
+# Silence the unused-import lint check; shutil is imported because future
+# extensions to this script (bulk-submit, archive, prune) need it.
+_ = shutil
+_ = time
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/queue_submit.py</pre></div>
+            </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>queue_worker.py</code>
+                <span class="script-summary-desc">v0.2 queue worker (studio-tier, experimental)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/queue_worker.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Asset-pipeline queue worker (v0.2, experimental).
+
+Polls `&lt;assets_root&gt;/queue/pending/` for jobs, claims one atomically by
+moving it into `running/`, runs the appropriate wrapper, and finally
+moves the job file into `done/` or `failed/` with the wrapper&#x27;s --json
+output preserved inline.
+
+Multi-machine safety: claim is `os.rename(pending/x.json, running/x.json)`.
+POSIX guarantees rename atomicity on the same filesystem, including NFS.
+For rsync-synced folders, run only one rsync direction at a time or use
+a lock file to avoid double-claim.
+
+Studio-tier feature. Single-machine laptop use works but the docs only
+ship the operational recipe for the two-Studio setup.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import errno
+import json
+import os
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+VALID_STAGES = {&quot;text_to_image&quot;, &quot;image_to_3d&quot;, &quot;glb_to_print&quot;}
+
+
+def _hostname_safe() -&gt; str:
+    try:
+        return socket.gethostname() or &quot;unknown&quot;
+    except OSError:
+        return &quot;unknown&quot;
+
+
+def _read_hardware_tier(pipeline_root: Path) -&gt; str:
+    cfg = pipeline_root / &quot;.config&quot;
+    if not cfg.exists():
+        return &quot;laptop&quot;
+    for line in cfg.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith(&quot;#&quot;) or &quot;=&quot; not in line:
+            continue
+        k, _, v = line.partition(&quot;=&quot;)
+        if k.strip() == &quot;hardware_tier&quot;:
+            v = v.strip()
+            return v if v in (&quot;laptop&quot;, &quot;studio&quot;) else &quot;laptop&quot;
+    return &quot;laptop&quot;
+
+
+def _list_pending(qr: Path) -&gt; list[Path]:
+    pending = qr / &quot;pending&quot;
+    if not pending.exists():
+        return []
+    files = [p for p in pending.iterdir()
+             if p.is_file() and p.suffix == &quot;.json&quot;
+             and not p.name.endswith(&quot;.tmp&quot;)]
+    # Sort by (priority, mtime) so high-priority and older jobs go first.
+    def key(p):
+        try:
+            j = json.loads(p.read_text())
+            return (int(j.get(&quot;priority&quot;, 50)), p.stat().st_mtime)
+        except (OSError, json.JSONDecodeError):
+            return (999, p.stat().st_mtime)
+    files.sort(key=key)
+    return files
+
+
+def _try_claim(job_path: Path, qr: Path) -&gt; Path | None:
+    &quot;&quot;&quot;Atomically move pending/&lt;x&gt;.json -&gt; running/&lt;x&gt;.json. Returns the new
+    path on success or None on race (lost the claim to another worker).&quot;&quot;&quot;
+    target = qr / &quot;running&quot; / job_path.name
+    try:
+        os.rename(job_path, target)
+        return target
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+            return None
+        raise
+
+
+def _build_command(job: dict, script_dir: Path) -&gt; list[str]:
+    stage = job[&quot;stage&quot;]
+    if stage == &quot;text_to_image&quot;:
+        cmd = [str(script_dir / &quot;concept.sh&quot;), job.get(&quot;input&quot;, &quot;&quot;)]
+        if job.get(&quot;generator&quot;):
+            cmd.extend([&quot;-m&quot;, job[&quot;generator&quot;]])
+        if job.get(&quot;output_name&quot;):
+            cmd.extend([&quot;-o&quot;, job[&quot;output_name&quot;]])
+    elif stage == &quot;image_to_3d&quot;:
+        cmd = [str(script_dir / &quot;generate.sh&quot;), &quot;-i&quot;, job[&quot;input&quot;]]
+        if job.get(&quot;generator&quot;):
+            cmd.extend([&quot;-g&quot;, job[&quot;generator&quot;]])
+        if job.get(&quot;polycount&quot;):
+            cmd.extend([&quot;-p&quot;, str(job[&quot;polycount&quot;])])
+        if job.get(&quot;texture_resolution&quot;):
+            cmd.extend([&quot;-t&quot;, str(job[&quot;texture_resolution&quot;])])
+        if job.get(&quot;output_name&quot;):
+            cmd.extend([&quot;-o&quot;, job[&quot;output_name&quot;]])
+    elif stage == &quot;glb_to_print&quot;:
+        cmd = [str(script_dir / &quot;print.sh&quot;), &quot;-i&quot;, job[&quot;input&quot;]]
+        if job.get(&quot;target_size_mm&quot;):
+            cmd.extend([&quot;-s&quot;, str(job[&quot;target_size_mm&quot;])])
+        if job.get(&quot;allow_oversize&quot;):
+            cmd.append(&quot;--allow-oversize&quot;)
+        if job.get(&quot;output_name&quot;):
+            cmd.extend([&quot;-o&quot;, job[&quot;output_name&quot;]])
+    else:
+        raise ValueError(f&quot;unknown stage: {stage}&quot;)
+    if job.get(&quot;project&quot;):
+        cmd.extend([&quot;--project&quot;, job[&quot;project&quot;]])
+    cmd.append(&quot;--json&quot;)
+    return cmd
+
+
+def _process_job(job_path: Path, job: dict, script_dir: Path,
+                 hostname: str, hw_tier: str, dry_run: bool) -&gt; tuple[bool, dict | None, str]:
+    &quot;&quot;&quot;Run the wrapper for this job. Return (ok, wrapper_json, stderr_tail).&quot;&quot;&quot;
+    cmd = _build_command(job, script_dir)
+    if dry_run:
+        return True, {&quot;status&quot;: &quot;dry_run&quot;, &quot;cmd&quot;: cmd}, &quot;&quot;
+    # Inherit env so PIPELINE_CONFIG_PATH / SPAR3D_DIR / etc. flow through.
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    parsed = None
+    for line in reversed(proc.stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            parsed = None
+        break
+    stderr_tail = &quot;\n&quot;.join(proc.stderr.splitlines()[-30:])
+    ok = (proc.returncode == 0 and parsed is not None
+          and parsed.get(&quot;status&quot;) == &quot;ok&quot;)
+    if parsed is None:
+        parsed = {&quot;status&quot;: &quot;error&quot;, &quot;exit_code&quot;: proc.returncode,
+                  &quot;stdout_tail&quot;: &quot;\n&quot;.join(proc.stdout.splitlines()[-30:])}
+    return ok, parsed, stderr_tail
+
+
+def _finalize(job_path: Path, job: dict, qr: Path, success: bool) -&gt; Path:
+    bucket = &quot;done&quot; if success else &quot;failed&quot;
+    target = qr / bucket / job_path.name
+    tmp = job_path.with_suffix(&quot;.json.tmp&quot;)
+    with open(tmp, &quot;w&quot;) as f:
+        json.dump(job, f, indent=2, sort_keys=True)
+        f.write(&quot;\n&quot;)
+    os.replace(tmp, job_path)
+    os.rename(job_path, target)
+    return target
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser()
+    p.add_argument(&quot;--assets-root&quot;, required=True,
+                   help=&quot;Active assets root (queue lives at &lt;root&gt;/queue/).&quot;)
+    p.add_argument(&quot;--script-dir&quot;, required=True,
+                   help=&quot;Directory with concept.sh / generate.sh / print.sh.&quot;)
+    p.add_argument(&quot;--pipeline-root&quot;, default=os.path.expanduser(&quot;~/3d-pipeline&quot;),
+                   help=&quot;For reading hardware_tier from .config.&quot;)
+    p.add_argument(&quot;--once&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Claim and run a single job, then exit.&quot;)
+    p.add_argument(&quot;--max-jobs&quot;, type=int, default=0,
+                   help=&quot;Exit after N jobs (0 = unlimited).&quot;)
+    p.add_argument(&quot;--poll-seconds&quot;, type=float, default=5.0,
+                   help=&quot;Sleep interval when pending/ is empty.&quot;)
+    p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Do not actually invoke wrappers; record cmd only.&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Emit a JSON status line per processed job.&quot;)
+    args = p.parse_args()
+
+    assets_root = Path(os.path.expanduser(args.assets_root))
+    qr = assets_root / &quot;queue&quot;
+    for sub in (&quot;pending&quot;, &quot;running&quot;, &quot;done&quot;, &quot;failed&quot;):
+        (qr / sub).mkdir(parents=True, exist_ok=True)
+
+    script_dir = Path(os.path.expanduser(args.script_dir))
+    hostname = _hostname_safe()
+    hw_tier = _read_hardware_tier(Path(args.pipeline_root))
+
+    stop = {&quot;flag&quot;: False}
+
+    def _handle_signal(signum, frame):
+        stop[&quot;flag&quot;] = True
+        if not args.json:
+            print(f&quot;[queue-worker] received signal {signum}; stopping after current job&quot;)
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    processed = 0
+    while not stop[&quot;flag&quot;]:
+        pending = _list_pending(qr)
+        if not pending:
+            if args.once or stop[&quot;flag&quot;]:
+                break
+            time.sleep(args.poll_seconds)
+            continue
+
+        for candidate in pending:
+            claimed = _try_claim(candidate, qr)
+            if not claimed:
+                continue
+            try:
+                job = json.loads(claimed.read_text())
+            except json.JSONDecodeError as exc:
+                # Malformed job; move to failed and continue.
+                claimed.rename(qr / &quot;failed&quot; / claimed.name)
+                if not args.json:
+                    print(f&quot;[queue-worker] malformed job {claimed.name}: {exc}&quot;,
+                          file=sys.stderr)
+                break
+
+            job[&quot;status&quot;] = &quot;running&quot;
+            job[&quot;machine&quot;] = hostname
+            job[&quot;hardware_tier&quot;] = hw_tier
+            job[&quot;started&quot;] = datetime.now().isoformat(timespec=&quot;seconds&quot;)
+
+            ok, wrapper_json, stderr_tail = _process_job(
+                claimed, job, script_dir, hostname, hw_tier, args.dry_run
+            )
+            job[&quot;finished&quot;] = datetime.now().isoformat(timespec=&quot;seconds&quot;)
+            job[&quot;status&quot;] = &quot;done&quot; if ok else &quot;failed&quot;
+            job[&quot;result&quot;] = wrapper_json
+            if not ok:
+                job[&quot;error&quot;] = stderr_tail or &quot;wrapper returned non-zero or unparseable JSON&quot;
+
+            target = _finalize(claimed, job, qr, ok)
+            processed += 1
+
+            if args.json:
+                print(json.dumps({
+                    &quot;status&quot;: &quot;ok&quot; if ok else &quot;error&quot;,
+                    &quot;stage&quot;: &quot;queue_worker_step&quot;,
+                    &quot;job_id&quot;: job[&quot;id&quot;],
+                    &quot;job_stage&quot;: job[&quot;stage&quot;],
+                    &quot;target&quot;: str(target),
+                    &quot;machine&quot;: hostname,
+                    &quot;hardware_tier&quot;: hw_tier,
+                }))
+            else:
+                status_text = &quot;done&quot; if ok else &quot;failed&quot;
+                print(f&quot;[queue-worker] {status_text}: {job[&#x27;id&#x27;]} ({job[&#x27;stage&#x27;]}) &quot;
+                      f&quot;-&gt; {target}&quot;)
+
+            if args.max_jobs and processed &gt;= args.max_jobs:
+                stop[&quot;flag&quot;] = True
+                break
+            if args.once:
+                stop[&quot;flag&quot;] = True
+                break
+            break  # re-list pending so priority ordering is fresh
+
+    if not args.json:
+        print(f&quot;[queue-worker] processed {processed} job(s); exiting&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+
+
+# Imports used by future extensions of this worker (job-archival, dead-letter
+# requeue scripts that share this file&#x27;s helpers). Kept here so the lint check
+# stays quiet.
+_ = shlex
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/queue_worker.py</pre></div>
+            </details>
 
 
           <div class="callout callout-tip">

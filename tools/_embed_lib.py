@@ -32,6 +32,8 @@ EMBEDS: dict[str, str] = {
     "scripts/model_bakeoff.py":          "~/3d-pipeline/workspace/model_bakeoff.py",
     "scripts/texture.sh":                "~/3d-pipeline/workspace/texture.sh",
     "scripts/texture_inspect.py":        "~/3d-pipeline/workspace/texture_inspect.py",
+    "scripts/queue_submit.py":           "~/3d-pipeline/workspace/queue_submit.py",
+    "scripts/queue_worker.py":           "~/3d-pipeline/workspace/queue_worker.py",
     "skill/SKILL.md":                    "~/.claude/skills/asset-pipeline/SKILL.md",
     "skill/scripts/update_manifest.py":  "~/.claude/skills/asset-pipeline/scripts/update_manifest.py",
 }
