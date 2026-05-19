@@ -9,6 +9,7 @@
 
 PYTHON ?= python3
 GUIDE  := docs/asset-pipeline-guide.html
+GUIDE_STUDIO := docs/asset-pipeline-guide-studio.html
 BUNDLE := dist/asset-pipeline-bundle.zip
 
 .PHONY: help verify regenerate bundle install-hooks clean
@@ -25,10 +26,15 @@ regenerate:
 
 bundle: $(BUNDLE)
 
-$(BUNDLE): scripts/ skill/ $(GUIDE)
+# Bundle: canonical scripts + skill + both setup guides + UPGRADES + the
+# docs landing page. Excludes __pycache__ and ephemeral planning files so
+# the bundle stays clean for distribution.
+$(BUNDLE): scripts/ skill/ $(GUIDE) $(GUIDE_STUDIO)
 	@mkdir -p dist
 	@rm -f $(BUNDLE)
-	@zip -qr $(BUNDLE) scripts skill $(GUIDE)
+	@zip -qr $(BUNDLE) scripts skill $(GUIDE) $(GUIDE_STUDIO) \
+	    docs/UPGRADES-laptop.md docs/UPGRADES-studio.md docs/index.html \
+	    -x '*/__pycache__/*' '*.pyc' 'scripts/__pycache__' 'skill/scripts/__pycache__'
 	@echo "Wrote $(BUNDLE)"
 
 install-hooks:
