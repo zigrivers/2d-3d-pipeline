@@ -2,6 +2,19 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-19 — post-v0.2.0 polish
+
+Small clean-ups landed after the v0.2.0 tag:
+
+- Sidebar nav in the laptop AI-context HTML now lists the v0.2
+  hardware-tier notes section that landed in b10bb8d.
+- `print.sh --format stl|3mf` removed. STL was always the only path
+  the pipeline actually produced; 3MF was scoped out and the
+  "not implemented yet" stub read like a promise we'd keep. STL is now
+  documented as a design choice ("Why STL, not 3MF or OBJ" already lives
+  in the AI context). The JSON `format` field stays at "stl" as a stable
+  schema constant.
+
 ## 2026-05-19 — v0.2.0
 
 Studio-tier upgrade + dual docs set. Defaults preserved on both tiers

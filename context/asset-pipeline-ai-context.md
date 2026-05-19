@@ -68,7 +68,7 @@ License-bucket vocabulary (used in code, `--json`, manifest, docs — exact name
 New wrappers and flags in v0.2 (covered in detail throughout the architecture and decisions sections):
 
 - `concept.sh --json`, `generate.sh --json`, `print.sh --json` — structured output; subcommand stdout routes to stderr. Every JSON line includes `hardware_tier` and `machine`.
-- `print.sh --allow-oversize`, `--format stl|3mf` — per-axis 270 mm validation; 3mf currently fails with "not implemented yet".
+- `print.sh --allow-oversize` — per-axis 270 mm validation; pass the flag only when you've decided to print in pieces.
 - `generate.sh --overwrite-engine` and the new collision-aware engine staging (auto-suffix `<name>_2.glb`, etc.) when `naming.auto_increment_collisions=true`.
 - `generate.sh -g spar3d` — optional, experimental, `commercial_threshold`.
 - `scripts/json_emit.py` — typed key=value → JSON helper used by every wrapper.

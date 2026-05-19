@@ -2610,7 +2610,6 @@ TARGET_SIZE_MM=50
 ORIENTATION=&quot;auto&quot;
 COPY_COLOR_REF=1
 JSON_MODE=0
-FORMAT=&quot;stl&quot;
 ALLOW_OVERSIZE=0
 
 usage() {
@@ -2630,8 +2629,6 @@ Options:
                            Common sizes: 25 (small), 50 (figure), 100 (large),
                            200 (display)
       --no-color-ref       Don&#x27;t copy the concept image alongside the STL
-      --format FMT         stl (default) | 3mf  (3mf currently fails until
-                           Blender export support is wired up — Phase 4 doc)
       --allow-oversize     Continue even if final dimensions exceed 270 mm on
                            any axis (Phase 4 — full enforcement)
       --json               Emit a final JSON result line on stdout. Human
@@ -2654,7 +2651,6 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT_NAME=&quot;$2&quot;;    shift 2 ;;
         -s|--size)         TARGET_SIZE_MM=&quot;$2&quot;; shift 2 ;;
         --no-color-ref)    COPY_COLOR_REF=0;    shift   ;;
-        --format)          FORMAT=&quot;$2&quot;;         shift 2 ;;
         --allow-oversize)  ALLOW_OVERSIZE=1;    shift   ;;
         --json)            JSON_MODE=1;         shift   ;;
         -h|--help)         usage; exit 0 ;;
@@ -2669,20 +2665,10 @@ awk &quot;BEGIN { exit !($TARGET_SIZE_MM &gt; $U1_BUILD_MAX) }&quot; &amp;&amp; 
 
 INPUT=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(basename &quot;$INPUT&quot;)&quot;
 
-# --format gating. STL is fully supported; 3MF requires Blender export
-# work that isn&#x27;t done yet — fail clearly per spec rather than degrade.
-case &quot;$FORMAT&quot; in
-    stl) ;;
-    3mf)
-        echo &quot;ERROR: 3MF output not implemented yet (Phase 4 deferred).&quot; &gt;&amp;2
-        echo &quot;       Run again without --format 3mf to write STL.&quot; &gt;&amp;2
-        exit 1
-        ;;
-    *)
-        echo &quot;ERROR: --format must be stl or 3mf (got: $FORMAT)&quot; &gt;&amp;2
-        exit 1
-        ;;
-esac
+# STL is the supported (and only) print format by design. The Snapmaker U1&#x27;s
+# multi-color capability comes from Orca&#x27;s paint tool, not from mesh data, so
+# 3MF would add format complexity without unlocking new capability. If a
+# future printer ever needs 3MF, add the export here.
 
 # Under --json, route subcommand stdout (Blender) to stderr.
 [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
@@ -2761,7 +2747,7 @@ if [[ $BLENDER_EXIT -eq 3 ]]; then
             error=oversize \
             input=&quot;$INPUT&quot; \
             stl_path=&quot;&quot; \
-            format=&quot;$FORMAT&quot; \
+            format=stl \
             --float target_size_mm=&quot;$TARGET_SIZE_MM&quot; \
             --object final_dimensions_mm=&quot;$DIMS_JSON&quot; \
             --bool fits_snapmaker_u1=false \
@@ -2835,7 +2821,7 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
         stage=glb_to_print \
         input=&quot;$INPUT&quot; \
         stl_path=&quot;$OUTPUT_PATH&quot; \
-        format=&quot;$FORMAT&quot; \
+        format=stl \
         --float target_size_mm=&quot;$TARGET_SIZE_MM&quot; \
         --object final_dimensions_mm=&quot;$DIMS_JSON&quot; \
         --bool fits_snapmaker_u1=&quot;$FITS&quot; \
@@ -5101,8 +5087,10 @@ Or in JSON mode for chaining:
 user has acknowledged they&#x27;re printing in pieces or has a larger
 printer in mind.
 
-`--format stl` is the default. `--format 3mf` currently fails fast with
-&quot;3MF output not implemented yet&quot; — STL is the supported path.
+STL is the only output format by design — the Snapmaker U1&#x27;s color
+capability lives in Orca&#x27;s paint tool, not in the mesh, so 3MF would add
+complexity without unlocking new capability. Don&#x27;t suggest 3MF as a
+fallback when an STL doesn&#x27;t slice well; fix the mesh upstream instead.
 
 ### Step 4 — Verify output and report fit
 

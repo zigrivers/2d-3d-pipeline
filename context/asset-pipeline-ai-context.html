@@ -452,7 +452,7 @@ td code { font-size: 0.92em; }
   <p>New wrappers and flags in v0.2 (covered in detail throughout the architecture and decisions sections):</p>
   <ul>
     <li><code>concept.sh --json</code>, <code>generate.sh --json</code>, <code>print.sh --json</code> — structured output; subcommand stdout routes to stderr. Every JSON line includes <code>hardware_tier</code> and <code>machine</code>.</li>
-    <li><code>print.sh --allow-oversize</code>, <code>--format stl|3mf</code> — per-axis 270&nbsp;mm validation; 3mf currently fails with "not implemented yet".</li>
+    <li><code>print.sh --allow-oversize</code> — per-axis 270&nbsp;mm validation; pass the flag only when you've decided to print in pieces.</li>
     <li><code>generate.sh --overwrite-engine</code> and the new collision-aware engine staging (auto-suffix <code>&lt;name&gt;_2.glb</code>, etc.) when <code>naming.auto_increment_collisions=true</code>.</li>
     <li><code>generate.sh -g spar3d</code> — optional, experimental, <code>commercial_threshold</code>.</li>
     <li><code>scripts/json_emit.py</code> — typed key=value → JSON helper used by every wrapper.</li>

@@ -4,7 +4,7 @@ The v0.2 release adds the new wrapper features documented in
 [`UPGRADES-laptop.md`](UPGRADES-laptop.md), **plus** the studio-only pieces
 below. Read both files for the full picture; the laptop file covers
 `--json`, license buckets, manifest v3, all-axis Snapmaker validation, safer
-engine staging, `--format`, `texture.sh`, and the SPAR3D lane.
+engine staging, `texture.sh`, and the SPAR3D lane.
 
 This file focuses on what only matters at the studio tier: the
 `hardware_tier=studio` config, the headroom narrative for 512&nbsp;GB unified

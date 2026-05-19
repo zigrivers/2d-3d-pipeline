@@ -26,7 +26,6 @@ TARGET_SIZE_MM=50
 ORIENTATION="auto"
 COPY_COLOR_REF=1
 JSON_MODE=0
-FORMAT="stl"
 ALLOW_OVERSIZE=0
 
 usage() {
@@ -46,8 +45,6 @@ Options:
                            Common sizes: 25 (small), 50 (figure), 100 (large),
                            200 (display)
       --no-color-ref       Don't copy the concept image alongside the STL
-      --format FMT         stl (default) | 3mf  (3mf currently fails until
-                           Blender export support is wired up — Phase 4 doc)
       --allow-oversize     Continue even if final dimensions exceed 270 mm on
                            any axis (Phase 4 — full enforcement)
       --json               Emit a final JSON result line on stdout. Human
@@ -70,7 +67,6 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT_NAME="$2";    shift 2 ;;
         -s|--size)         TARGET_SIZE_MM="$2"; shift 2 ;;
         --no-color-ref)    COPY_COLOR_REF=0;    shift   ;;
-        --format)          FORMAT="$2";         shift 2 ;;
         --allow-oversize)  ALLOW_OVERSIZE=1;    shift   ;;
         --json)            JSON_MODE=1;         shift   ;;
         -h|--help)         usage; exit 0 ;;
@@ -85,20 +81,10 @@ awk "BEGIN { exit !($TARGET_SIZE_MM > $U1_BUILD_MAX) }" && { echo "ERROR: --size
 
 INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
 
-# --format gating. STL is fully supported; 3MF requires Blender export
-# work that isn't done yet — fail clearly per spec rather than degrade.
-case "$FORMAT" in
-    stl) ;;
-    3mf)
-        echo "ERROR: 3MF output not implemented yet (Phase 4 deferred)." >&2
-        echo "       Run again without --format 3mf to write STL." >&2
-        exit 1
-        ;;
-    *)
-        echo "ERROR: --format must be stl or 3mf (got: $FORMAT)" >&2
-        exit 1
-        ;;
-esac
+# STL is the supported (and only) print format by design. The Snapmaker U1's
+# multi-color capability comes from Orca's paint tool, not from mesh data, so
+# 3MF would add format complexity without unlocking new capability. If a
+# future printer ever needs 3MF, add the export here.
 
 # Under --json, route subcommand stdout (Blender) to stderr.
 [[ "$JSON_MODE" == "1" ]] && json_mode_begin
@@ -177,7 +163,7 @@ if [[ $BLENDER_EXIT -eq 3 ]]; then
             error=oversize \
             input="$INPUT" \
             stl_path="" \
-            format="$FORMAT" \
+            format=stl \
             --float target_size_mm="$TARGET_SIZE_MM" \
             --object final_dimensions_mm="$DIMS_JSON" \
             --bool fits_snapmaker_u1=false \
@@ -251,7 +237,7 @@ if [[ "$JSON_MODE" == "1" ]]; then
         stage=glb_to_print \
         input="$INPUT" \
         stl_path="$OUTPUT_PATH" \
-        format="$FORMAT" \
+        format=stl \
         --float target_size_mm="$TARGET_SIZE_MM" \
         --object final_dimensions_mm="$DIMS_JSON" \
         --bool fits_snapmaker_u1="$FITS" \

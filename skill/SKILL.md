@@ -293,8 +293,10 @@ Or in JSON mode for chaining:
 user has acknowledged they're printing in pieces or has a larger
 printer in mind.
 
-`--format stl` is the default. `--format 3mf` currently fails fast with
-"3MF output not implemented yet" — STL is the supported path.
+STL is the only output format by design — the Snapmaker U1's color
+capability lives in Orca's paint tool, not in the mesh, so 3MF would add
+complexity without unlocking new capability. Don't suggest 3MF as a
+fallback when an STL doesn't slice well; fix the mesh upstream instead.
 
 ### Step 4 — Verify output and report fit
 

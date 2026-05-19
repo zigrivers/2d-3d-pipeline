@@ -109,12 +109,6 @@ $ cat /…/assets/print/chest.stl.print_meta.json
   tells you how to override with `--overwrite-engine`. Your existing engine
   asset is preserved.
 
-### `--format stl|3mf` on `print.sh`
-
-`--format stl` is the default. `--format 3mf` currently fails fast with "3MF
-output not implemented yet" — STL is the supported path; 3MF was scoped out
-of v0.2.
-
 ### `texture.sh` (experimental)
 
 New wrapper for texture work:
