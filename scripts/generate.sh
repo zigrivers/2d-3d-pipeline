@@ -36,6 +36,7 @@ REMESH="quad"
 UP_AXIS="y"
 SKIP_CLEAN=0
 SKIP_ENGINE_STAGE=0
+JSON_MODE=0
 
 usage() {
     cat <<EOF
@@ -57,6 +58,9 @@ Generation options:
   -r, --remesh OPT         none | triangle | quad (default: quad)
   -u, --up AXIS            y (default) | z
       --no-clean           Skip Blender cleanup; raw mesh only
+      --json               Emit a final JSON result line on stdout.
+                           Human-readable logs are routed to stderr so
+                           stdout contains only the JSON object.
   -h, --help               This help
 
 Examples:
@@ -85,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         -u|--up)             UP_AXIS="$2";      shift 2 ;;
         --no-clean)          SKIP_CLEAN=1;      shift ;;
         --no-engine-stage)   SKIP_ENGINE_STAGE=1; shift ;;
+        --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -95,6 +100,10 @@ done
 
 INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
 
+# Under --json, route subcommand stdout (SF3D, TRELLIS, Blender) to stderr;
+# real stdout is restored just before the final JSON line.
+[[ "$JSON_MODE" == "1" ]] && json_mode_begin
+
 # Resolve project context BEFORE setting output paths
 resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
 
@@ -104,6 +113,7 @@ resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
 [[ -z "$TEXTURE_RES" ]] && TEXTURE_RES="$(config_default texture_resolution 2048)"
 
 case "$GENERATOR" in sf3d|trellis) ;; *) echo "ERROR: -g must be sf3d or trellis" >&2; exit 1 ;; esac
+# Phase 8 will extend this to include spar3d.
 case "$UP_AXIS" in y|z) ;; *) echo "ERROR: -u must be y or z" >&2; exit 1 ;; esac
 
 if [[ -z "$OUTPUT_NAME" ]]; then
@@ -118,13 +128,27 @@ RAW_PATH="$RAW_DIR/${OUTPUT_NAME}_raw.glb"
 CLEAN_PATH="$CLEAN_DIR/${OUTPUT_NAME}_clean.glb"
 
 COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
-info()  { printf "${COL_BLUE}[pipeline]${COL_RESET} %s\n" "$1"; }
-done_() { printf "${COL_GREEN}[pipeline]${COL_RESET} %s\n" "$1"; }
+HUMAN_FD=1
+[[ "$JSON_MODE" == "1" ]] && HUMAN_FD=2
+info()  { printf "${COL_BLUE}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+done_() { printf "${COL_GREEN}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
 err()   { printf "${COL_RED}[pipeline]${COL_RESET} %s\n" "$1" >&2; }
 
 START_TS=$(date +%s)
-print_context
-info "Generator: $GENERATOR"
+CREATED_AT="$(iso_now)"
+MACHINE="$(hostname_safe)"
+HW_TIER="$(hardware_tier)"
+LICENSE_BUCKET="$(license_bucket_for_model "$GENERATOR")"
+
+warn_if_non_commercial "$GENERATOR"
+
+if [[ "$JSON_MODE" == "1" ]]; then
+    print_context >&2
+else
+    print_context
+fi
+info "Generator: $GENERATOR  (license: $LICENSE_BUCKET)"
+info "Tier:      $HW_TIER  (machine: $MACHINE)"
 info "Input:     $INPUT"
 info "Raw:       $RAW_PATH"
 
@@ -169,6 +193,35 @@ done_ "Generation finished in $((GEN_TS - START_TS))s -> $RAW_PATH"
 
 if [[ $SKIP_CLEAN -eq 1 ]]; then
     info "Skipping cleanup (--no-clean). Final asset: $RAW_PATH"
+    END_TS=$(date +%s)
+    DURATION=$((END_TS - START_TS))
+    if [[ "$JSON_MODE" == "1" ]]; then
+        json_mode_end
+        python3 "$SCRIPT_DIR/json_emit.py" \
+            status=ok \
+            stage=image_to_3d \
+            generator="$GENERATOR" \
+            license_bucket="$LICENSE_BUCKET" \
+            input="$INPUT" \
+            raw_path="$RAW_PATH" \
+            clean_path="" \
+            engine_path="" \
+            --int polycount_target="$POLYCOUNT" \
+            --int texture_resolution="$TEXTURE_RES" \
+            remesh="$REMESH" \
+            up_axis="$UP_AXIS" \
+            --bool skip_clean=true \
+            --bool engine_staged=false \
+            assets_root="$ASSETS_ROOT" \
+            manifest_path="$MANIFEST_PATH" \
+            project_mode="$PROJECT_MODE" \
+            project_root="$PROJECT_ROOT" \
+            project_engine="$PROJECT_ENGINE" \
+            --int duration_seconds="$DURATION" \
+            machine="$MACHINE" \
+            hardware_tier="$HW_TIER" \
+            created="$CREATED_AT"
+    fi
     exit 0
 fi
 
@@ -199,7 +252,38 @@ if [[ "$PROJECT_MODE" == "project" && $SKIP_ENGINE_STAGE -eq 0 ]]; then
 fi
 
 END_TS=$(date +%s)
-done_ "Pipeline complete in $((END_TS - START_TS))s"
+DURATION=$((END_TS - START_TS))
+done_ "Pipeline complete in ${DURATION}s"
 done_ "Raw:    $RAW_PATH"
 done_ "Clean:  $CLEAN_PATH"
 [[ -n "$ENGINE_STAGED_PATH" ]] && done_ "Engine: $ENGINE_STAGED_PATH"
+
+if [[ "$JSON_MODE" == "1" ]]; then
+    ENGINE_STAGED_BOOL=false
+    [[ -n "$ENGINE_STAGED_PATH" ]] && ENGINE_STAGED_BOOL=true
+    json_mode_end
+    python3 "$SCRIPT_DIR/json_emit.py" \
+        status=ok \
+        stage=image_to_3d \
+        generator="$GENERATOR" \
+        license_bucket="$LICENSE_BUCKET" \
+        input="$INPUT" \
+        raw_path="$RAW_PATH" \
+        clean_path="$CLEAN_PATH" \
+        engine_path="$ENGINE_STAGED_PATH" \
+        --int polycount_target="$POLYCOUNT" \
+        --int texture_resolution="$TEXTURE_RES" \
+        remesh="$REMESH" \
+        up_axis="$UP_AXIS" \
+        --bool skip_clean=false \
+        --bool engine_staged="$ENGINE_STAGED_BOOL" \
+        assets_root="$ASSETS_ROOT" \
+        manifest_path="$MANIFEST_PATH" \
+        project_mode="$PROJECT_MODE" \
+        project_root="$PROJECT_ROOT" \
+        project_engine="$PROJECT_ENGINE" \
+        --int duration_seconds="$DURATION" \
+        machine="$MACHINE" \
+        hardware_tier="$HW_TIER" \
+        created="$CREATED_AT"
+fi

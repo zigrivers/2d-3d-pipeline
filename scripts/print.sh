@@ -25,6 +25,9 @@ OUTPUT_NAME=""
 TARGET_SIZE_MM=50
 ORIENTATION="auto"
 COPY_COLOR_REF=1
+JSON_MODE=0
+FORMAT="stl"
+ALLOW_OVERSIZE=0
 
 usage() {
     cat <<EOF
@@ -43,6 +46,12 @@ Options:
                            Common sizes: 25 (small), 50 (figure), 100 (large),
                            200 (display)
       --no-color-ref       Don't copy the concept image alongside the STL
+      --format FMT         stl (default) | 3mf  (3mf currently fails until
+                           Blender export support is wired up — Phase 4 doc)
+      --allow-oversize     Continue even if final dimensions exceed 270 mm on
+                           any axis (Phase 4 — full enforcement)
+      --json               Emit a final JSON result line on stdout. Human
+                           logs are routed to stderr.
   -h, --help               This help
 
 Examples:
@@ -61,6 +70,9 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT_NAME="$2";    shift 2 ;;
         -s|--size)         TARGET_SIZE_MM="$2"; shift 2 ;;
         --no-color-ref)    COPY_COLOR_REF=0;    shift   ;;
+        --format)          FORMAT="$2";         shift 2 ;;
+        --allow-oversize)  ALLOW_OVERSIZE=1;    shift   ;;
+        --json)            JSON_MODE=1;         shift   ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -72,6 +84,24 @@ done
 awk "BEGIN { exit !($TARGET_SIZE_MM > $U1_BUILD_MAX) }" && { echo "ERROR: --size $TARGET_SIZE_MM mm exceeds Snapmaker U1 build volume ($U1_BUILD_MAX mm)" >&2; exit 1; }
 
 INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
+
+# --format gating. STL is fully supported; 3MF requires Blender export
+# work that isn't done yet — fail clearly per spec rather than degrade.
+case "$FORMAT" in
+    stl) ;;
+    3mf)
+        echo "ERROR: 3MF output not implemented yet (Phase 4 deferred)." >&2
+        echo "       Run again without --format 3mf to write STL." >&2
+        exit 1
+        ;;
+    *)
+        echo "ERROR: --format must be stl or 3mf (got: $FORMAT)" >&2
+        exit 1
+        ;;
+esac
+
+# Under --json, route subcommand stdout (Blender) to stderr.
+[[ "$JSON_MODE" == "1" ]] && json_mode_begin
 
 # Resolve project context (sets ASSETS_ROOT)
 resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
@@ -94,16 +124,27 @@ fi
 [[ -x "$BLENDER" ]] || { echo "ERROR: Blender not found at $BLENDER" >&2; exit 1; }
 
 COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_YELLOW='\033[0;33m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
-info()  { printf "${COL_BLUE}[print]${COL_RESET} %s\n" "$1"; }
-done_() { printf "${COL_GREEN}[print]${COL_RESET} %s\n" "$1"; }
-warn()  { printf "${COL_YELLOW}[print]${COL_RESET} %s\n" "$1"; }
+HUMAN_FD=1
+[[ "$JSON_MODE" == "1" ]] && HUMAN_FD=2
+info()  { printf "${COL_BLUE}[print]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+done_() { printf "${COL_GREEN}[print]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+warn()  { printf "${COL_YELLOW}[print]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
 
 if awk "BEGIN { exit !($TARGET_SIZE_MM > $U1_BUILD_WARN) }"; then
     warn "Target ${TARGET_SIZE_MM}mm is close to U1 build limit. If the model is wider than tall, it may not fit."
 fi
 
 START_TS=$(date +%s)
-print_context
+CREATED_AT="$(iso_now)"
+MACHINE="$(hostname_safe)"
+HW_TIER="$(hardware_tier)"
+
+if [[ "$JSON_MODE" == "1" ]]; then
+    print_context >&2
+else
+    print_context
+fi
+info "Tier:     $HW_TIER  (machine: $MACHINE)"
 info "Input:    $INPUT"
 info "Output:   $OUTPUT_PATH"
 info "Size:     ${TARGET_SIZE_MM} mm"
@@ -129,10 +170,45 @@ if [[ $COPY_COLOR_REF -eq 1 ]]; then
 fi
 
 END_TS=$(date +%s)
+DURATION=$((END_TS - START_TS))
 SIZE_MB=$(awk "BEGIN { printf \"%.1f\", $(stat -f%z "$OUTPUT_PATH" 2>/dev/null || stat -c%s "$OUTPUT_PATH") / 1048576 }")
-done_ "Print-ready in $((END_TS - START_TS))s"
+done_ "Print-ready in ${DURATION}s"
 done_ "STL: $OUTPUT_PATH (${SIZE_MB} MB)"
 done_ ""
 done_ "Next: open in Snapmaker Orca, paint colors, slice, print."
 
-echo "$OUTPUT_PATH"
+# Resolve the final color reference path for the JSON emission (might be "").
+COLOR_REF_PATH=""
+if [[ $COPY_COLOR_REF -eq 1 ]]; then
+    for ext in png jpg jpeg; do
+        c="$PRINT_DIR/${OUTPUT_NAME}_color_ref.${ext}"
+        if [[ -f "$c" ]]; then COLOR_REF_PATH="$c"; break; fi
+    done
+fi
+
+if [[ "$JSON_MODE" == "1" ]]; then
+    # Phase 4 will replace these placeholders with values read from a sidecar
+    # file produced by prepare_for_print.py. For now, emit honest defaults
+    # so the schema is stable and consumers can already key off the fields.
+    json_mode_end
+    python3 "$SCRIPT_DIR/json_emit.py" \
+        status=ok \
+        stage=glb_to_print \
+        input="$INPUT" \
+        stl_path="$OUTPUT_PATH" \
+        format="$FORMAT" \
+        --float target_size_mm="$TARGET_SIZE_MM" \
+        --object final_dimensions_mm='{"x":0.0,"y":0.0,"z":0.0}' \
+        --bool fits_snapmaker_u1=true \
+        --array oversized_axes='[]' \
+        color_ref_path="$COLOR_REF_PATH" \
+        assets_root="$ASSETS_ROOT" \
+        manifest_path="$MANIFEST_PATH" \
+        project_mode="$PROJECT_MODE" \
+        --int duration_seconds="$DURATION" \
+        machine="$MACHINE" \
+        hardware_tier="$HW_TIER" \
+        created="$CREATED_AT"
+else
+    echo "$OUTPUT_PATH"
+fi

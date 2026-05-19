@@ -1586,6 +1586,105 @@ resolve_name() {
     echo &quot;$candidate&quot;
 }
 
+# --- v0.2: hardware tier, license buckets, ISO timestamps ---
+
+# Path to the per-machine pipeline config (key=value, NOT JSON, to keep it
+# distinct from per-project .asset-pipeline.json). Override with $PIPELINE_CONFIG.
+PIPELINE_CONFIG_PATH=&quot;${PIPELINE_CONFIG_PATH:-$HOME/3d-pipeline/.config}&quot;
+
+# Read a key from PIPELINE_CONFIG_PATH; echo the value or the fallback ($2).
+# Lines starting with &#x27;#&#x27; are comments. Whitespace around &#x27;=&#x27; is tolerated.
+read_pipeline_config() {
+    local key=&quot;$1&quot;
+    local fallback=&quot;${2:-}&quot;
+    [[ -f &quot;$PIPELINE_CONFIG_PATH&quot; ]] || { echo &quot;$fallback&quot;; return 0; }
+    local val
+    val=&quot;$(awk -F= -v k=&quot;$key&quot; &#x27;
+        /^[[:space:]]*#/ { next }
+        {
+            n = $1; sub(/^[[:space:]]+/, &quot;&quot;, n); sub(/[[:space:]]+$/, &quot;&quot;, n)
+            if (n == k) {
+                v = $0; sub(/^[^=]*=/, &quot;&quot;, v)
+                sub(/^[[:space:]]+/, &quot;&quot;, v); sub(/[[:space:]]+$/, &quot;&quot;, v)
+                print v; exit
+            }
+        }
+    &#x27; &quot;$PIPELINE_CONFIG_PATH&quot;)&quot;
+    if [[ -n &quot;$val&quot; ]]; then
+        echo &quot;$val&quot;
+    else
+        echo &quot;$fallback&quot;
+    fi
+}
+
+# Hardware tier — laptop (default) or studio. Read from ~/3d-pipeline/.config.
+# NEVER guess from hostname; renaming a machine would silently change behaviour.
+hardware_tier() {
+    local tier
+    tier=&quot;$(read_pipeline_config hardware_tier laptop)&quot;
+    case &quot;$tier&quot; in
+        laptop|studio) echo &quot;$tier&quot; ;;
+        *) echo laptop ;;
+    esac
+}
+
+# Hostname, safe-ish for inclusion in JSON.
+hostname_safe() {
+    local h
+    h=&quot;$(hostname 2&gt;/dev/null || true)&quot;
+    [[ -n &quot;$h&quot; ]] || h=&quot;unknown&quot;
+    echo &quot;$h&quot;
+}
+
+# ISO-8601 UTC timestamp.
+iso_now() {
+    date -u +&quot;%Y-%m-%dT%H:%M:%SZ&quot;
+}
+
+# Exact license bucket for a given model name. Returns one of:
+#   commercial_safe | commercial_threshold | source_available_restricted
+#   non_commercial  | unclear_risky        | unknown
+# These names are stable — used in code, JSON, manifest, and docs.
+license_bucket_for_model() {
+    case &quot;$1&quot; in
+        z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
+        sf3d|spar3d)                            echo commercial_threshold ;;
+        flux-dev|trellis)                       echo non_commercial ;;
+        &quot;&quot;)                                     echo unknown ;;
+        *)                                      echo unknown ;;
+    esac
+}
+
+# --- JSON-mode stdout redirection ---
+#
+# Under --json, every subcommand (mflux, SF3D, TRELLIS, Blender) prints
+# progress to stdout, which would corrupt the final JSON line. The wrappers
+# call json_mode_begin once after parsing --json, and json_mode_end right
+# before emitting the JSON object. Between them, fd 1 is silently routed to
+# stderr; the real stdout is preserved on fd 4 and restored at the end so
+# only the JSON object lands on stdout.
+json_mode_begin() {
+    # Save real stdout to fd 4, then route fd 1 to stderr.
+    exec 4&gt;&amp;1 1&gt;&amp;2
+}
+json_mode_end() {
+    # Restore real stdout from fd 4 and close fd 4.
+    exec 1&gt;&amp;4 4&gt;&amp;-
+}
+
+# Print a non-commercial-licence warning to stderr if the model is restricted.
+# Does not block; the spec says warn then proceed when explicitly chosen.
+warn_if_non_commercial() {
+    local model=&quot;$1&quot;
+    local bucket
+    bucket=&quot;$(license_bucket_for_model &quot;$model&quot;)&quot;
+    if [[ &quot;$bucket&quot; == &quot;non_commercial&quot; ]]; then
+        printf &quot;[license] WARNING: %s is non-commercial. Output must not be used for\n&quot; &quot;$model&quot; &gt;&amp;2
+        printf &quot;[license]          commercial projects (Grithkin, GripCraft, etc.) unless you\n&quot; &gt;&amp;2
+        printf &quot;[license]          have explicitly accepted the licence restrictions.\n&quot; &gt;&amp;2
+    fi
+}
+
 # Print a friendly context summary at the top of each run.
 print_context() {
     if [[ &quot;$PROJECT_MODE&quot; == &quot;project&quot; ]]; then
@@ -1600,6 +1699,137 @@ print_context() {
 }
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/_pipeline_lib.sh</pre></div>
+            </details>
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>json_emit.py</code>
+                <span class="script-summary-desc">JSON serializer used by <code>--json</code> mode (v0.2)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash · paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/json_emit.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Emit a JSON object built from typed key=value arguments.
+
+Used by concept.sh / generate.sh / print.sh under `--json` to produce the
+final stdout line. Python does the escaping, so prompts that contain
+quotes, backslashes, or newlines round-trip safely.
+
+Argument forms:
+
+  status=ok                    string field
+  --int width=1024             integer (empty string becomes 0)
+  --float duration=42.5        float
+  --bool fits=true             true/yes/1 -&gt; true, else false
+  --array outputs=&#x27;[&quot;a&quot;,&quot;b&quot;]&#x27;  JSON-encoded array literal
+  --object dims=&#x27;{&quot;x&quot;:50.0}&#x27;   JSON-encoded object literal
+  --null engine_path=          explicit null when value is empty
+                               (without --null, empty values stay as &quot;&quot;)
+
+The output is a single line of compact JSON on stdout. Output ordering
+follows the order of the arguments — readable for humans tailing logs.
+
+Examples:
+
+  json_emit.py status=ok stage=text_to_image \\
+      model=z-image-turbo \\
+      --int width=1024 --int height=1024 \\
+      --array outputs=&#x27;[&quot;/abs/path.png&quot;]&#x27; \\
+      hardware_tier=laptop
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import json
+import sys
+
+
+def _split(arg: str) -&gt; tuple[str, str]:
+    if &quot;=&quot; not in arg:
+        print(f&quot;json_emit: missing &#x27;=&#x27; in argument: {arg}&quot;, file=sys.stderr)
+        sys.exit(2)
+    k, _, v = arg.partition(&quot;=&quot;)
+    return k, v
+
+
+def _to_int(v: str) -&gt; int:
+    if v == &quot;&quot;:
+        return 0
+    try:
+        return int(v)
+    except ValueError:
+        try:
+            return int(float(v))
+        except ValueError:
+            print(f&quot;json_emit: not an int: {v!r}&quot;, file=sys.stderr)
+            sys.exit(2)
+
+
+def _to_float(v: str) -&gt; float:
+    if v == &quot;&quot;:
+        return 0.0
+    try:
+        return float(v)
+    except ValueError:
+        print(f&quot;json_emit: not a float: {v!r}&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _to_bool(v: str) -&gt; bool:
+    return v.strip().lower() in (&quot;true&quot;, &quot;1&quot;, &quot;yes&quot;, &quot;y&quot;)
+
+
+def main(argv: list[str]) -&gt; int:
+    out: dict[str, object] = {}
+    i = 0
+    while i &lt; len(argv):
+        a = argv[i]
+        if a == &quot;--int&quot;:
+            k, v = _split(argv[i + 1])
+            out[k] = _to_int(v)
+            i += 2
+        elif a == &quot;--float&quot;:
+            k, v = _split(argv[i + 1])
+            out[k] = _to_float(v)
+            i += 2
+        elif a == &quot;--bool&quot;:
+            k, v = _split(argv[i + 1])
+            out[k] = _to_bool(v)
+            i += 2
+        elif a == &quot;--array&quot;:
+            k, v = _split(argv[i + 1])
+            try:
+                out[k] = json.loads(v) if v else []
+            except json.JSONDecodeError as e:
+                print(f&quot;json_emit: --array value is not valid JSON: {e}&quot;, file=sys.stderr)
+                sys.exit(2)
+            i += 2
+        elif a == &quot;--object&quot;:
+            k, v = _split(argv[i + 1])
+            try:
+                out[k] = json.loads(v) if v else {}
+            except json.JSONDecodeError as e:
+                print(f&quot;json_emit: --object value is not valid JSON: {e}&quot;, file=sys.stderr)
+                sys.exit(2)
+            i += 2
+        elif a == &quot;--null&quot;:
+            k, v = _split(argv[i + 1])
+            out[k] = v if v else None
+            i += 2
+        elif a.startswith(&quot;--&quot;):
+            print(f&quot;json_emit: unknown flag: {a}&quot;, file=sys.stderr)
+            sys.exit(2)
+        else:
+            k, v = _split(a)
+            out[k] = v
+            i += 1
+
+    json.dump(out, sys.stdout)
+    sys.stdout.write(&quot;\n&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main(sys.argv[1:]))
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/json_emit.py</pre></div>
             </details>
             <details class="script-detail">
               <summary class="script-summary">
@@ -1648,6 +1878,7 @@ QUANTIZE=8
 COUNT=1
 GAME_PROMPT=1
 PROMPT=&quot;&quot;
+JSON_MODE=0
 
 GAME_SUFFIX=&quot;, 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed&quot;
 
@@ -1676,6 +1907,9 @@ Generation options:
   -q, --quantize N         Quantization: 4 or 8 (default: 8)
   -n, --count N            Generate N variations (default: 1)
       --no-game-prompt     Skip the game-asset prompt suffix
+      --json               Emit a final JSON result line on stdout.
+                           Human-readable logs are routed to stderr so
+                           stdout contains only the JSON object.
   -h, --help               This help
 
 Examples:
@@ -1707,6 +1941,7 @@ while [[ $# -gt 0 ]]; do
         -q|--quantize)     QUANTIZE=&quot;$2&quot;;     shift 2 ;;
         -n|--count)        COUNT=&quot;$2&quot;;        shift 2 ;;
         --no-game-prompt)  GAME_PROMPT=0;     shift   ;;
+        --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
         *)  if [[ -z &quot;$PROMPT&quot; ]]; then PROMPT=&quot;$1&quot;; else PROMPT=&quot;$PROMPT $1&quot;; fi; shift ;;
@@ -1714,6 +1949,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z &quot;$PROMPT&quot; ]] &amp;&amp; { echo &quot;ERROR: prompt is required&quot; &gt;&amp;2; usage; exit 1; }
+
+# Under --json, route all stdout (including subcommand output) to stderr;
+# real stdout is preserved for the final JSON line via json_mode_end.
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
 
 # --- Resolve project context (sets ASSETS_ROOT, MANIFEST_PATH, etc.) ---
 resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
@@ -1765,9 +2004,13 @@ mkdir -p &quot;$CONCEPT_DIR&quot;
 OUTPUT_NAME=&quot;$(resolve_name &quot;$OUTPUT_NAME&quot; &quot;$CONCEPT_DIR&quot; &quot;.png&quot;)&quot;
 
 # --- output helpers ---
+# Under --json, human-readable lines go to stderr so stdout carries only
+# the final JSON object. err is always on stderr.
 COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
-info()  { printf &quot;${COL_BLUE}[concept]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
-done_() { printf &quot;${COL_GREEN}[concept]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[concept]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[concept]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
 err()   { printf &quot;${COL_RED}[concept]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
 
 # --- venv check ---
@@ -1782,8 +2025,23 @@ source &quot;$MFLUX_VENV/bin/activate&quot;
 
 # --- generate ---
 START_TS=$(date +%s)
-print_context
-info &quot;Model:    $MODEL&quot;
+CREATED_AT=&quot;$(iso_now)&quot;
+MACHINE=&quot;$(hostname_safe)&quot;
+HW_TIER=&quot;$(hardware_tier)&quot;
+LICENSE_BUCKET=&quot;$(license_bucket_for_model &quot;$MODEL&quot;)&quot;
+
+# Non-commercial models: warn (but don&#x27;t block — spec says proceed)
+warn_if_non_commercial &quot;$MODEL&quot;
+
+# Redirect print_context output through HUMAN_FD when --json is on. The
+# function writes via printf to stdout, so we wrap it.
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    print_context &gt;&amp;2
+else
+    print_context
+fi
+info &quot;Model:    $MODEL  (license: $LICENSE_BUCKET)&quot;
+info &quot;Tier:     $HW_TIER  (machine: $MACHINE)&quot;
 info &quot;Prompt:   $FINAL_PROMPT&quot;
 info &quot;Size:     ${WIDTH}x${HEIGHT}&quot;
 info &quot;Steps:    $STEPS&quot;
@@ -1791,18 +2049,24 @@ info &quot;Count:    $COUNT&quot;
 info &quot;Output:   $CONCEPT_DIR/&quot;
 [[ -n &quot;$LORA_PATH&quot; ]] &amp;&amp; info &quot;LoRA:     $LORA_PATH (scale $LORA_SCALE)&quot;
 
+# Track every produced output (used for the --json result and chaining).
+OUTPUT_PATHS=()
+FIRST_SEED=&quot;&quot;
+
 for i in $(seq 1 &quot;$COUNT&quot;); do
     if [[ -n &quot;$SEED&quot; ]]; then
         ITER_SEED=$((SEED + i - 1))
     else
         ITER_SEED=$RANDOM$RANDOM
     fi
+    [[ -z &quot;$FIRST_SEED&quot; ]] &amp;&amp; FIRST_SEED=&quot;$ITER_SEED&quot;
 
     if [[ &quot;$COUNT&quot; -gt 1 ]]; then
         OUT_PATH=&quot;$CONCEPT_DIR/${OUTPUT_NAME}_v${i}.png&quot;
     else
         OUT_PATH=&quot;$CONCEPT_DIR/${OUTPUT_NAME}.png&quot;
     fi
+    OUTPUT_PATHS+=( &quot;$OUT_PATH&quot; )
 
     info &quot;Generating $i/$COUNT (seed=$ITER_SEED) -&gt; $OUT_PATH&quot;
 
@@ -1836,13 +2100,43 @@ done
 deactivate
 
 END_TS=$(date +%s)
-done_ &quot;Generated $COUNT image(s) in $((END_TS - START_TS))s&quot;
+DURATION=$((END_TS - START_TS))
+done_ &quot;Generated $COUNT image(s) in ${DURATION}s&quot;
 
-# Print absolute path of first image for chaining (last line of stdout)
-if [[ &quot;$COUNT&quot; -gt 1 ]]; then
-    echo &quot;$CONCEPT_DIR/${OUTPUT_NAME}_v1.png&quot;
+FIRST_OUTPUT=&quot;${OUTPUT_PATHS[0]}&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    # Build the JSON outputs array via Python so paths with special chars
+    # round-trip cleanly.
+    OUTPUTS_JSON=&quot;$(printf &#x27;%s\n&#x27; &quot;${OUTPUT_PATHS[@]}&quot; \
+        | python3 -c &#x27;import sys,json; print(json.dumps([l.rstrip(&quot;\n&quot;) for l in sys.stdin if l.rstrip(&quot;\n&quot;)]))&#x27;)&quot;
+    json_mode_end
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        status=ok \
+        stage=text_to_image \
+        model=&quot;$MODEL&quot; \
+        license_bucket=&quot;$LICENSE_BUCKET&quot; \
+        prompt=&quot;$PROMPT&quot; \
+        final_prompt=&quot;$FINAL_PROMPT&quot; \
+        --int width=&quot;$WIDTH&quot; \
+        --int height=&quot;$HEIGHT&quot; \
+        --int steps=&quot;$STEPS&quot; \
+        --int seed=&quot;$FIRST_SEED&quot; \
+        --int count=&quot;$COUNT&quot; \
+        --array outputs=&quot;$OUTPUTS_JSON&quot; \
+        assets_root=&quot;$ASSETS_ROOT&quot; \
+        manifest_path=&quot;$MANIFEST_PATH&quot; \
+        project_mode=&quot;$PROJECT_MODE&quot; \
+        project_root=&quot;$PROJECT_ROOT&quot; \
+        project_engine=&quot;$PROJECT_ENGINE&quot; \
+        --int duration_seconds=&quot;$DURATION&quot; \
+        machine=&quot;$MACHINE&quot; \
+        hardware_tier=&quot;$HW_TIER&quot; \
+        created=&quot;$CREATED_AT&quot;
 else
-    echo &quot;$CONCEPT_DIR/${OUTPUT_NAME}.png&quot;
+    # Last line is the first image path — preserves the existing chaining
+    # contract for callers that haven&#x27;t migrated to --json.
+    echo &quot;$FIRST_OUTPUT&quot;
 fi
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/concept.sh</pre></div>
@@ -1891,6 +2185,7 @@ REMESH=&quot;quad&quot;
 UP_AXIS=&quot;y&quot;
 SKIP_CLEAN=0
 SKIP_ENGINE_STAGE=0
+JSON_MODE=0
 
 usage() {
     cat &lt;&lt;EOF
@@ -1912,6 +2207,9 @@ Generation options:
   -r, --remesh OPT         none | triangle | quad (default: quad)
   -u, --up AXIS            y (default) | z
       --no-clean           Skip Blender cleanup; raw mesh only
+      --json               Emit a final JSON result line on stdout.
+                           Human-readable logs are routed to stderr so
+                           stdout contains only the JSON object.
   -h, --help               This help
 
 Examples:
@@ -1940,6 +2238,7 @@ while [[ $# -gt 0 ]]; do
         -u|--up)             UP_AXIS=&quot;$2&quot;;      shift 2 ;;
         --no-clean)          SKIP_CLEAN=1;      shift ;;
         --no-engine-stage)   SKIP_ENGINE_STAGE=1; shift ;;
+        --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
     esac
@@ -1950,6 +2249,10 @@ done
 
 INPUT=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(basename &quot;$INPUT&quot;)&quot;
 
+# Under --json, route subcommand stdout (SF3D, TRELLIS, Blender) to stderr;
+# real stdout is restored just before the final JSON line.
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
+
 # Resolve project context BEFORE setting output paths
 resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
 
@@ -1959,6 +2262,7 @@ resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
 [[ -z &quot;$TEXTURE_RES&quot; ]] &amp;&amp; TEXTURE_RES=&quot;$(config_default texture_resolution 2048)&quot;
 
 case &quot;$GENERATOR&quot; in sf3d|trellis) ;; *) echo &quot;ERROR: -g must be sf3d or trellis&quot; &gt;&amp;2; exit 1 ;; esac
+# Phase 8 will extend this to include spar3d.
 case &quot;$UP_AXIS&quot; in y|z) ;; *) echo &quot;ERROR: -u must be y or z&quot; &gt;&amp;2; exit 1 ;; esac
 
 if [[ -z &quot;$OUTPUT_NAME&quot; ]]; then
@@ -1973,13 +2277,27 @@ RAW_PATH=&quot;$RAW_DIR/${OUTPUT_NAME}_raw.glb&quot;
 CLEAN_PATH=&quot;$CLEAN_DIR/${OUTPUT_NAME}_clean.glb&quot;
 
 COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
-info()  { printf &quot;${COL_BLUE}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
-done_() { printf &quot;${COL_GREEN}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
 err()   { printf &quot;${COL_RED}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
 
 START_TS=$(date +%s)
-print_context
-info &quot;Generator: $GENERATOR&quot;
+CREATED_AT=&quot;$(iso_now)&quot;
+MACHINE=&quot;$(hostname_safe)&quot;
+HW_TIER=&quot;$(hardware_tier)&quot;
+LICENSE_BUCKET=&quot;$(license_bucket_for_model &quot;$GENERATOR&quot;)&quot;
+
+warn_if_non_commercial &quot;$GENERATOR&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    print_context &gt;&amp;2
+else
+    print_context
+fi
+info &quot;Generator: $GENERATOR  (license: $LICENSE_BUCKET)&quot;
+info &quot;Tier:      $HW_TIER  (machine: $MACHINE)&quot;
 info &quot;Input:     $INPUT&quot;
 info &quot;Raw:       $RAW_PATH&quot;
 
@@ -2024,6 +2342,35 @@ done_ &quot;Generation finished in $((GEN_TS - START_TS))s -&gt; $RAW_PATH&quot;
 
 if [[ $SKIP_CLEAN -eq 1 ]]; then
     info &quot;Skipping cleanup (--no-clean). Final asset: $RAW_PATH&quot;
+    END_TS=$(date +%s)
+    DURATION=$((END_TS - START_TS))
+    if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+        json_mode_end
+        python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+            status=ok \
+            stage=image_to_3d \
+            generator=&quot;$GENERATOR&quot; \
+            license_bucket=&quot;$LICENSE_BUCKET&quot; \
+            input=&quot;$INPUT&quot; \
+            raw_path=&quot;$RAW_PATH&quot; \
+            clean_path=&quot;&quot; \
+            engine_path=&quot;&quot; \
+            --int polycount_target=&quot;$POLYCOUNT&quot; \
+            --int texture_resolution=&quot;$TEXTURE_RES&quot; \
+            remesh=&quot;$REMESH&quot; \
+            up_axis=&quot;$UP_AXIS&quot; \
+            --bool skip_clean=true \
+            --bool engine_staged=false \
+            assets_root=&quot;$ASSETS_ROOT&quot; \
+            manifest_path=&quot;$MANIFEST_PATH&quot; \
+            project_mode=&quot;$PROJECT_MODE&quot; \
+            project_root=&quot;$PROJECT_ROOT&quot; \
+            project_engine=&quot;$PROJECT_ENGINE&quot; \
+            --int duration_seconds=&quot;$DURATION&quot; \
+            machine=&quot;$MACHINE&quot; \
+            hardware_tier=&quot;$HW_TIER&quot; \
+            created=&quot;$CREATED_AT&quot;
+    fi
     exit 0
 fi
 
@@ -2054,10 +2401,41 @@ if [[ &quot;$PROJECT_MODE&quot; == &quot;project&quot; &amp;&amp; $SKIP_ENGINE_S
 fi
 
 END_TS=$(date +%s)
-done_ &quot;Pipeline complete in $((END_TS - START_TS))s&quot;
+DURATION=$((END_TS - START_TS))
+done_ &quot;Pipeline complete in ${DURATION}s&quot;
 done_ &quot;Raw:    $RAW_PATH&quot;
 done_ &quot;Clean:  $CLEAN_PATH&quot;
 [[ -n &quot;$ENGINE_STAGED_PATH&quot; ]] &amp;&amp; done_ &quot;Engine: $ENGINE_STAGED_PATH&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    ENGINE_STAGED_BOOL=false
+    [[ -n &quot;$ENGINE_STAGED_PATH&quot; ]] &amp;&amp; ENGINE_STAGED_BOOL=true
+    json_mode_end
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        status=ok \
+        stage=image_to_3d \
+        generator=&quot;$GENERATOR&quot; \
+        license_bucket=&quot;$LICENSE_BUCKET&quot; \
+        input=&quot;$INPUT&quot; \
+        raw_path=&quot;$RAW_PATH&quot; \
+        clean_path=&quot;$CLEAN_PATH&quot; \
+        engine_path=&quot;$ENGINE_STAGED_PATH&quot; \
+        --int polycount_target=&quot;$POLYCOUNT&quot; \
+        --int texture_resolution=&quot;$TEXTURE_RES&quot; \
+        remesh=&quot;$REMESH&quot; \
+        up_axis=&quot;$UP_AXIS&quot; \
+        --bool skip_clean=false \
+        --bool engine_staged=&quot;$ENGINE_STAGED_BOOL&quot; \
+        assets_root=&quot;$ASSETS_ROOT&quot; \
+        manifest_path=&quot;$MANIFEST_PATH&quot; \
+        project_mode=&quot;$PROJECT_MODE&quot; \
+        project_root=&quot;$PROJECT_ROOT&quot; \
+        project_engine=&quot;$PROJECT_ENGINE&quot; \
+        --int duration_seconds=&quot;$DURATION&quot; \
+        machine=&quot;$MACHINE&quot; \
+        hardware_tier=&quot;$HW_TIER&quot; \
+        created=&quot;$CREATED_AT&quot;
+fi
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/generate.sh</pre></div>
             </details>
@@ -2094,6 +2472,9 @@ OUTPUT_NAME=&quot;&quot;
 TARGET_SIZE_MM=50
 ORIENTATION=&quot;auto&quot;
 COPY_COLOR_REF=1
+JSON_MODE=0
+FORMAT=&quot;stl&quot;
+ALLOW_OVERSIZE=0
 
 usage() {
     cat &lt;&lt;EOF
@@ -2112,6 +2493,12 @@ Options:
                            Common sizes: 25 (small), 50 (figure), 100 (large),
                            200 (display)
       --no-color-ref       Don&#x27;t copy the concept image alongside the STL
+      --format FMT         stl (default) | 3mf  (3mf currently fails until
+                           Blender export support is wired up — Phase 4 doc)
+      --allow-oversize     Continue even if final dimensions exceed 270 mm on
+                           any axis (Phase 4 — full enforcement)
+      --json               Emit a final JSON result line on stdout. Human
+                           logs are routed to stderr.
   -h, --help               This help
 
 Examples:
@@ -2130,6 +2517,9 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT_NAME=&quot;$2&quot;;    shift 2 ;;
         -s|--size)         TARGET_SIZE_MM=&quot;$2&quot;; shift 2 ;;
         --no-color-ref)    COPY_COLOR_REF=0;    shift   ;;
+        --format)          FORMAT=&quot;$2&quot;;         shift 2 ;;
+        --allow-oversize)  ALLOW_OVERSIZE=1;    shift   ;;
+        --json)            JSON_MODE=1;         shift   ;;
         -h|--help)         usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
     esac
@@ -2141,6 +2531,24 @@ done
 awk &quot;BEGIN { exit !($TARGET_SIZE_MM &gt; $U1_BUILD_MAX) }&quot; &amp;&amp; { echo &quot;ERROR: --size $TARGET_SIZE_MM mm exceeds Snapmaker U1 build volume ($U1_BUILD_MAX mm)&quot; &gt;&amp;2; exit 1; }
 
 INPUT=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(basename &quot;$INPUT&quot;)&quot;
+
+# --format gating. STL is fully supported; 3MF requires Blender export
+# work that isn&#x27;t done yet — fail clearly per spec rather than degrade.
+case &quot;$FORMAT&quot; in
+    stl) ;;
+    3mf)
+        echo &quot;ERROR: 3MF output not implemented yet (Phase 4 deferred).&quot; &gt;&amp;2
+        echo &quot;       Run again without --format 3mf to write STL.&quot; &gt;&amp;2
+        exit 1
+        ;;
+    *)
+        echo &quot;ERROR: --format must be stl or 3mf (got: $FORMAT)&quot; &gt;&amp;2
+        exit 1
+        ;;
+esac
+
+# Under --json, route subcommand stdout (Blender) to stderr.
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
 
 # Resolve project context (sets ASSETS_ROOT)
 resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
@@ -2163,16 +2571,27 @@ fi
 [[ -x &quot;$BLENDER&quot; ]] || { echo &quot;ERROR: Blender not found at $BLENDER&quot; &gt;&amp;2; exit 1; }
 
 COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_YELLOW=&#x27;\033[0;33m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
-info()  { printf &quot;${COL_BLUE}[print]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
-done_() { printf &quot;${COL_GREEN}[print]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
-warn()  { printf &quot;${COL_YELLOW}[print]${COL_RESET} %s\n&quot; &quot;$1&quot;; }
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[print]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[print]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+warn()  { printf &quot;${COL_YELLOW}[print]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
 
 if awk &quot;BEGIN { exit !($TARGET_SIZE_MM &gt; $U1_BUILD_WARN) }&quot;; then
     warn &quot;Target ${TARGET_SIZE_MM}mm is close to U1 build limit. If the model is wider than tall, it may not fit.&quot;
 fi
 
 START_TS=$(date +%s)
-print_context
+CREATED_AT=&quot;$(iso_now)&quot;
+MACHINE=&quot;$(hostname_safe)&quot;
+HW_TIER=&quot;$(hardware_tier)&quot;
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    print_context &gt;&amp;2
+else
+    print_context
+fi
+info &quot;Tier:     $HW_TIER  (machine: $MACHINE)&quot;
 info &quot;Input:    $INPUT&quot;
 info &quot;Output:   $OUTPUT_PATH&quot;
 info &quot;Size:     ${TARGET_SIZE_MM} mm&quot;
@@ -2198,13 +2617,48 @@ if [[ $COPY_COLOR_REF -eq 1 ]]; then
 fi
 
 END_TS=$(date +%s)
+DURATION=$((END_TS - START_TS))
 SIZE_MB=$(awk &quot;BEGIN { printf \&quot;%.1f\&quot;, $(stat -f%z &quot;$OUTPUT_PATH&quot; 2&gt;/dev/null || stat -c%s &quot;$OUTPUT_PATH&quot;) / 1048576 }&quot;)
-done_ &quot;Print-ready in $((END_TS - START_TS))s&quot;
+done_ &quot;Print-ready in ${DURATION}s&quot;
 done_ &quot;STL: $OUTPUT_PATH (${SIZE_MB} MB)&quot;
 done_ &quot;&quot;
 done_ &quot;Next: open in Snapmaker Orca, paint colors, slice, print.&quot;
 
-echo &quot;$OUTPUT_PATH&quot;
+# Resolve the final color reference path for the JSON emission (might be &quot;&quot;).
+COLOR_REF_PATH=&quot;&quot;
+if [[ $COPY_COLOR_REF -eq 1 ]]; then
+    for ext in png jpg jpeg; do
+        c=&quot;$PRINT_DIR/${OUTPUT_NAME}_color_ref.${ext}&quot;
+        if [[ -f &quot;$c&quot; ]]; then COLOR_REF_PATH=&quot;$c&quot;; break; fi
+    done
+fi
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    # Phase 4 will replace these placeholders with values read from a sidecar
+    # file produced by prepare_for_print.py. For now, emit honest defaults
+    # so the schema is stable and consumers can already key off the fields.
+    json_mode_end
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        status=ok \
+        stage=glb_to_print \
+        input=&quot;$INPUT&quot; \
+        stl_path=&quot;$OUTPUT_PATH&quot; \
+        format=&quot;$FORMAT&quot; \
+        --float target_size_mm=&quot;$TARGET_SIZE_MM&quot; \
+        --object final_dimensions_mm=&#x27;{&quot;x&quot;:0.0,&quot;y&quot;:0.0,&quot;z&quot;:0.0}&#x27; \
+        --bool fits_snapmaker_u1=true \
+        --array oversized_axes=&#x27;[]&#x27; \
+        color_ref_path=&quot;$COLOR_REF_PATH&quot; \
+        assets_root=&quot;$ASSETS_ROOT&quot; \
+        manifest_path=&quot;$MANIFEST_PATH&quot; \
+        project_mode=&quot;$PROJECT_MODE&quot; \
+        --int duration_seconds=&quot;$DURATION&quot; \
+        machine=&quot;$MACHINE&quot; \
+        hardware_tier=&quot;$HW_TIER&quot; \
+        created=&quot;$CREATED_AT&quot;
+else
+    echo &quot;$OUTPUT_PATH&quot;
+fi
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/print.sh</pre></div>
             </details>

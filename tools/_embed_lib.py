@@ -21,6 +21,7 @@ GUIDE_PATH = PROJECT_ROOT / "docs" / "asset-pipeline-guide.html"
 # Order matches the order the blocks appear in the guide for readability.
 EMBEDS: dict[str, str] = {
     "scripts/_pipeline_lib.sh":          "~/3d-pipeline/workspace/_pipeline_lib.sh",
+    "scripts/json_emit.py":              "~/3d-pipeline/workspace/json_emit.py",
     "scripts/concept.sh":                "~/3d-pipeline/workspace/concept.sh",
     "scripts/generate.sh":               "~/3d-pipeline/workspace/generate.sh",
     "scripts/print.sh":                  "~/3d-pipeline/workspace/print.sh",

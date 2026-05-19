@@ -39,6 +39,7 @@ QUANTIZE=8
 COUNT=1
 GAME_PROMPT=1
 PROMPT=""
+JSON_MODE=0
 
 GAME_SUFFIX=", 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed"
 
@@ -67,6 +68,9 @@ Generation options:
   -q, --quantize N         Quantization: 4 or 8 (default: 8)
   -n, --count N            Generate N variations (default: 1)
       --no-game-prompt     Skip the game-asset prompt suffix
+      --json               Emit a final JSON result line on stdout.
+                           Human-readable logs are routed to stderr so
+                           stdout contains only the JSON object.
   -h, --help               This help
 
 Examples:
@@ -98,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         -q|--quantize)     QUANTIZE="$2";     shift 2 ;;
         -n|--count)        COUNT="$2";        shift 2 ;;
         --no-game-prompt)  GAME_PROMPT=0;     shift   ;;
+        --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
         *)  if [[ -z "$PROMPT" ]]; then PROMPT="$1"; else PROMPT="$PROMPT $1"; fi; shift ;;
@@ -105,6 +110,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$PROMPT" ]] && { echo "ERROR: prompt is required" >&2; usage; exit 1; }
+
+# Under --json, route all stdout (including subcommand output) to stderr;
+# real stdout is preserved for the final JSON line via json_mode_end.
+[[ "$JSON_MODE" == "1" ]] && json_mode_begin
 
 # --- Resolve project context (sets ASSETS_ROOT, MANIFEST_PATH, etc.) ---
 resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
@@ -156,9 +165,13 @@ mkdir -p "$CONCEPT_DIR"
 OUTPUT_NAME="$(resolve_name "$OUTPUT_NAME" "$CONCEPT_DIR" ".png")"
 
 # --- output helpers ---
+# Under --json, human-readable lines go to stderr so stdout carries only
+# the final JSON object. err is always on stderr.
 COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
-info()  { printf "${COL_BLUE}[concept]${COL_RESET} %s\n" "$1"; }
-done_() { printf "${COL_GREEN}[concept]${COL_RESET} %s\n" "$1"; }
+HUMAN_FD=1
+[[ "$JSON_MODE" == "1" ]] && HUMAN_FD=2
+info()  { printf "${COL_BLUE}[concept]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+done_() { printf "${COL_GREEN}[concept]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
 err()   { printf "${COL_RED}[concept]${COL_RESET} %s\n" "$1" >&2; }
 
 # --- venv check ---
@@ -173,8 +186,23 @@ source "$MFLUX_VENV/bin/activate"
 
 # --- generate ---
 START_TS=$(date +%s)
-print_context
-info "Model:    $MODEL"
+CREATED_AT="$(iso_now)"
+MACHINE="$(hostname_safe)"
+HW_TIER="$(hardware_tier)"
+LICENSE_BUCKET="$(license_bucket_for_model "$MODEL")"
+
+# Non-commercial models: warn (but don't block — spec says proceed)
+warn_if_non_commercial "$MODEL"
+
+# Redirect print_context output through HUMAN_FD when --json is on. The
+# function writes via printf to stdout, so we wrap it.
+if [[ "$JSON_MODE" == "1" ]]; then
+    print_context >&2
+else
+    print_context
+fi
+info "Model:    $MODEL  (license: $LICENSE_BUCKET)"
+info "Tier:     $HW_TIER  (machine: $MACHINE)"
 info "Prompt:   $FINAL_PROMPT"
 info "Size:     ${WIDTH}x${HEIGHT}"
 info "Steps:    $STEPS"
@@ -182,18 +210,24 @@ info "Count:    $COUNT"
 info "Output:   $CONCEPT_DIR/"
 [[ -n "$LORA_PATH" ]] && info "LoRA:     $LORA_PATH (scale $LORA_SCALE)"
 
+# Track every produced output (used for the --json result and chaining).
+OUTPUT_PATHS=()
+FIRST_SEED=""
+
 for i in $(seq 1 "$COUNT"); do
     if [[ -n "$SEED" ]]; then
         ITER_SEED=$((SEED + i - 1))
     else
         ITER_SEED=$RANDOM$RANDOM
     fi
+    [[ -z "$FIRST_SEED" ]] && FIRST_SEED="$ITER_SEED"
 
     if [[ "$COUNT" -gt 1 ]]; then
         OUT_PATH="$CONCEPT_DIR/${OUTPUT_NAME}_v${i}.png"
     else
         OUT_PATH="$CONCEPT_DIR/${OUTPUT_NAME}.png"
     fi
+    OUTPUT_PATHS+=( "$OUT_PATH" )
 
     info "Generating $i/$COUNT (seed=$ITER_SEED) -> $OUT_PATH"
 
@@ -227,11 +261,41 @@ done
 deactivate
 
 END_TS=$(date +%s)
-done_ "Generated $COUNT image(s) in $((END_TS - START_TS))s"
+DURATION=$((END_TS - START_TS))
+done_ "Generated $COUNT image(s) in ${DURATION}s"
 
-# Print absolute path of first image for chaining (last line of stdout)
-if [[ "$COUNT" -gt 1 ]]; then
-    echo "$CONCEPT_DIR/${OUTPUT_NAME}_v1.png"
+FIRST_OUTPUT="${OUTPUT_PATHS[0]}"
+
+if [[ "$JSON_MODE" == "1" ]]; then
+    # Build the JSON outputs array via Python so paths with special chars
+    # round-trip cleanly.
+    OUTPUTS_JSON="$(printf '%s\n' "${OUTPUT_PATHS[@]}" \
+        | python3 -c 'import sys,json; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.rstrip("\n")]))')"
+    json_mode_end
+    python3 "$SCRIPT_DIR/json_emit.py" \
+        status=ok \
+        stage=text_to_image \
+        model="$MODEL" \
+        license_bucket="$LICENSE_BUCKET" \
+        prompt="$PROMPT" \
+        final_prompt="$FINAL_PROMPT" \
+        --int width="$WIDTH" \
+        --int height="$HEIGHT" \
+        --int steps="$STEPS" \
+        --int seed="$FIRST_SEED" \
+        --int count="$COUNT" \
+        --array outputs="$OUTPUTS_JSON" \
+        assets_root="$ASSETS_ROOT" \
+        manifest_path="$MANIFEST_PATH" \
+        project_mode="$PROJECT_MODE" \
+        project_root="$PROJECT_ROOT" \
+        project_engine="$PROJECT_ENGINE" \
+        --int duration_seconds="$DURATION" \
+        machine="$MACHINE" \
+        hardware_tier="$HW_TIER" \
+        created="$CREATED_AT"
 else
-    echo "$CONCEPT_DIR/${OUTPUT_NAME}.png"
+    # Last line is the first image path — preserves the existing chaining
+    # contract for callers that haven't migrated to --json.
+    echo "$FIRST_OUTPUT"
 fi

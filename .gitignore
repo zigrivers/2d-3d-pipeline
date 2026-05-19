@@ -29,3 +29,8 @@ smoke-output/
 
 # OS / shell scratch
 *.log
+
+# planning-with-files skill artefacts (session-local)
+task_plan.md
+findings.md
+progress.md

@@ -210,6 +210,105 @@ resolve_name() {
     echo "$candidate"
 }
 
+# --- v0.2: hardware tier, license buckets, ISO timestamps ---
+
+# Path to the per-machine pipeline config (key=value, NOT JSON, to keep it
+# distinct from per-project .asset-pipeline.json). Override with $PIPELINE_CONFIG.
+PIPELINE_CONFIG_PATH="${PIPELINE_CONFIG_PATH:-$HOME/3d-pipeline/.config}"
+
+# Read a key from PIPELINE_CONFIG_PATH; echo the value or the fallback ($2).
+# Lines starting with '#' are comments. Whitespace around '=' is tolerated.
+read_pipeline_config() {
+    local key="$1"
+    local fallback="${2:-}"
+    [[ -f "$PIPELINE_CONFIG_PATH" ]] || { echo "$fallback"; return 0; }
+    local val
+    val="$(awk -F= -v k="$key" '
+        /^[[:space:]]*#/ { next }
+        {
+            n = $1; sub(/^[[:space:]]+/, "", n); sub(/[[:space:]]+$/, "", n)
+            if (n == k) {
+                v = $0; sub(/^[^=]*=/, "", v)
+                sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+                print v; exit
+            }
+        }
+    ' "$PIPELINE_CONFIG_PATH")"
+    if [[ -n "$val" ]]; then
+        echo "$val"
+    else
+        echo "$fallback"
+    fi
+}
+
+# Hardware tier — laptop (default) or studio. Read from ~/3d-pipeline/.config.
+# NEVER guess from hostname; renaming a machine would silently change behaviour.
+hardware_tier() {
+    local tier
+    tier="$(read_pipeline_config hardware_tier laptop)"
+    case "$tier" in
+        laptop|studio) echo "$tier" ;;
+        *) echo laptop ;;
+    esac
+}
+
+# Hostname, safe-ish for inclusion in JSON.
+hostname_safe() {
+    local h
+    h="$(hostname 2>/dev/null || true)"
+    [[ -n "$h" ]] || h="unknown"
+    echo "$h"
+}
+
+# ISO-8601 UTC timestamp.
+iso_now() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+# Exact license bucket for a given model name. Returns one of:
+#   commercial_safe | commercial_threshold | source_available_restricted
+#   non_commercial  | unclear_risky        | unknown
+# These names are stable — used in code, JSON, manifest, and docs.
+license_bucket_for_model() {
+    case "$1" in
+        z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
+        sf3d|spar3d)                            echo commercial_threshold ;;
+        flux-dev|trellis)                       echo non_commercial ;;
+        "")                                     echo unknown ;;
+        *)                                      echo unknown ;;
+    esac
+}
+
+# --- JSON-mode stdout redirection ---
+#
+# Under --json, every subcommand (mflux, SF3D, TRELLIS, Blender) prints
+# progress to stdout, which would corrupt the final JSON line. The wrappers
+# call json_mode_begin once after parsing --json, and json_mode_end right
+# before emitting the JSON object. Between them, fd 1 is silently routed to
+# stderr; the real stdout is preserved on fd 4 and restored at the end so
+# only the JSON object lands on stdout.
+json_mode_begin() {
+    # Save real stdout to fd 4, then route fd 1 to stderr.
+    exec 4>&1 1>&2
+}
+json_mode_end() {
+    # Restore real stdout from fd 4 and close fd 4.
+    exec 1>&4 4>&-
+}
+
+# Print a non-commercial-licence warning to stderr if the model is restricted.
+# Does not block; the spec says warn then proceed when explicitly chosen.
+warn_if_non_commercial() {
+    local model="$1"
+    local bucket
+    bucket="$(license_bucket_for_model "$model")"
+    if [[ "$bucket" == "non_commercial" ]]; then
+        printf "[license] WARNING: %s is non-commercial. Output must not be used for\n" "$model" >&2
+        printf "[license]          commercial projects (Grithkin, GripCraft, etc.) unless you\n" >&2
+        printf "[license]          have explicitly accepted the licence restrictions.\n" >&2
+    fi
+}
+
 # Print a friendly context summary at the top of each run.
 print_context() {
     if [[ "$PROJECT_MODE" == "project" ]]; then
