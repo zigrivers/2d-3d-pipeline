@@ -23,6 +23,7 @@ source "$SCRIPT_DIR/_pipeline_lib.sh"
 
 PIPELINE_ROOT="${PIPELINE_ROOT:-$HOME/3d-pipeline}"
 SF3D_DIR="$PIPELINE_ROOT/stable-fast-3d"
+SPAR3D_DIR="${SPAR3D_DIR:-$PIPELINE_ROOT/stable-point-aware-3d}"
 TRELLIS_DIR="$PIPELINE_ROOT/trellis-mac"
 BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
 
@@ -52,7 +53,8 @@ Project context:
                            (project mode with Unity/Unreal only)
 
 Generation options:
-  -g, --generator NAME     sf3d (default) | trellis
+  -g, --generator NAME     sf3d (default) | spar3d | trellis
+                           spar3d and trellis are experimental / opt-in.
   -o, --output NAME        Output name (default: derived from input)
   -p, --polycount N        Target polycount after cleanup (default: 3000)
   -t, --texture-res N      SF3D texture resolution (default: 2048)
@@ -117,8 +119,10 @@ resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
 [[ -z "$POLYCOUNT" ]]   && POLYCOUNT="$(config_default polycount 3000)"
 [[ -z "$TEXTURE_RES" ]] && TEXTURE_RES="$(config_default texture_resolution 2048)"
 
-case "$GENERATOR" in sf3d|trellis) ;; *) echo "ERROR: -g must be sf3d or trellis" >&2; exit 1 ;; esac
-# Phase 8 will extend this to include spar3d.
+case "$GENERATOR" in
+    sf3d|trellis|spar3d) ;;
+    *) echo "ERROR: -g must be sf3d, spar3d, or trellis (got: $GENERATOR)" >&2; exit 1 ;;
+esac
 case "$UP_AXIS" in y|z) ;; *) echo "ERROR: -u must be y or z" >&2; exit 1 ;; esac
 
 if [[ -z "$OUTPUT_NAME" ]]; then
@@ -174,6 +178,66 @@ if [[ "$GENERATOR" == "sf3d" ]]; then
 
     [[ -f "$TMP_OUT/0/mesh.glb" ]] || { err "SF3D did not produce mesh.glb"; exit 1; }
     mv "$TMP_OUT/0/mesh.glb" "$RAW_PATH"
+    rm -rf "$TMP_OUT"
+    deactivate
+    popd > /dev/null
+
+elif [[ "$GENERATOR" == "spar3d" ]]; then
+    # SPAR3D (Stable Point Aware 3D) — optional, experimental, commercial-threshold.
+    # Install layout assumed (override with $SPAR3D_DIR):
+    #   $SPAR3D_DIR/.venv             -- isolated venv per the one-venv-per-tool rule
+    #   $SPAR3D_DIR/run.py            -- inference entrypoint (SF3D-style)
+    # If your installed SPAR3D copy uses a different entrypoint, edit the
+    # `python run.py ...` invocation below to match — the wrapper is intentionally
+    # close to the SF3D shape because both repos converge on a similar CLI.
+    if [[ ! -d "$SPAR3D_DIR" ]]; then
+        err "SPAR3D not installed at $SPAR3D_DIR"
+        err "  Expected directory:  $SPAR3D_DIR"
+        err "  Expected venv:       $SPAR3D_DIR/.venv"
+        err "  Override location:   export SPAR3D_DIR=/path/to/stable-point-aware-3d"
+        err "  Install hint:        clone https://github.com/Stability-AI/stable-point-aware-3d"
+        err "                       then create a venv and run its setup steps."
+        err "  Note: SPAR3D is experimental and not the default 3D generator."
+        exit 1
+    fi
+    if [[ ! -d "$SPAR3D_DIR/.venv" ]]; then
+        err "SPAR3D venv not found at $SPAR3D_DIR/.venv"
+        err "  Run the SPAR3D install steps and create a .venv inside it."
+        exit 1
+    fi
+    if [[ ! -f "$SPAR3D_DIR/run.py" ]]; then
+        err "SPAR3D inference script not found at $SPAR3D_DIR/run.py"
+        err "  The wrapper expects an SF3D-style 'python run.py INPUT --output-dir DIR'"
+        err "  interface. If your install uses a different entry point, edit"
+        err "  generate.sh's spar3d branch to match."
+        exit 1
+    fi
+
+    pushd "$SPAR3D_DIR" > /dev/null
+    # shellcheck source=/dev/null
+    source .venv/bin/activate
+
+    TMP_OUT="$RAW_DIR/spar3d_tmp_$$"
+    rm -rf "$TMP_OUT"
+
+    # The CLI shape mirrors SF3D: positional image, --output-dir, optional
+    # texture/remesh flags. Adjust here if your installed SPAR3D differs.
+    PYTORCH_ENABLE_MPS_FALLBACK=1 python run.py \
+        "$INPUT" \
+        --output-dir "$TMP_OUT" \
+        --texture-resolution "$TEXTURE_RES" \
+        --remesh_option "$REMESH"
+
+    # Locate the produced GLB. SF3D writes <dir>/0/mesh.glb; if SPAR3D writes
+    # somewhere else, grab the first GLB under TMP_OUT.
+    PRODUCED=""
+    if [[ -f "$TMP_OUT/0/mesh.glb" ]]; then
+        PRODUCED="$TMP_OUT/0/mesh.glb"
+    else
+        PRODUCED="$(find "$TMP_OUT" -name '*.glb' -print -quit 2>/dev/null || true)"
+    fi
+    [[ -n "$PRODUCED" && -f "$PRODUCED" ]] || { err "SPAR3D did not produce a GLB under $TMP_OUT"; exit 1; }
+    mv "$PRODUCED" "$RAW_PATH"
     rm -rf "$TMP_OUT"
     deactivate
     popd > /dev/null
