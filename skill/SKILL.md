@@ -67,7 +67,7 @@ change behaviour. The wrappers do the same detection in `_pipeline_lib.sh`
 (function `hardware_tier`); every `--json` output includes the
 `hardware_tier` field so manifests and benchmark results stay tier-aware.
 
-## Three pipeline halves + four new lanes
+## Three pipeline halves + four (now five) new lanes
 
 The three core halves are unchanged:
 
@@ -75,10 +75,10 @@ The three core halves are unchanged:
 - **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS.2, then Blender cleanup
 - **Print** — clean GLB → printable STL via Blender mesh repair + scaling
 
-v0.2 adds four lanes you'll occasionally recommend, none of them defaults:
+v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
 
 - **Texture inspect/upscale** (`texture.sh`) — GLB and image stats, optional
-  Real-ESRGAN upscale.
+  Real-ESRGAN upscale. Paint mode (Hunyuan3D-Paint) approved v0.3.0.
 - **Model bake-off** (`benchmark.sh`) — runs a prompt suite across selected
   2D models and 3D generators, writes structured results.
 - **Queue** (`queue_submit.py` / `queue_worker.py`) — file-based two-machine
@@ -86,6 +86,10 @@ v0.2 adds four lanes you'll occasionally recommend, none of them defaults:
   the value is multi-machine.
 - **SPAR3D** (`generate.sh -g spar3d`) — alternative 3D generator. Opt-in
   and experimental.
+- **Multi-view 3D reconstruction** (`multiview.sh`, v0.3.2+) — Flow 9.
+  Takes 3+ views of one subject and reconstructs a single mesh. Backend
+  default is TRELLIS multi-view (`non_commercial`); openlrm
+  (`commercial_safe`) and instantmesh (`unclear_risky`) opt-in.
 
 ---
 
@@ -198,24 +202,26 @@ Point users at the right setup guide for *their* machine:
 
 ## When the user invokes this skill
 
-Determine which of the eight flows applies:
+Determine which of the nine flows applies:
 
 1. **Text → 2D only** — prompt only, image output
 2. **2D → 3D** — image input, GLB output for games
 3. **Text → 2D → 3D** — prompt only, GLB output (chain 1 + 2)
 4. **GLB → printable STL** — existing 3D asset, STL output for the Snapmaker U1
 5. **Text → 2D → 3D → STL** — full pipeline ending at a printable file
-6. **Texture inspect / upscale** — describe a GLB or image, or upscale a texture
+6. **Texture inspect / upscale / paint** — describe a GLB or image, upscale a texture, or paint PBR textures onto a mesh (Hunyuan3D-Paint, v0.3.0+)
 7. **Model bake-off / benchmark** — compare two or more model paths on the same prompts
 8. **Queue-based batch generation (studio-tier, experimental)** — submit work that one of the Studios will pick up
+9. **Multi-view 3D reconstruction (v0.3.2+, Tier 3)** — 3+ views of one subject → single 3D mesh; for photogrammetry or recovering back-face detail
 
 If unclear, ask one short question. Common defaults:
 - "make me a [thing] for my game" → flow 3
 - "make me a [thing] I can 3D print" → flow 5
 - "prepare [asset] for printing" or "make an STL of [asset]" → flow 4
-- "inspect this GLB" / "upscale this texture" → flow 6
+- "inspect this GLB" / "upscale this texture" / "paint this mesh" → flow 6
 - "compare SF3D and SPAR3D" / "which 2D model is best for this prompt" → flow 7
 - "queue these on the other Studio" → flow 8 (studio tier only)
+- "I have multiple photos of this" / "reconstruct from these views" → flow 9
 
 **When chaining or scripting, always pass `--json` to the wrappers.** The
 JSON is stable and parseable; the human-readable lines under `--json` are
@@ -627,6 +633,85 @@ result including the wrapper's `--json` output.
 
 Only suggest the queue when both Studios are available and the user has
 a batch of work. For one-off generations, run the wrappers directly.
+
+## Flow 9: Multi-view 3D reconstruction (v0.3.2+, Tier 3)
+
+Use `multiview.sh` when the user has **multiple views of the same
+subject** (3+ images) and wants a single 3D mesh that respects all of
+them — rather than running `generate.sh` on just one view and hoping
+the back-face hallucinates correctly.
+
+**Trigger phrases:** "I have multiple photos of this", "use these
+reference images", "reconstruct from these views", "photogrammetry",
+"turn these N photos into a 3D model".
+
+**Two input modes:**
+
+```bash
+# Canonical 4 cardinal-angle views (front, right, back, left):
+multiview.sh -i front.png,right.png,back.png,left.png
+
+# Explicit per-view manifest (for non-cardinal angles, e.g. Zero123++'s
+# 6 native angles with alternating elevation):
+multiview.sh -m views.json
+```
+
+Manifest schema (`-m` mode):
+
+```json
+[
+  {"path": "v0.png", "view": "front",     "azimuth_deg": 0,   "elevation_deg": 0},
+  {"path": "v1.png", "view": "right",     "azimuth_deg": 90,  "elevation_deg": 0},
+  {"path": "v2.png", "view": "right_up",  "azimuth_deg": 90,  "elevation_deg": 30}
+]
+```
+
+**Backend choice** (`--backend`):
+
+| Backend | License bucket | When to suggest |
+|---|---|---|
+| `trellis` (default) | `non_commercial` (CC BY-NC) | Best general-purpose match; same bucket as the existing TRELLIS single-image path so the user already knows what they're accepting |
+| `instantmesh` | `unclear_risky` | Don't recommend until P3.1b's license review completes — the wrapper auto-DQs it from benchmark scoring for the same reason. If the user explicitly asks, mention the risk and proceed only with explicit acknowledgement |
+| `openlrm` | `commercial_safe` (Apache 2.0) | Recommend when the user needs a commercially-clean license; quality may be lower than TRELLIS so warn the trade-off |
+
+**Always state the license bucket inline** (same convention as Flow 2's
+generator-selection matrix).
+
+After the backend runs, the wrapper applies the same Blender cleanup +
+v0.3 quality checks (mesh / texture / UV / engine) + turntable preview
++ engine staging as `generate.sh`. The output GLB lands in
+`assets/clean/<name>_clean.glb` with a co-located meta.json.
+
+**When to suggest multi-view over single-image:**
+
+- User has 3+ images of the same subject (photos or AI-generated)
+- Asset has visible back / side detail (asymmetric character, prop with
+  features on multiple sides)
+- Single-image generations have repeatedly hallucinated the back face
+  for this asset class
+- Photogrammetry use case (capturing a real physical object)
+
+**When NOT to suggest multi-view:**
+
+- User has only one image — Flow 2 (`generate.sh`) is correct
+- Asset is rotationally symmetric (a barrel, a sphere) — single image
+  gives the same result with less effort
+- Commercial release + only TRELLIS is installed — the
+  `non_commercial` bucket disqualifies; either install OpenLRM first
+  or recommend Flow 2 with SF3D/SPAR3D
+
+**Chaining example** (full mvgen → 3D path):
+
+> "I'll feed your concept image to Zero123++ to generate 6 multi-view-
+> consistent images, then reconstruct a 3D mesh from those via TRELLIS
+> multi-view. License bucket `non_commercial` — confirm before we
+> ship anything from this in Grithkin."
+
+(That chain currently requires you to invoke `build_mvgen_dataset.py`
+manually to get the views and then `multiview.sh -m <generated-manifest>`;
+a future feature will wrap the chain behind a single
+`generate.sh --multiview-from-concept` flag once the benchmark picks
+a canonical chain.)
 
 ---
 

@@ -2,6 +2,40 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.1c+d+e: multiview.sh wrapper + Flow 9 skill + embeds
+
+scripts/multiview.sh (v0.3.2, Flow 9):
+
+  Two input modes:
+    -i v0.png,v1.png,v2.png[,v3.png]   comma-separated, 3+ required
+    -m views.json                       per-view manifest (path + angles)
+
+  Backend choice via --backend trellis|instantmesh|openlrm:
+    trellis     default; non_commercial (CC BY-NC)
+    openlrm     commercial_safe (Apache 2.0)
+    instantmesh unclear_risky (auto-DQ in benchmark until reviewed)
+
+  After backend runs:
+    - clean_asset.py cleanup + meta.json cleanup section
+    - mesh / texture / game-asset quality checks (same as generate.sh)
+    - turntable preview (tier-aware default)
+    - engine staging + hero PNG staging
+    - --json result with backend, license_bucket, views, paths, duration
+
+  Full --json contract identical in shape to generate.sh's so existing
+  chaining patterns work transparently.
+
+skill/SKILL.md:
+  - Adds Flow 9 with trigger phrases, both input modes, backend
+    recommendation matrix, when-to-suggest / when-NOT-to-suggest
+    heuristics, and the future-feature note about a single-image
+    chain mode once a backend is picked from P3.1b.
+  - Updates the "three halves + five lanes" header.
+  - Bumps the "Determine which of the EIGHT flows" section to NINE.
+
+Embeds: multiview.sh added to both setup guides; SKILL.md
+regenerated. make verify clean (31 blocks; was 30).
+
 ## 2026-05-20 — P3.1b: multi-view backend adapters + recommendation skeleton
 
 Ships the three backend adapters the harness expects + a recommendation

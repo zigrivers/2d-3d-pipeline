@@ -60,6 +60,7 @@ EMBEDS: dict[str, str] = {
     "scripts/clip_calibration.json":     "~/3d-pipeline/workspace/clip_calibration.json",
     "scripts/multiview_benchmark.py":    "~/3d-pipeline/workspace/multiview_benchmark.py",
     "scripts/calibrate_clip.py":         "~/3d-pipeline/workspace/calibrate_clip.py",
+    "scripts/multiview.sh":              "~/3d-pipeline/workspace/multiview.sh",
 }
 
 # Block pattern: opener line, body, closing PIPELINE_EOF on its own line.
