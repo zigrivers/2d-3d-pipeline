@@ -41,6 +41,26 @@ Usage examples
       --oversized-axes-json '[]' \\
       --eval-json '{"prompt_match": null, ...}' \\
       --source-wrapper-json '{"status":"ok", ...}'
+
+  # v0.3 — forward all v0.3 quality-pass data via the per-asset meta.json:
+  update_manifest.py --manifest <p> --name <n> --concept <png> \\
+      --generator sf3d --category prop \\
+      --meta-json /path/to/clean/dragon_clean.glb.meta.json
+
+The --meta-json flag merges sections from a per-asset meta.json into
+the manifest entry per the documented mapping (cross-cutting principle
+2 of improvement-spec.md):
+
+    meta.input  + meta.preprocessing -> entry.generation.input
+    meta.generation                  -> entry.generation (field merge,
+                                        explicit --field args win)
+                                        and entry.model.license_bucket
+    meta.cleanup, meta.quality.*,    -> entry.quality.* (consolidated
+    meta.preview, meta.clip             under one quality block)
+    meta.print                       -> entry.print (field merge)
+
+The merge is additive: explicit per-arg flags still win when both are
+present. Missing sections in the meta.json are silently skipped.
 """
 from __future__ import annotations
 
@@ -81,6 +101,76 @@ def _size_or_explicit(path_str: str, explicit_bytes: int | None) -> int | None:
         return None
     p = Path(os.path.expanduser(path_str))
     return p.stat().st_size if p.exists() else None
+
+
+def _merge_meta_json(entry: dict, meta_path_str: str) -> None:
+    """Merge sections from a v0.3+ per-asset meta.json into the manifest entry.
+
+    Mapping (cross-cutting principle 2 of improvement-spec.md):
+
+        meta.input  + meta.preprocessing -> entry.generation.input
+        meta.generation                  -> entry.generation (field-level merge;
+                                            explicit --field args win) and
+                                            entry.model.license_bucket
+        meta.cleanup, meta.quality.*,    -> entry.quality.*
+        meta.preview, meta.clip
+        meta.print                       -> entry.print (field-level merge)
+
+    Missing sections are silently skipped. Existing entry fields are preserved
+    (setdefault semantics) so explicit --field args still win when both are
+    provided.
+    """
+    meta_path = Path(os.path.expanduser(meta_path_str))
+    if not meta_path.exists():
+        print(f"WARNING: --meta-json file not found: {meta_path}", file=sys.stderr)
+        return
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"WARNING: --meta-json could not be parsed ({e}); skipping", file=sys.stderr)
+        return
+    if not isinstance(meta, dict):
+        print("WARNING: --meta-json root must be an object; skipping", file=sys.stderr)
+        return
+
+    # input + preprocessing -> entry.generation.input
+    gen = entry.setdefault("generation", {})
+    if "input" in meta or "preprocessing" in meta:
+        inp = gen.setdefault("input", {})
+        if isinstance(meta.get("input"), dict):
+            for k, v in meta["input"].items():
+                inp.setdefault(k, v)
+        if isinstance(meta.get("preprocessing"), dict):
+            preproc = inp.setdefault("preprocessing", {})
+            for k, v in meta["preprocessing"].items():
+                preproc.setdefault(k, v)
+
+    # generation -> entry.generation (field-level merge; explicit args win)
+    if isinstance(meta.get("generation"), dict):
+        for k, v in meta["generation"].items():
+            gen.setdefault(k, v)
+        bucket = meta["generation"].get("license_bucket")
+        if bucket:
+            model_block = entry.setdefault("model", {})
+            model_block.setdefault("license_bucket", bucket)
+
+    # cleanup, quality.*, preview, clip -> entry.quality.*
+    quality = entry.setdefault("quality", {})
+    if isinstance(meta.get("cleanup"), dict):
+        quality.setdefault("cleanup", meta["cleanup"])
+    if isinstance(meta.get("quality"), dict):
+        for sub_key, sub_val in meta["quality"].items():
+            quality.setdefault(sub_key, sub_val)
+    if isinstance(meta.get("preview"), dict):
+        quality.setdefault("preview", meta["preview"])
+    if isinstance(meta.get("clip"), dict):
+        quality.setdefault("clip", meta["clip"])
+
+    # print -> entry.print (field-level merge)
+    if isinstance(meta.get("print"), dict):
+        p_block = entry.setdefault("print", {})
+        for k, v in meta["print"].items():
+            p_block.setdefault(k, v)
 
 
 def _migrate_list_to_dict(data: dict, manifest_path: Path) -> dict:
@@ -241,6 +331,10 @@ def main() -> int:
                    help="JSON object replacing the eval{} block")
     p.add_argument("--source-wrapper-json", default="",
                    help="JSON object from the wrapper's --json output, kept for provenance")
+    p.add_argument("--meta-json", default="",
+                   help="Path to <output>.meta.json from v0.3+ quality passes. "
+                        "Merged into the manifest entry per the documented mapping "
+                        "(see module docstring).")
     args = p.parse_args()
 
     manifest_path = Path(os.path.expanduser(args.manifest))
@@ -303,6 +397,10 @@ def main() -> int:
 
     if args.source_wrapper_json:
         entry["source_wrapper"] = _json_or_default(args.source_wrapper_json, {})
+
+    # ----- v0.3+ per-asset meta.json merge -----
+    if args.meta_json:
+        _merge_meta_json(entry, args.meta_json)
 
     # ----- Persist -----
     action = "updated" if existing else "added"

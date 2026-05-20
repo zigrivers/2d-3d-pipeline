@@ -2,6 +2,33 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P0.3: update_manifest.py --meta-json flag
+
+Third foundation PR. Closes the loop from per-asset meta.json (P0.2)
+back to the manifest, so future quality passes can forward all of
+their data with one flag.
+
+- `skill/scripts/update_manifest.py` gains `--meta-json PATH` plus a
+  new `_merge_meta_json` helper that maps meta.json sections into the
+  manifest entry per the cross-cutting principle 2 table:
+    meta.input + meta.preprocessing  -> entry.generation.input
+    meta.generation                  -> entry.generation (field merge)
+                                        + entry.model.license_bucket
+    meta.cleanup, meta.quality.*,    -> entry.quality.*
+    meta.preview, meta.clip
+    meta.print                       -> entry.print (field merge)
+- Merge is additive: explicit per-arg flags still win when both are
+  provided (`setdefault` semantics). Missing sections in the meta.json
+  are silently skipped; an absent meta.json file emits a warning but
+  does not abort the update.
+- `tools/test_update_manifest_meta.sh` — 6-case smoke-test suite
+  covering: full merge, arg-vs-meta precedence, missing file,
+  idempotent re-run, and backward-compat with pre-existing v3 manifests.
+
+No skill text changes yet — the v0.3 wrappers (Tier 1) will start
+passing `--meta-json` in their `update_manifest.py` invocations. The
+old per-field flags continue to work for v0.2 callers.
+
 ## 2026-05-20 — P0.2: meta_helper.py + meta_schema.json (foundation)
 
 Second foundation PR. Establishes the single-meta.json discipline that
