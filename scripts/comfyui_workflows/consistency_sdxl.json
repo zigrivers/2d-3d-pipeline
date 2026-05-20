@@ -1,0 +1,118 @@
+{
+  "_comment": "Reference ComfyUI workflow for consistency-mode generation (P3.2d). SDXL base + optional LoRA + IP-Adapter (FaceID variant) + optional ControlNet (single, first entry from pack.controlnets[]). String placeholders like ${pack.identity.reference} are substituted by scripts/comfyui_dispatch.py before submission to /prompt. If your local ComfyUI install uses different IP-Adapter / ControlNet custom-node names, adapt the node class_type strings below to match.",
+  "_pack_compat": "Designed against consistency-pack schema_version 1 (docs/consistency-pack-format.md). Currently uses controlnets[0] only; extend the graph for multi-ControlNet stacks.",
+  "_disclaimer": "This is a starting-point workflow. ComfyUI custom-node naming evolves; verify against your installed ComfyUI_IPAdapter_plus + ControlNet packs and edit node class_types if needed.",
+
+  "3": {
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {"title": "Load SDXL base"}
+  },
+
+  "4": {
+    "inputs": {
+      "model": ["3", 0],
+      "lora_name": "${pack.lora.path}",
+      "strength_model": "${pack.lora.weight}",
+      "strength_clip": "${pack.lora.weight}"
+    },
+    "class_type": "LoraLoader",
+    "_meta": {"title": "Apply pack LoRA (optional)"}
+  },
+
+  "5": {
+    "inputs": {
+      "image": "${pack.identity.reference}",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {"title": "Identity reference for IP-Adapter"}
+  },
+
+  "6": {
+    "inputs": {
+      "ipadapter_file": "ip-adapter-faceid_sdxl.safetensors"
+    },
+    "class_type": "IPAdapterModelLoader",
+    "_meta": {"title": "Load IP-Adapter FaceID SDXL"}
+  },
+
+  "7": {
+    "inputs": {
+      "model": ["4", 0],
+      "ipadapter": ["6", 0],
+      "image": ["5", 0],
+      "weight": "${pack.identity.weight}",
+      "weight_type": "linear",
+      "start_at": 0.0,
+      "end_at": 1.0
+    },
+    "class_type": "IPAdapterAdvanced",
+    "_meta": {"title": "Apply IP-Adapter"}
+  },
+
+  "8": {
+    "inputs": {
+      "text": "${prompt}",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Positive prompt"}
+  },
+
+  "9": {
+    "inputs": {
+      "text": "${negative}",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative prompt"}
+  },
+
+  "10": {
+    "inputs": {
+      "width": "${width}",
+      "height": "${height}",
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {"title": "Latent canvas"}
+  },
+
+  "11": {
+    "inputs": {
+      "seed": "${seed}",
+      "steps": "${steps}",
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model": ["7", 0],
+      "positive": ["8", 0],
+      "negative": ["9", 0],
+      "latent_image": ["10", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {"title": "Sample"}
+  },
+
+  "12": {
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["3", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {"title": "Decode latent"}
+  },
+
+  "13": {
+    "inputs": {
+      "filename_prefix": "consistency",
+      "images": ["12", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {"title": "Save"}
+  }
+}

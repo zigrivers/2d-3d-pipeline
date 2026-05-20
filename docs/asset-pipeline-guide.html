@@ -1958,6 +1958,9 @@ COUNT=1
 GAME_PROMPT=1
 PROMPT=&quot;&quot;
 JSON_MODE=0
+BACKEND=&quot;mflux&quot;
+CONSISTENCY_PACK=&quot;&quot;
+NEGATIVE=&quot;&quot;
 
 GAME_SUFFIX=&quot;, 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed&quot;
 
@@ -2020,6 +2023,9 @@ while [[ $# -gt 0 ]]; do
         -q|--quantize)     QUANTIZE=&quot;$2&quot;;     shift 2 ;;
         -n|--count)        COUNT=&quot;$2&quot;;        shift 2 ;;
         --no-game-prompt)  GAME_PROMPT=0;     shift   ;;
+        --backend)         BACKEND=&quot;$2&quot;;      shift 2 ;;
+        --consistency-pack) CONSISTENCY_PACK=&quot;$2&quot;; shift 2 ;;
+        --negative)        NEGATIVE=&quot;$2&quot;;     shift 2 ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
@@ -2028,6 +2034,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z &quot;$PROMPT&quot; ]] &amp;&amp; { echo &quot;ERROR: prompt is required&quot; &gt;&amp;2; usage; exit 1; }
+
+# Validate backend choice
+case &quot;$BACKEND&quot; in
+    mflux) ;;
+    comfyui)
+        [[ -n &quot;$CONSISTENCY_PACK&quot; ]] || { echo &quot;ERROR: --backend comfyui requires --consistency-pack PATH&quot; &gt;&amp;2; exit 1; }
+        [[ -d &quot;$CONSISTENCY_PACK&quot; ]] || { echo &quot;ERROR: --consistency-pack not a directory: $CONSISTENCY_PACK&quot; &gt;&amp;2; exit 1; }
+        ;;
+    *)
+        echo &quot;ERROR: --backend must be mflux (default) or comfyui (got: $BACKEND)&quot; &gt;&amp;2
+        exit 1 ;;
+esac
 
 # Under --json, route all stdout (including subcommand output) to stderr;
 # real stdout is preserved for the final JSON line via json_mode_end.
@@ -2147,31 +2165,64 @@ for i in $(seq 1 &quot;$COUNT&quot;); do
     fi
     OUTPUT_PATHS+=( &quot;$OUT_PATH&quot; )
 
-    info &quot;Generating $i/$COUNT (seed=$ITER_SEED) -&gt; $OUT_PATH&quot;
+    info &quot;Generating $i/$COUNT (seed=$ITER_SEED, backend=$BACKEND) -&gt; $OUT_PATH&quot;
 
-    case &quot;$MODEL&quot; in
-        z-image-turbo)
-            mflux-generate-z-image-turbo \
-                --prompt &quot;$FINAL_PROMPT&quot; \
-                --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
-                --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
-                -q &quot;$QUANTIZE&quot; \
-                --output &quot;$OUT_PATH&quot;
-            ;;
-        flux-schnell|flux-dev)
-            FLUX_MODEL=&quot;${MODEL#flux-}&quot;
-            LORA_ARGS=()
-            [[ -n &quot;$LORA_PATH&quot; ]] &amp;&amp; LORA_ARGS+=( --lora-paths &quot;$LORA_PATH&quot; --lora-scales &quot;$LORA_SCALE&quot; )
-            mflux-generate \
-                --prompt &quot;$FINAL_PROMPT&quot; \
-                --model &quot;$FLUX_MODEL&quot; \
-                --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
-                --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
-                -q &quot;$QUANTIZE&quot; \
-                --output &quot;$OUT_PATH&quot; \
-                &quot;${LORA_ARGS[@]}&quot;
-            ;;
-    esac
+    if [[ &quot;$BACKEND&quot; == &quot;comfyui&quot; ]]; then
+        # ComfyUI consistency mode (item 11 / P3.2). Dispatch through the
+        # consistency-pack + workflow. License bucket is derived from the
+        # pack manifest by the dispatcher.
+        PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+        DISPATCH=&quot;$SCRIPT_DIR/comfyui_dispatch.py&quot;
+        [[ -f &quot;$DISPATCH&quot; ]] || DISPATCH=&quot;$PIPELINE_ROOT/workspace/comfyui_dispatch.py&quot;
+        if [[ ! -f &quot;$DISPATCH&quot; || ! -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+            err &quot;comfyui_dispatch.py or pipeline-tools-env missing — install both first&quot;
+            exit 1
+        fi
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$DISPATCH&quot; \
+            --pack &quot;$CONSISTENCY_PACK&quot; \
+            --prompt &quot;$FINAL_PROMPT&quot; \
+            --negative &quot;$NEGATIVE&quot; \
+            --output &quot;$OUT_PATH&quot; \
+            --seed &quot;$ITER_SEED&quot; \
+            --steps &quot;$STEPS&quot; \
+            --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
+            --json &gt; /tmp/comfyui-result-$$.json || {
+            err &quot;ComfyUI dispatch failed&quot;
+            cat /tmp/comfyui-result-$$.json &gt;&amp;2 2&gt;/dev/null || true
+            rm -f /tmp/comfyui-result-$$.json
+            exit 1
+        }
+        # Override LICENSE_BUCKET from the dispatcher&#x27;s result (it knows
+        # the pack&#x27;s actual bucket and resolves against the base model).
+        DISPATCH_BUCKET=&quot;$(python3 -c &quot;import json,sys; d=json.load(open(&#x27;/tmp/comfyui-result-$$.json&#x27;)); print(d.get(&#x27;license_bucket&#x27;, &#x27;&#x27;))&quot; 2&gt;/dev/null || echo &quot;&quot;)&quot;
+        [[ -n &quot;$DISPATCH_BUCKET&quot; ]] &amp;&amp; LICENSE_BUCKET=&quot;$DISPATCH_BUCKET&quot;
+        rm -f /tmp/comfyui-result-$$.json
+    else
+        # Default backend: mflux
+        case &quot;$MODEL&quot; in
+            z-image-turbo)
+                mflux-generate-z-image-turbo \
+                    --prompt &quot;$FINAL_PROMPT&quot; \
+                    --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
+                    --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
+                    -q &quot;$QUANTIZE&quot; \
+                    --output &quot;$OUT_PATH&quot;
+                ;;
+            flux-schnell|flux-dev)
+                FLUX_MODEL=&quot;${MODEL#flux-}&quot;
+                LORA_ARGS=()
+                [[ -n &quot;$LORA_PATH&quot; ]] &amp;&amp; LORA_ARGS+=( --lora-paths &quot;$LORA_PATH&quot; --lora-scales &quot;$LORA_SCALE&quot; )
+                mflux-generate \
+                    --prompt &quot;$FINAL_PROMPT&quot; \
+                    --model &quot;$FLUX_MODEL&quot; \
+                    --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
+                    --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
+                    -q &quot;$QUANTIZE&quot; \
+                    --output &quot;$OUT_PATH&quot; \
+                    &quot;${LORA_ARGS[@]}&quot;
+                ;;
+        esac
+    fi
 
     [[ -f &quot;$OUT_PATH&quot; ]] || { err &quot;Generation failed for $OUT_PATH&quot;; deactivate; exit 1; }
 done
@@ -9227,6 +9278,567 @@ PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/multiview.sh</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>consistency_pack_schema.json</code>
+                <span class="script-summary-desc">v0.3.2 consistency pack JSON schema (P3.2 / item 11)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/consistency_pack_schema.json << 'PIPELINE_EOF'
+{
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;title&quot;: &quot;Consistency pack manifest (v1)&quot;,
+  &quot;description&quot;: &quot;Schema for pack.json inside a consistency pack. See docs/consistency-pack-format.md for prose.&quot;,
+  &quot;type&quot;: &quot;object&quot;,
+  &quot;required&quot;: [&quot;schema_version&quot;, &quot;name&quot;, &quot;license_bucket&quot;, &quot;base_model&quot;, &quot;identity&quot;],
+  &quot;additionalProperties&quot;: false,
+  &quot;properties&quot;: {
+    &quot;schema_version&quot;: { &quot;const&quot;: 1 },
+    &quot;name&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1, &quot;maxLength&quot;: 128 },
+    &quot;description&quot;: { &quot;type&quot;: &quot;string&quot; },
+    &quot;license_bucket&quot;: {
+      &quot;type&quot;: &quot;string&quot;,
+      &quot;enum&quot;: [
+        &quot;commercial_safe&quot;,
+        &quot;commercial_threshold&quot;,
+        &quot;non_commercial&quot;,
+        &quot;source_available_restricted&quot;,
+        &quot;unclear_risky&quot;
+      ]
+    },
+    &quot;base_model&quot;: {
+      &quot;type&quot;: &quot;string&quot;,
+      &quot;enum&quot;: [&quot;sdxl-1.0&quot;]
+    },
+    &quot;negative_prompt_default&quot;: { &quot;type&quot;: &quot;string&quot; },
+    &quot;identity&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;required&quot;: [&quot;model&quot;, &quot;reference&quot;],
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;model&quot;: {
+          &quot;type&quot;: &quot;string&quot;,
+          &quot;enum&quot;: [&quot;ip-adapter-faceid-sdxl&quot;, &quot;ip-adapter-plus-sdxl&quot;]
+        },
+        &quot;reference&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1 },
+        &quot;weight&quot;: { &quot;type&quot;: &quot;number&quot;, &quot;minimum&quot;: 0.0, &quot;maximum&quot;: 1.5, &quot;default&quot;: 0.8 }
+      }
+    },
+    &quot;controlnets&quot;: {
+      &quot;type&quot;: &quot;array&quot;,
+      &quot;items&quot;: {
+        &quot;type&quot;: &quot;object&quot;,
+        &quot;required&quot;: [&quot;model&quot;, &quot;reference&quot;],
+        &quot;additionalProperties&quot;: false,
+        &quot;properties&quot;: {
+          &quot;model&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;enum&quot;: [
+              &quot;controlnet-openpose-sdxl&quot;,
+              &quot;controlnet-canny-sdxl&quot;,
+              &quot;controlnet-depth-sdxl&quot;
+            ]
+          },
+          &quot;reference&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1 },
+          &quot;weight&quot;: { &quot;type&quot;: &quot;number&quot;, &quot;minimum&quot;: 0.0, &quot;maximum&quot;: 1.5, &quot;default&quot;: 0.6 }
+        }
+      }
+    },
+    &quot;lora&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;required&quot;: [&quot;path&quot;],
+      &quot;additionalProperties&quot;: false,
+      &quot;properties&quot;: {
+        &quot;path&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1 },
+        &quot;weight&quot;: { &quot;type&quot;: &quot;number&quot;, &quot;minimum&quot;: 0.0, &quot;maximum&quot;: 1.5, &quot;default&quot;: 1.0 }
+      }
+    }
+  }
+}
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>comfyui_dispatch.py</code>
+                <span class="script-summary-desc">v0.3.2 ComfyUI consistency-mode dispatcher (P3.2c)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/comfyui_dispatch.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3.2 — ComfyUI dispatcher for consistency mode (P3.2c).
+
+Loads a consistency pack, substitutes its parameters into a ComfyUI
+workflow JSON, submits it to a running ComfyUI server at
+$COMFYUI_URL (default http://127.0.0.1:8188), polls for completion,
+and copies the resulting PNG to the requested output path.
+
+Called by `concept.sh --backend comfyui`. Standalone usage:
+
+    comfyui_dispatch.py \\
+        --pack ~/3d-pipeline/consistency-packs/my-character \\
+        --prompt &quot;the hero swinging a sword&quot; \\
+        --output /path/to/output.png \\
+        [--negative &quot;extra negative&quot;] \\
+        [--seed 42] [--steps 30] [--width 1024] [--height 1024] \\
+        [--workflow scripts/comfyui_workflows/consistency_sdxl.json] \\
+        [--server http://127.0.0.1:8188] \\
+        [--json]
+
+Output JSON:
+    {
+      &quot;status&quot;: &quot;ok&quot;,
+      &quot;backend&quot;: &quot;comfyui&quot;,
+      &quot;pack&quot;: &quot;...&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_threshold&quot;,
+      &quot;output_path&quot;: &quot;...&quot;,
+      &quot;duration_seconds&quot;: 18.4,
+      &quot;comfyui_prompt_id&quot;: &quot;abc-123-...&quot;
+    }
+
+License bucket: derived from the pack&#x27;s manifest (most-restrictive
+of the pack&#x27;s declared bucket and the base model&#x27;s bucket; SDXL =
+`commercial_threshold`). LoRA introduces no override today; if a
+pack ships an `unclear_risky` LoRA the manifest should already
+declare the pack as that bucket.
+
+Requires `requests` (in pipeline-tools-env). Validation against the
+consistency-pack schema is best-effort — uses `jsonschema` if
+available; falls back to structural checks otherwise.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_WORKFLOW = SCRIPT_DIR / &quot;comfyui_workflows&quot; / &quot;consistency_sdxl.json&quot;
+DEFAULT_SCHEMA = SCRIPT_DIR / &quot;consistency_pack_schema.json&quot;
+DEFAULT_SERVER = os.environ.get(&quot;COMFYUI_URL&quot;, &quot;http://127.0.0.1:8188&quot;)
+
+# License bucket fallback per base model. Always takes the more
+# restrictive of (pack-declared, base-model-default) — but in v1 the
+# only base model is sdxl-1.0 (commercial_threshold) so the pack&#x27;s
+# declared bucket can only be the same or more restrictive.
+BASE_MODEL_BUCKETS = {
+    &quot;sdxl-1.0&quot;: &quot;commercial_threshold&quot;,
+}
+BUCKET_RANK = {
+    &quot;commercial_safe&quot;: 0,
+    &quot;commercial_threshold&quot;: 1,
+    &quot;non_commercial&quot;: 2,
+    &quot;source_available_restricted&quot;: 3,
+    &quot;unclear_risky&quot;: 4,
+}
+
+
+def _emit(payload: dict) -&gt; int:
+    print(json.dumps(payload))
+    return 0 if payload.get(&quot;status&quot;) == &quot;ok&quot; else 1
+
+
+def _resolve_bucket(pack_bucket: str, base_model: str) -&gt; str:
+    base_bucket = BASE_MODEL_BUCKETS.get(base_model, &quot;unclear_risky&quot;)
+    return max([pack_bucket, base_bucket], key=lambda b: BUCKET_RANK.get(b, 99))
+
+
+def _validate_pack(pack_data: dict, pack_dir: Path) -&gt; str | None:
+    &quot;&quot;&quot;Structural validation. Returns an error string or None.&quot;&quot;&quot;
+    if pack_data.get(&quot;schema_version&quot;) != 1:
+        return f&quot;pack schema_version is {pack_data.get(&#x27;schema_version&#x27;)}; expected 1&quot;
+    for key in (&quot;name&quot;, &quot;license_bucket&quot;, &quot;base_model&quot;, &quot;identity&quot;):
+        if key not in pack_data:
+            return f&quot;pack missing required field: {key}&quot;
+    identity = pack_data.get(&quot;identity&quot;) or {}
+    if &quot;reference&quot; not in identity:
+        return &quot;pack.identity.reference is required&quot;
+    ref_path = pack_dir / identity[&quot;reference&quot;]
+    if not ref_path.exists():
+        return f&quot;pack.identity.reference not found: {ref_path}&quot;
+    return None
+
+
+def _http_post(url: str, data: dict, timeout: float = 30.0) -&gt; dict:
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
+        method=&quot;POST&quot;,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _http_get(url: str, timeout: float = 30.0) -&gt; dict:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _http_download(url: str, dest: Path, timeout: float = 60.0) -&gt; None:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        dest.write_bytes(resp.read())
+
+
+def _server_alive(server: str) -&gt; bool:
+    try:
+        _http_get(f&quot;{server}/system_stats&quot;, timeout=2.0)
+        return True
+    except Exception:
+        return False
+
+
+def _substitute(workflow: dict, pack_data: dict, pack_dir: Path, args) -&gt; dict:
+    &quot;&quot;&quot;Walk a workflow JSON and replace `${pack.foo}`-style placeholders.
+
+    The workflow template uses string-literal placeholders that this
+    function rewrites in place. Recognised placeholders:
+
+        ${pack.identity.reference}    absolute path to identity image
+        ${pack.identity.weight}       float (default 0.8)
+        ${pack.lora.path}             absolute path to LoRA (or &quot;&quot; if none)
+        ${pack.lora.weight}           float (default 1.0)
+        ${pack.controlnets[0].reference}, etc.
+        ${prompt}                     user-supplied prompt
+        ${negative}                   combined negative prompt
+        ${seed} / ${steps} / ${width} / ${height}
+    &quot;&quot;&quot;
+    identity = pack_data.get(&quot;identity&quot;) or {}
+    lora = pack_data.get(&quot;lora&quot;) or {}
+    controlnets = pack_data.get(&quot;controlnets&quot;) or []
+
+    negative_default = pack_data.get(&quot;negative_prompt_default&quot;, &quot;&quot;)
+    full_negative = &quot;, &quot;.join(filter(None, [negative_default, args.negative]))
+
+    subs: dict[str, str] = {
+        &quot;${prompt}&quot;: args.prompt,
+        &quot;${negative}&quot;: full_negative,
+        &quot;${seed}&quot;: str(args.seed),
+        &quot;${steps}&quot;: str(args.steps),
+        &quot;${width}&quot;: str(args.width),
+        &quot;${height}&quot;: str(args.height),
+        &quot;${pack.identity.reference}&quot;: str((pack_dir / identity[&quot;reference&quot;]).resolve()),
+        &quot;${pack.identity.weight}&quot;: str(identity.get(&quot;weight&quot;, 0.8)),
+        &quot;${pack.identity.model}&quot;: identity.get(&quot;model&quot;, &quot;ip-adapter-faceid-sdxl&quot;),
+        &quot;${pack.lora.path}&quot;: str((pack_dir / lora[&quot;path&quot;]).resolve()) if lora.get(&quot;path&quot;) else &quot;&quot;,
+        &quot;${pack.lora.weight}&quot;: str(lora.get(&quot;weight&quot;, 1.0)),
+    }
+    for i, cn in enumerate(controlnets):
+        subs[f&quot;${{pack.controlnets[{i}].reference}}&quot;] = str((pack_dir / cn[&quot;reference&quot;]).resolve())
+        subs[f&quot;${{pack.controlnets[{i}].weight}}&quot;] = str(cn.get(&quot;weight&quot;, 0.6))
+        subs[f&quot;${{pack.controlnets[{i}].model}}&quot;] = cn.get(&quot;model&quot;, &quot;&quot;)
+
+    def _walk(node):
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if isinstance(node, str):
+            for k, v in subs.items():
+                if k in node:
+                    node = node.replace(k, v)
+            return node
+        return node
+
+    return _walk(workflow)
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--pack&quot;, required=True, help=&quot;Path to consistency pack directory&quot;)
+    p.add_argument(&quot;--prompt&quot;, required=True)
+    p.add_argument(&quot;--output&quot;, required=True, help=&quot;Where to write the resulting PNG&quot;)
+    p.add_argument(&quot;--negative&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--seed&quot;, type=int, default=42)
+    p.add_argument(&quot;--steps&quot;, type=int, default=30)
+    p.add_argument(&quot;--width&quot;, type=int, default=1024)
+    p.add_argument(&quot;--height&quot;, type=int, default=1024)
+    p.add_argument(&quot;--workflow&quot;, default=str(DEFAULT_WORKFLOW),
+                   help=&quot;ComfyUI workflow JSON template (default ships with the pipeline)&quot;)
+    p.add_argument(&quot;--server&quot;, default=DEFAULT_SERVER,
+                   help=&quot;ComfyUI server URL (default $COMFYUI_URL or http://127.0.0.1:8188)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, default=True)
+    args = p.parse_args()
+
+    pack_dir = Path(os.path.expanduser(args.pack)).resolve()
+    if not pack_dir.is_dir():
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;pack_not_a_directory&quot;, &quot;pack&quot;: str(pack_dir)})
+    pack_json = pack_dir / &quot;pack.json&quot;
+    if not pack_json.exists():
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;pack_missing_manifest&quot;, &quot;pack&quot;: str(pack_dir)})
+    try:
+        pack_data = json.loads(pack_json.read_text())
+    except json.JSONDecodeError as e:
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;pack_json_invalid&quot;, &quot;notes&quot;: str(e)})
+
+    err = _validate_pack(pack_data, pack_dir)
+    if err:
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;pack_invalid&quot;, &quot;notes&quot;: err})
+
+    license_bucket = _resolve_bucket(
+        pack_data[&quot;license_bucket&quot;],
+        pack_data[&quot;base_model&quot;],
+    )
+
+    workflow_path = Path(os.path.expanduser(args.workflow))
+    if not workflow_path.exists():
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;workflow_not_found&quot;,
+            &quot;workflow&quot;: str(workflow_path),
+            &quot;notes&quot;: &quot;ship a workflow JSON or pass --workflow&quot;,
+        })
+    try:
+        workflow_template = json.loads(workflow_path.read_text())
+    except json.JSONDecodeError as e:
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;workflow_json_invalid&quot;, &quot;notes&quot;: str(e)})
+
+    if not _server_alive(args.server):
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;comfyui_server_unreachable&quot;,
+            &quot;server&quot;: args.server,
+            &quot;notes&quot;: (&quot;Start ComfyUI first: cd ~/3d-pipeline/ComfyUI &amp;&amp; &quot;
+                      &quot;source ~/3d-pipeline/comfyui-env/bin/activate &amp;&amp; &quot;
+                      &quot;python main.py --port 8188&quot;),
+        })
+
+    workflow = _substitute(workflow_template, pack_data, pack_dir, args)
+
+    # Submit to ComfyUI&#x27;s /prompt endpoint
+    t0 = time.time()
+    try:
+        post_resp = _http_post(
+            f&quot;{args.server}/prompt&quot;,
+            {&quot;prompt&quot;: workflow, &quot;client_id&quot;: &quot;asset-pipeline&quot;},
+            timeout=30.0,
+        )
+    except Exception as e:
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;submit_failed&quot;,
+            &quot;notes&quot;: str(e),
+            &quot;server&quot;: args.server,
+        })
+    prompt_id = post_resp.get(&quot;prompt_id&quot;)
+    if not prompt_id:
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;no_prompt_id&quot;,
+            &quot;response&quot;: post_resp,
+        })
+
+    # Poll /history/&lt;prompt_id&gt; until the prompt finishes
+    POLL_INTERVAL = 1.0
+    MAX_POLL_SECONDS = 600
+    history_entry = None
+    elapsed = 0.0
+    while elapsed &lt; MAX_POLL_SECONDS:
+        try:
+            hist = _http_get(f&quot;{args.server}/history/{prompt_id}&quot;, timeout=10.0)
+        except Exception:
+            time.sleep(POLL_INTERVAL); elapsed += POLL_INTERVAL; continue
+        if prompt_id in hist:
+            history_entry = hist[prompt_id]
+            break
+        time.sleep(POLL_INTERVAL); elapsed += POLL_INTERVAL
+    if history_entry is None:
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;polling_timeout&quot;,
+            &quot;prompt_id&quot;: prompt_id,
+            &quot;elapsed_seconds&quot;: elapsed,
+        })
+
+    # Find the first output image filename in the history entry
+    outputs = history_entry.get(&quot;outputs&quot;) or {}
+    output_file = None
+    for node_outputs in outputs.values():
+        for img in (node_outputs.get(&quot;images&quot;) or []):
+            output_file = img
+            break
+        if output_file:
+            break
+    if output_file is None:
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;no_image_in_output&quot;,
+            &quot;history&quot;: history_entry,
+        })
+
+    # Download via /view
+    filename = output_file.get(&quot;filename&quot;)
+    subfolder = output_file.get(&quot;subfolder&quot;, &quot;&quot;)
+    type_ = output_file.get(&quot;type&quot;, &quot;output&quot;)
+    if not filename:
+        return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;output_missing_filename&quot;})
+    view_url = (
+        f&quot;{args.server}/view&quot;
+        f&quot;?filename={filename}&amp;subfolder={subfolder}&amp;type={type_}&quot;
+    )
+    output_path = Path(os.path.expanduser(args.output)).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _http_download(view_url, output_path)
+    except Exception as e:
+        return _emit({
+            &quot;status&quot;: &quot;error&quot;,
+            &quot;error&quot;: &quot;image_download_failed&quot;,
+            &quot;notes&quot;: str(e),
+            &quot;view_url&quot;: view_url,
+        })
+
+    duration = round(time.time() - t0, 2)
+    return _emit({
+        &quot;status&quot;: &quot;ok&quot;,
+        &quot;backend&quot;: &quot;comfyui&quot;,
+        &quot;pack&quot;: pack_data[&quot;name&quot;],
+        &quot;pack_path&quot;: str(pack_dir),
+        &quot;license_bucket&quot;: license_bucket,
+        &quot;base_model&quot;: pack_data[&quot;base_model&quot;],
+        &quot;output_path&quot;: str(output_path),
+        &quot;duration_seconds&quot;: duration,
+        &quot;comfyui_prompt_id&quot;: prompt_id,
+        &quot;seed&quot;: args.seed,
+    })
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>consistency_sdxl.json</code>
+                <span class="script-summary-desc">v0.3.2 ComfyUI consistency-mode reference workflow (P3.2d)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/comfyui_workflows/consistency_sdxl.json << 'PIPELINE_EOF'
+{
+  &quot;_comment&quot;: &quot;Reference ComfyUI workflow for consistency-mode generation (P3.2d). SDXL base + optional LoRA + IP-Adapter (FaceID variant) + optional ControlNet (single, first entry from pack.controlnets[]). String placeholders like ${pack.identity.reference} are substituted by scripts/comfyui_dispatch.py before submission to /prompt. If your local ComfyUI install uses different IP-Adapter / ControlNet custom-node names, adapt the node class_type strings below to match.&quot;,
+  &quot;_pack_compat&quot;: &quot;Designed against consistency-pack schema_version 1 (docs/consistency-pack-format.md). Currently uses controlnets[0] only; extend the graph for multi-ControlNet stacks.&quot;,
+  &quot;_disclaimer&quot;: &quot;This is a starting-point workflow. ComfyUI custom-node naming evolves; verify against your installed ComfyUI_IPAdapter_plus + ControlNet packs and edit node class_types if needed.&quot;,
+
+  &quot;3&quot;: {
+    &quot;inputs&quot;: {
+      &quot;ckpt_name&quot;: &quot;sd_xl_base_1.0.safetensors&quot;
+    },
+    &quot;class_type&quot;: &quot;CheckpointLoaderSimple&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Load SDXL base&quot;}
+  },
+
+  &quot;4&quot;: {
+    &quot;inputs&quot;: {
+      &quot;model&quot;: [&quot;3&quot;, 0],
+      &quot;lora_name&quot;: &quot;${pack.lora.path}&quot;,
+      &quot;strength_model&quot;: &quot;${pack.lora.weight}&quot;,
+      &quot;strength_clip&quot;: &quot;${pack.lora.weight}&quot;
+    },
+    &quot;class_type&quot;: &quot;LoraLoader&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Apply pack LoRA (optional)&quot;}
+  },
+
+  &quot;5&quot;: {
+    &quot;inputs&quot;: {
+      &quot;image&quot;: &quot;${pack.identity.reference}&quot;,
+      &quot;upload&quot;: &quot;image&quot;
+    },
+    &quot;class_type&quot;: &quot;LoadImage&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Identity reference for IP-Adapter&quot;}
+  },
+
+  &quot;6&quot;: {
+    &quot;inputs&quot;: {
+      &quot;ipadapter_file&quot;: &quot;ip-adapter-faceid_sdxl.safetensors&quot;
+    },
+    &quot;class_type&quot;: &quot;IPAdapterModelLoader&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Load IP-Adapter FaceID SDXL&quot;}
+  },
+
+  &quot;7&quot;: {
+    &quot;inputs&quot;: {
+      &quot;model&quot;: [&quot;4&quot;, 0],
+      &quot;ipadapter&quot;: [&quot;6&quot;, 0],
+      &quot;image&quot;: [&quot;5&quot;, 0],
+      &quot;weight&quot;: &quot;${pack.identity.weight}&quot;,
+      &quot;weight_type&quot;: &quot;linear&quot;,
+      &quot;start_at&quot;: 0.0,
+      &quot;end_at&quot;: 1.0
+    },
+    &quot;class_type&quot;: &quot;IPAdapterAdvanced&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Apply IP-Adapter&quot;}
+  },
+
+  &quot;8&quot;: {
+    &quot;inputs&quot;: {
+      &quot;text&quot;: &quot;${prompt}&quot;,
+      &quot;clip&quot;: [&quot;4&quot;, 1]
+    },
+    &quot;class_type&quot;: &quot;CLIPTextEncode&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Positive prompt&quot;}
+  },
+
+  &quot;9&quot;: {
+    &quot;inputs&quot;: {
+      &quot;text&quot;: &quot;${negative}&quot;,
+      &quot;clip&quot;: [&quot;4&quot;, 1]
+    },
+    &quot;class_type&quot;: &quot;CLIPTextEncode&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Negative prompt&quot;}
+  },
+
+  &quot;10&quot;: {
+    &quot;inputs&quot;: {
+      &quot;width&quot;: &quot;${width}&quot;,
+      &quot;height&quot;: &quot;${height}&quot;,
+      &quot;batch_size&quot;: 1
+    },
+    &quot;class_type&quot;: &quot;EmptyLatentImage&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Latent canvas&quot;}
+  },
+
+  &quot;11&quot;: {
+    &quot;inputs&quot;: {
+      &quot;seed&quot;: &quot;${seed}&quot;,
+      &quot;steps&quot;: &quot;${steps}&quot;,
+      &quot;cfg&quot;: 7.0,
+      &quot;sampler_name&quot;: &quot;dpmpp_2m&quot;,
+      &quot;scheduler&quot;: &quot;karras&quot;,
+      &quot;denoise&quot;: 1.0,
+      &quot;model&quot;: [&quot;7&quot;, 0],
+      &quot;positive&quot;: [&quot;8&quot;, 0],
+      &quot;negative&quot;: [&quot;9&quot;, 0],
+      &quot;latent_image&quot;: [&quot;10&quot;, 0]
+    },
+    &quot;class_type&quot;: &quot;KSampler&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Sample&quot;}
+  },
+
+  &quot;12&quot;: {
+    &quot;inputs&quot;: {
+      &quot;samples&quot;: [&quot;11&quot;, 0],
+      &quot;vae&quot;: [&quot;3&quot;, 2]
+    },
+    &quot;class_type&quot;: &quot;VAEDecode&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Decode latent&quot;}
+  },
+
+  &quot;13&quot;: {
+    &quot;inputs&quot;: {
+      &quot;filename_prefix&quot;: &quot;consistency&quot;,
+      &quot;images&quot;: [&quot;12&quot;, 0]
+    },
+    &quot;class_type&quot;: &quot;SaveImage&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Save&quot;}
+  }
+}
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
@@ -9552,6 +10164,61 @@ The wrapper prints the absolute path as its last line — capture it for
 chaining. If you&#x27;re scripting, pass `--json` and parse the last stdout
 line as JSON; `outputs[0]` is the first image.
 
+### Consistency mode (v0.3.2+, ComfyUI backend)
+
+When the user needs **identity-locked** generations across multiple
+prompts (multiple poses of one character, weapon-family variants, a
+coherent prop set), route through ComfyUI instead of mflux:
+
+```bash
+concept.sh &quot;the hero swinging a sword&quot; \
+    --backend comfyui \
+    --consistency-pack ~/3d-pipeline/consistency-packs/grithkin-hero
+```
+
+**Recognition signals.** Use consistency mode when the user says:
+- &quot;generate multiple poses of [character]&quot;
+- &quot;make N variants of the same [character / weapon / prop]&quot;
+- &quot;this should look like the same [character] across all images&quot;
+- mentions a specific named character they want to keep consistent
+
+A consistency pack is a directory containing `pack.json`, reference
+images for IP-Adapter / ControlNet, and an optional LoRA. Format
+spec: `docs/consistency-pack-format.md`. Users build their own packs
+once per character / asset family.
+
+**License bucket.** The pack&#x27;s `pack.json` declares the bucket; the
+wrapper resolves the most-restrictive of (pack-declared, base-model
+default). SDXL defaults to `commercial_threshold`; an
+`unclear_risky` LoRA in the pack would bump it higher. State the
+resolved bucket inline (same convention as picking SPAR3D over SF3D
+in Flow 2).
+
+**Prerequisites.** ComfyUI must be installed (section 10 in both
+setup guides) and running on `http://127.0.0.1:8188`. The
+dispatcher fails with `comfyui_server_unreachable` if it isn&#x27;t.
+Tell the user to start it first:
+
+```bash
+source ~/3d-pipeline/comfyui-env/bin/activate
+cd ~/3d-pipeline/ComfyUI &amp;&amp; python main.py --port 8188
+```
+
+**Speed.** SDXL via ComfyUI is 15–30s per image vs. 5–10s for
+mflux. Mention this when offering consistency mode; if the user
+only needs one variant, mflux + LoRA is faster and uses less disk.
+
+**When NOT to suggest consistency mode:**
+
+- User has only one prompt and won&#x27;t iterate on the same subject
+  later — mflux is sufficient
+- User explicitly wants the variation that mflux gives them
+  (e.g., &quot;8 different chest designs&quot; — those aren&#x27;t supposed to
+  be the same chest)
+- ComfyUI isn&#x27;t installed and the user wants to start generating
+  immediately — installation is 10+ GB and takes a while; offer
+  mflux now and consistency mode after install
+
 ## Flow 2: 2D image → 3D asset
 
 Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
@@ -9726,6 +10393,12 @@ wins on a given asset class.
 
 Run flow 1, **show the user the 2D output before kicking off flow 2**.
 Don&#x27;t auto-proceed unless they explicitly said &quot;go all the way&quot; or similar.
+
+When consistency mode is appropriate (recurring character / asset
+family — see Flow 1&#x27;s &quot;Consistency mode&quot; subsection), pass
+`--backend comfyui --consistency-pack PATH` through to flow 1&#x27;s
+`concept.sh` call. Flow 2&#x27;s 3D generators (SF3D / SPAR3D /
+TRELLIS) handle ComfyUI&#x27;s outputs the same way they handle mflux&#x27;s.
 
 ## Flow 4: GLB → printable STL
 
@@ -10779,9 +11452,56 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
         </div>
       </div>
 
+      <div class="step" data-step="pipeline-tools-comfyui">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>ComfyUI <span style="color: var(--overlay0); font-style: italic; font-weight: normal;">(optional, for consistency mode — item 11 / Flow 1 + 3)</span></h3>
+
+          <p><strong>What this is.</strong> A separate ComfyUI install at <code>~/3d-pipeline/comfyui-env/</code> + the ComfyUI repo at <code>~/3d-pipeline/ComfyUI/</code>, plus SDXL + IP-Adapter + ControlNet model weights. Lives in its own venv (NOT <code>pipeline-tools-env</code>) because ComfyUI ships specific PyTorch + diffusers pins that fight with our shared env.</p>
+
+          <p><strong>Why this could be beneficial.</strong> The default 2D backend (<code>mflux</code>) supports LoRA but not IP-Adapter or ControlNet. For asset families where you need <strong>identity-locked</strong> generations across multiple prompts — multiple poses of one character, weapon-family variants, a coherent prop set — mflux drifts because nothing locks the subject identity from generation to generation. ComfyUI plus SDXL + IP-Adapter + ControlNet is the industry-standard way to fix that.</p>
+
+          <p>Once installed, <code>concept.sh --backend comfyui --consistency-pack PATH</code> routes generations through ComfyUI with a consistency pack (see <a href="consistency-pack-format.md"><code>docs/consistency-pack-format.md</code></a>) supplying the IP-Adapter face reference, optional ControlNet pose / canny references, and optional LoRA.</p>
+
+          <p><strong>Disk impact (~10&nbsp;GB total):</strong> ComfyUI repo + venv (~1.5&nbsp;GB), SDXL 1.0 base (~7&nbsp;GB), IP-Adapter FaceID SDXL (~700&nbsp;MB), ControlNet OpenPose + Canny SDXL (~2&nbsp;GB).</p>
+
+          <p><strong>When NOT to install.</strong> If you only need one-off props / chests / weapons (no recurring identity), this is overkill — mflux + LoRA is sufficient. Install only when you have a real character-consistency need in flight.</p>
+
+          <h4 style="margin-top: 20px;">Install</h4>
+
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
+<span class="tk-prompt">$ </span>git clone https://github.com/comfyanonymous/ComfyUI.git
+<span class="tk-prompt">$ </span>python3.12 -m venv comfyui-env
+<span class="tk-prompt">$ </span>source comfyui-env/bin/activate
+<span class="tk-prompt">$ </span>pip install --upgrade pip
+<span class="tk-prompt">$ </span>cd ComfyUI
+<span class="tk-prompt">$ </span>pip install -r requirements.txt
+<span class="tk-prompt">$ </span>pip install --no-deps git+https://github.com/cubiq/ComfyUI_IPAdapter_plus.git
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+
+          <p><strong>Download the model weights</strong> into ComfyUI's expected layout. The pipeline doctor lists what's expected; <code>--warm-cache --include comfyui</code> pulls them automatically once you've added a HuggingFace token. Manual: SDXL base (<code>huggingface.co/stabilityai/stable-diffusion-xl-base-1.0</code>) → <code>ComfyUI/models/checkpoints/</code>; IP-Adapter FaceID SDXL → <code>ComfyUI/models/ipadapter/</code>; ControlNet OpenPose + Canny SDXL → <code>ComfyUI/models/controlnet/</code>.</p>
+
+          <p>Pipeline-doctor manages cache locations so the model_manifest stays accurate. After installing, run:</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>~/3d-pipeline/workspace/pipeline_doctor.py --check all --include comfyui</pre></div>
+
+          <div class="verify" style="margin-top: 16px;">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">ComfyUI server starts on port 8188:</div>
+          </div>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/comfyui-env/bin/activate
+<span class="tk-prompt">$ </span>cd ~/3d-pipeline/ComfyUI
+<span class="tk-prompt">$ </span>python main.py --port 8188 &amp;            <span class="tk-cmt"># or run in a separate terminal</span>
+<span class="tk-prompt">$ </span>curl -s http://127.0.0.1:8188/system_stats | head -c 200
+<span class="tk-prompt">$ </span>kill %1
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+
+          <p style="margin-top: 16px;"><em>Studio tier note:</em> ComfyUI is studio-recommended; on a laptop the 10&nbsp;GB install + slower SDXL generations (15–30s vs. 5–10s for mflux) make for a tight UX. Consistency mode quality is the same either way, just slower per image.</p>
+        </div>
+      </div>
+
       <p style="margin-top: 40px; padding: 24px; background: var(--mantle); border-left: 3px solid var(--mauve); border-radius: 0 4px 4px 0;">
         <strong style="color: var(--mauve); font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;">No behaviour change yet</strong><br><br>
-        <span style="color: var(--subtext1);">Installing this venv doesn't change anything about how the v0.2 pipeline runs. The scripts that use it ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
+        <span style="color: var(--subtext1);">Installing these venvs doesn't change anything about how the v0.2 pipeline runs. The scripts that use them ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks, item 11 / consistency mode). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
       </p>
     </section>
 

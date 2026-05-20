@@ -243,6 +243,61 @@ The wrapper prints the absolute path as its last line — capture it for
 chaining. If you're scripting, pass `--json` and parse the last stdout
 line as JSON; `outputs[0]` is the first image.
 
+### Consistency mode (v0.3.2+, ComfyUI backend)
+
+When the user needs **identity-locked** generations across multiple
+prompts (multiple poses of one character, weapon-family variants, a
+coherent prop set), route through ComfyUI instead of mflux:
+
+```bash
+concept.sh "the hero swinging a sword" \
+    --backend comfyui \
+    --consistency-pack ~/3d-pipeline/consistency-packs/grithkin-hero
+```
+
+**Recognition signals.** Use consistency mode when the user says:
+- "generate multiple poses of [character]"
+- "make N variants of the same [character / weapon / prop]"
+- "this should look like the same [character] across all images"
+- mentions a specific named character they want to keep consistent
+
+A consistency pack is a directory containing `pack.json`, reference
+images for IP-Adapter / ControlNet, and an optional LoRA. Format
+spec: `docs/consistency-pack-format.md`. Users build their own packs
+once per character / asset family.
+
+**License bucket.** The pack's `pack.json` declares the bucket; the
+wrapper resolves the most-restrictive of (pack-declared, base-model
+default). SDXL defaults to `commercial_threshold`; an
+`unclear_risky` LoRA in the pack would bump it higher. State the
+resolved bucket inline (same convention as picking SPAR3D over SF3D
+in Flow 2).
+
+**Prerequisites.** ComfyUI must be installed (section 10 in both
+setup guides) and running on `http://127.0.0.1:8188`. The
+dispatcher fails with `comfyui_server_unreachable` if it isn't.
+Tell the user to start it first:
+
+```bash
+source ~/3d-pipeline/comfyui-env/bin/activate
+cd ~/3d-pipeline/ComfyUI && python main.py --port 8188
+```
+
+**Speed.** SDXL via ComfyUI is 15–30s per image vs. 5–10s for
+mflux. Mention this when offering consistency mode; if the user
+only needs one variant, mflux + LoRA is faster and uses less disk.
+
+**When NOT to suggest consistency mode:**
+
+- User has only one prompt and won't iterate on the same subject
+  later — mflux is sufficient
+- User explicitly wants the variation that mflux gives them
+  (e.g., "8 different chest designs" — those aren't supposed to
+  be the same chest)
+- ComfyUI isn't installed and the user wants to start generating
+  immediately — installation is 10+ GB and takes a while; offer
+  mflux now and consistency mode after install
+
 ## Flow 2: 2D image → 3D asset
 
 Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
@@ -417,6 +472,12 @@ wins on a given asset class.
 
 Run flow 1, **show the user the 2D output before kicking off flow 2**.
 Don't auto-proceed unless they explicitly said "go all the way" or similar.
+
+When consistency mode is appropriate (recurring character / asset
+family — see Flow 1's "Consistency mode" subsection), pass
+`--backend comfyui --consistency-pack PATH` through to flow 1's
+`concept.sh` call. Flow 2's 3D generators (SF3D / SPAR3D /
+TRELLIS) handle ComfyUI's outputs the same way they handle mflux's.
 
 ## Flow 4: GLB → printable STL
 

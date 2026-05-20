@@ -40,6 +40,9 @@ COUNT=1
 GAME_PROMPT=1
 PROMPT=""
 JSON_MODE=0
+BACKEND="mflux"
+CONSISTENCY_PACK=""
+NEGATIVE=""
 
 GAME_SUFFIX=", 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed"
 
@@ -102,6 +105,9 @@ while [[ $# -gt 0 ]]; do
         -q|--quantize)     QUANTIZE="$2";     shift 2 ;;
         -n|--count)        COUNT="$2";        shift 2 ;;
         --no-game-prompt)  GAME_PROMPT=0;     shift   ;;
+        --backend)         BACKEND="$2";      shift 2 ;;
+        --consistency-pack) CONSISTENCY_PACK="$2"; shift 2 ;;
+        --negative)        NEGATIVE="$2";     shift 2 ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -110,6 +116,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$PROMPT" ]] && { echo "ERROR: prompt is required" >&2; usage; exit 1; }
+
+# Validate backend choice
+case "$BACKEND" in
+    mflux) ;;
+    comfyui)
+        [[ -n "$CONSISTENCY_PACK" ]] || { echo "ERROR: --backend comfyui requires --consistency-pack PATH" >&2; exit 1; }
+        [[ -d "$CONSISTENCY_PACK" ]] || { echo "ERROR: --consistency-pack not a directory: $CONSISTENCY_PACK" >&2; exit 1; }
+        ;;
+    *)
+        echo "ERROR: --backend must be mflux (default) or comfyui (got: $BACKEND)" >&2
+        exit 1 ;;
+esac
 
 # Under --json, route all stdout (including subcommand output) to stderr;
 # real stdout is preserved for the final JSON line via json_mode_end.
@@ -229,31 +247,64 @@ for i in $(seq 1 "$COUNT"); do
     fi
     OUTPUT_PATHS+=( "$OUT_PATH" )
 
-    info "Generating $i/$COUNT (seed=$ITER_SEED) -> $OUT_PATH"
+    info "Generating $i/$COUNT (seed=$ITER_SEED, backend=$BACKEND) -> $OUT_PATH"
 
-    case "$MODEL" in
-        z-image-turbo)
-            mflux-generate-z-image-turbo \
-                --prompt "$FINAL_PROMPT" \
-                --width "$WIDTH" --height "$HEIGHT" \
-                --steps "$STEPS" --seed "$ITER_SEED" \
-                -q "$QUANTIZE" \
-                --output "$OUT_PATH"
-            ;;
-        flux-schnell|flux-dev)
-            FLUX_MODEL="${MODEL#flux-}"
-            LORA_ARGS=()
-            [[ -n "$LORA_PATH" ]] && LORA_ARGS+=( --lora-paths "$LORA_PATH" --lora-scales "$LORA_SCALE" )
-            mflux-generate \
-                --prompt "$FINAL_PROMPT" \
-                --model "$FLUX_MODEL" \
-                --width "$WIDTH" --height "$HEIGHT" \
-                --steps "$STEPS" --seed "$ITER_SEED" \
-                -q "$QUANTIZE" \
-                --output "$OUT_PATH" \
-                "${LORA_ARGS[@]}"
-            ;;
-    esac
+    if [[ "$BACKEND" == "comfyui" ]]; then
+        # ComfyUI consistency mode (item 11 / P3.2). Dispatch through the
+        # consistency-pack + workflow. License bucket is derived from the
+        # pack manifest by the dispatcher.
+        PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+        DISPATCH="$SCRIPT_DIR/comfyui_dispatch.py"
+        [[ -f "$DISPATCH" ]] || DISPATCH="$PIPELINE_ROOT/workspace/comfyui_dispatch.py"
+        if [[ ! -f "$DISPATCH" || ! -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+            err "comfyui_dispatch.py or pipeline-tools-env missing — install both first"
+            exit 1
+        fi
+        "$PIPELINE_TOOLS_ENV/bin/python" "$DISPATCH" \
+            --pack "$CONSISTENCY_PACK" \
+            --prompt "$FINAL_PROMPT" \
+            --negative "$NEGATIVE" \
+            --output "$OUT_PATH" \
+            --seed "$ITER_SEED" \
+            --steps "$STEPS" \
+            --width "$WIDTH" --height "$HEIGHT" \
+            --json > /tmp/comfyui-result-$$.json || {
+            err "ComfyUI dispatch failed"
+            cat /tmp/comfyui-result-$$.json >&2 2>/dev/null || true
+            rm -f /tmp/comfyui-result-$$.json
+            exit 1
+        }
+        # Override LICENSE_BUCKET from the dispatcher's result (it knows
+        # the pack's actual bucket and resolves against the base model).
+        DISPATCH_BUCKET="$(python3 -c "import json,sys; d=json.load(open('/tmp/comfyui-result-$$.json')); print(d.get('license_bucket', ''))" 2>/dev/null || echo "")"
+        [[ -n "$DISPATCH_BUCKET" ]] && LICENSE_BUCKET="$DISPATCH_BUCKET"
+        rm -f /tmp/comfyui-result-$$.json
+    else
+        # Default backend: mflux
+        case "$MODEL" in
+            z-image-turbo)
+                mflux-generate-z-image-turbo \
+                    --prompt "$FINAL_PROMPT" \
+                    --width "$WIDTH" --height "$HEIGHT" \
+                    --steps "$STEPS" --seed "$ITER_SEED" \
+                    -q "$QUANTIZE" \
+                    --output "$OUT_PATH"
+                ;;
+            flux-schnell|flux-dev)
+                FLUX_MODEL="${MODEL#flux-}"
+                LORA_ARGS=()
+                [[ -n "$LORA_PATH" ]] && LORA_ARGS+=( --lora-paths "$LORA_PATH" --lora-scales "$LORA_SCALE" )
+                mflux-generate \
+                    --prompt "$FINAL_PROMPT" \
+                    --model "$FLUX_MODEL" \
+                    --width "$WIDTH" --height "$HEIGHT" \
+                    --steps "$STEPS" --seed "$ITER_SEED" \
+                    -q "$QUANTIZE" \
+                    --output "$OUT_PATH" \
+                    "${LORA_ARGS[@]}"
+                ;;
+        esac
+    fi
 
     [[ -f "$OUT_PATH" ]] || { err "Generation failed for $OUT_PATH"; deactivate; exit 1; }
 done

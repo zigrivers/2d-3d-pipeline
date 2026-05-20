@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Consistency pack manifest (v1)",
+  "description": "Schema for pack.json inside a consistency pack. See docs/consistency-pack-format.md for prose.",
+  "type": "object",
+  "required": ["schema_version", "name", "license_bucket", "base_model", "identity"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string" },
+    "license_bucket": {
+      "type": "string",
+      "enum": [
+        "commercial_safe",
+        "commercial_threshold",
+        "non_commercial",
+        "source_available_restricted",
+        "unclear_risky"
+      ]
+    },
+    "base_model": {
+      "type": "string",
+      "enum": ["sdxl-1.0"]
+    },
+    "negative_prompt_default": { "type": "string" },
+    "identity": {
+      "type": "object",
+      "required": ["model", "reference"],
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "enum": ["ip-adapter-faceid-sdxl", "ip-adapter-plus-sdxl"]
+        },
+        "reference": { "type": "string", "minLength": 1 },
+        "weight": { "type": "number", "minimum": 0.0, "maximum": 1.5, "default": 0.8 }
+      }
+    },
+    "controlnets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["model", "reference"],
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string",
+            "enum": [
+              "controlnet-openpose-sdxl",
+              "controlnet-canny-sdxl",
+              "controlnet-depth-sdxl"
+            ]
+          },
+          "reference": { "type": "string", "minLength": 1 },
+          "weight": { "type": "number", "minimum": 0.0, "maximum": 1.5, "default": 0.6 }
+        }
+      }
+    },
+    "lora": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "weight": { "type": "number", "minimum": 0.0, "maximum": 1.5, "default": 1.0 }
+      }
+    }
+  }
+}

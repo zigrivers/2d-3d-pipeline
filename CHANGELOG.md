@@ -2,6 +2,56 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.2: ComfyUI consistency mode (item 11)
+
+Five sub-deliverables shipped:
+
+P3.2a — ComfyUI install docs
+  Third optional step in section 10 of both setup guides: ComfyUI
+  repo clone, comfyui-env venv (separate from pipeline-tools-env),
+  IPAdapter+ ControlNet custom-node install, model-weight layout,
+  pipeline-doctor verification, server start. ~10 GB total install.
+
+P3.2b — Consistency-pack format
+  docs/consistency-pack-format.md — pack directory layout, pack.json
+  schema, license-bucket resolution rules, distribution shape.
+  Defined BEFORE the parser per the v3 MMR finding.
+  scripts/consistency_pack_schema.json — JSON Schema (Draft 2020-12)
+  for tooling validation.
+
+P3.2c — concept.sh --backend comfyui
+  New --backend {mflux, comfyui}, --consistency-pack PATH, --negative
+  flags on concept.sh. mflux remains the default; comfyui activates
+  only when the pack is supplied. License bucket overridden from the
+  dispatcher's pack-aware resolution.
+
+P3.2d — Reference workflow + dispatcher
+  scripts/comfyui_dispatch.py — loads the pack, substitutes
+  parameters into a workflow JSON, submits to ComfyUI's /prompt
+  API, polls /history, downloads the result via /view. Pure stdlib
+  + urllib (no diffusers import here; the heavy ML lives in
+  ComfyUI itself).
+  scripts/comfyui_workflows/consistency_sdxl.json — reference
+  SDXL + LoRA (optional) + IP-Adapter FaceID (required) + first-
+  controlnet (optional) workflow. String placeholders
+  ${pack.identity.reference} etc. are substituted by the dispatcher
+  pre-submission.
+
+P3.2e — Skill update
+  Flow 1 gets a "Consistency mode (v0.3.2+)" subsection: recognition
+  signals, license-bucket guidance, ComfyUI prerequisites, speed
+  trade-off, when-NOT-to-suggest.
+  Flow 3 forwards the same flags through chained text → 2D → 3D.
+
+** Caveats. ** The dispatcher + reference workflow are best-effort
+without an actual ComfyUI install to test against — the workflow
+file uses standard SDXL + IPAdapterAdvanced + LoraLoader node
+class_types but ComfyUI custom-node naming evolves. If your local
+install uses different node names (e.g., older IP-Adapter custom
+nodes), edit the class_type strings in the workflow JSON. The
+dispatcher's HTTP API calls are standard ComfyUI and should work
+across versions.
+
 ## 2026-05-20 — P3.1c+d+e: multiview.sh wrapper + Flow 9 skill + embeds
 
 scripts/multiview.sh (v0.3.2, Flow 9):
