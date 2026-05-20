@@ -358,6 +358,7 @@ run_pipeline_check() {
 }
 run_pipeline_check mesh_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --mode normalized
 run_pipeline_check texture_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH"
+run_pipeline_check game_asset_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --engine "$PROJECT_ENGINE"
 
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is

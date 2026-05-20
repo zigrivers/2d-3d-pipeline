@@ -2,6 +2,23 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.8: UV + game-engine validation (Tier 1)
+
+- `scripts/game_asset_check.py` — trimesh-based checks for the
+  production-grade issues that AI assets actually trip on in Unity /
+  Unreal (per codex's v3 MMR finding):
+    - UV island count (warn > 50, error > 500 — "spaghetti UVs")
+    - UV occupancy ratio (warn < 0.4)
+    - UV in-bounds (all coords in [0,1])
+    - Tangents present
+    - Normal handedness (y_plus / y_minus); flagged when it doesn't
+      match the detected project engine (Unity = -Y, Unreal = +Y)
+    - Texture sizes + power-of-two check
+    - Embedded image formats + color-space hints
+- Writes `quality.uv` + `quality.engine` to per-asset meta.json.
+- `scripts/generate.sh` hooks the check via the shared
+  run_pipeline_check helper, passing the detected $PROJECT_ENGINE.
+
 ## 2026-05-20 — P1.7: turntable preview render (Tier 1)
 
 - `scripts/turntable_render.py` — Blender-headless renderer. One

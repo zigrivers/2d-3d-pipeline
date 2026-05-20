@@ -2587,6 +2587,7 @@ run_pipeline_check() {
 }
 run_pipeline_check mesh_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized
 run_pipeline_check texture_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot;
+run_pipeline_check game_asset_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --engine &quot;$PROJECT_ENGINE&quot;
 
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is
@@ -7239,6 +7240,243 @@ print(f&quot;[turntable] mode={mode} frames={manifest[&#x27;frames&#x27;]} durat
 print(f&quot;[turntable] manifest={manifest_path}&quot;)
 if hero_path:
     print(f&quot;[turntable] hero={hero_path}&quot;)
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>game_asset_check.py</code>
+                <span class="script-summary-desc">v0.3 UV + game-engine validation</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/game_asset_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — UV + game-engine validation.
+
+Checks AI-generated meshes for the production-grade issues game
+engines actually trip over (cited by codex in the v3 MMR review):
+&quot;spaghetti&quot; UVs with hundreds of islands, normal-map handedness
+mismatching Unity vs Unreal, non-PoT texture sizes, missing tangents,
+exotic embedded image formats.
+
+Writes `quality.uv` and `quality.engine` sections to the per-asset
+meta.json.
+
+Usage:
+    game_asset_check.py --input PATH.glb --meta PATH
+                        [--engine {unity,unreal,none}] [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+ISLAND_WARN = 50
+ISLAND_ERROR = 500
+OCCUPANCY_WARN = 0.40
+
+
+def _imports():
+    try:
+        import trimesh  # type: ignore
+        import numpy as np  # type: ignore
+        return trimesh, np
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); aborting.&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _uv_analysis(mesh, np) -&gt; dict:
+    &quot;&quot;&quot;Best-effort UV island count + occupancy ratio.&quot;&quot;&quot;
+    uv = getattr(mesh.visual, &quot;uv&quot;, None) if hasattr(mesh, &quot;visual&quot;) else None
+    if uv is None or len(uv) == 0:
+        return {&quot;has_uv&quot;: False}
+    in_bounds = bool(((uv &gt;= 0.0) &amp; (uv &lt;= 1.0)).all())
+    # Approx island count: connected components of the FACE adjacency graph
+    # restricted to faces sharing UV coords. Cheap proxy: face_adjacency_unshared.
+    try:
+        import networkx as nx  # type: ignore
+        g = nx.Graph()
+        g.add_nodes_from(range(len(mesh.faces)))
+        # Edges between faces are added when their shared edge has matching UVs
+        # at both vertices. Implement cheaply via face_adjacency.
+        for a, b in mesh.face_adjacency.tolist():
+            # If two adjacent faces share the SAME UV at the shared edge&#x27;s
+            # vertices, they belong to the same island. Use rough equality.
+            fa = mesh.faces[a]
+            fb = mesh.faces[b]
+            shared = set(fa.tolist()) &amp; set(fb.tolist())
+            same = True
+            for v in shared:
+                # Find the corresponding UV index. trimesh&#x27;s uv is indexed
+                # by vertex, not by face-corner, so we just compare uv[v].
+                pass  # trivially same when uv is per-vertex
+            if same:
+                g.add_edge(a, b)
+        island_count = nx.number_connected_components(g)
+    except ImportError:
+        # No networkx — use a tiny disjoint-set
+        parent = list(range(len(mesh.faces)))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for a, b in mesh.face_adjacency.tolist():
+            union(a, b)
+        roots = {find(i) for i in range(len(mesh.faces))}
+        island_count = len(roots)
+
+    # Occupancy = bbox area of all UV points / total UV space.
+    if len(uv) &gt; 0:
+        u_min, v_min = uv.min(axis=0)
+        u_max, v_max = uv.max(axis=0)
+        bbox_area = float((u_max - u_min) * (v_max - v_min))
+        occupancy = max(0.0, min(1.0, bbox_area))
+    else:
+        occupancy = 0.0
+
+    return {
+        &quot;has_uv&quot;: True,
+        &quot;island_count&quot;: int(island_count),
+        &quot;occupancy_ratio&quot;: round(float(occupancy), 3),
+        &quot;has_overlap&quot;: None,  # full overlap detection is expensive; skip
+        &quot;in_bounds&quot;: in_bounds,
+    }
+
+
+def _engine_analysis(mesh, np, engine: str) -&gt; dict:
+    out: dict = {
+        &quot;tangents_present&quot;: None,
+        &quot;normal_handedness&quot;: None,
+        &quot;texture_sizes&quot;: [],
+        &quot;all_power_of_two&quot;: True,
+        &quot;embedded_formats&quot;: [],
+        &quot;color_space_hints&quot;: {},
+    }
+    # Tangents
+    try:
+        # trimesh doesn&#x27;t always populate tangents; check the visual
+        out[&quot;tangents_present&quot;] = bool(
+            hasattr(mesh, &quot;vertex_tangents&quot;) and len(getattr(mesh, &quot;vertex_tangents&quot;, []) or [])
+        )
+    except Exception:
+        out[&quot;tangents_present&quot;] = None
+
+    # Textures: sizes + format
+    material = getattr(getattr(mesh, &quot;visual&quot;, None), &quot;material&quot;, None)
+    if material is not None:
+        for attr in (&quot;baseColorTexture&quot;, &quot;normalTexture&quot;, &quot;metallicRoughnessTexture&quot;,
+                     &quot;roughnessTexture&quot;, &quot;metallicTexture&quot;):
+            img = getattr(material, attr, None)
+            if img is None or not hasattr(img, &quot;size&quot;):
+                continue
+            w, h = img.size
+            out[&quot;texture_sizes&quot;].append([w, h])
+            pot = (w &amp; (w - 1) == 0) and (h &amp; (h - 1) == 0)
+            if not pot:
+                out[&quot;all_power_of_two&quot;] = False
+            fmt = (getattr(img, &quot;format&quot;, None) or &quot;&quot;).lower()
+            if fmt:
+                out[&quot;embedded_formats&quot;].append(fmt)
+            # Color space hint
+            cs_key = &quot;albedo&quot; if attr == &quot;baseColorTexture&quot; else (
+                &quot;normal&quot; if attr == &quot;normalTexture&quot; else &quot;linear&quot;
+            )
+            out[&quot;color_space_hints&quot;][attr] = &quot;sRGB&quot; if cs_key == &quot;albedo&quot; else &quot;linear&quot;
+
+    # Normal handedness: sample 1000 pixels from the normal map&#x27;s blue channel.
+    # Unity expects -Y normals, Unreal expects +Y. Determine from the median sign of (G - 128).
+    if material is not None:
+        nrm = getattr(material, &quot;normalTexture&quot;, None)
+        if nrm is not None and hasattr(nrm, &quot;convert&quot;):
+            try:
+                arr = np.asarray(nrm.convert(&quot;RGB&quot;))
+                if arr.size and arr.ndim == 3 and arr.shape[-1] &gt;= 2:
+                    g = arr[..., 1].astype(&quot;int32&quot;) - 128
+                    sign = float(np.median(g))
+                    out[&quot;normal_handedness&quot;] = &quot;y_plus&quot; if sign &gt; 0 else &quot;y_minus&quot;
+            except Exception:
+                pass
+
+    # Engine-specific mismatch flag
+    if engine in (&quot;unity&quot;, &quot;unreal&quot;) and out[&quot;normal_handedness&quot;]:
+        expected = &quot;y_minus&quot; if engine == &quot;unity&quot; else &quot;y_plus&quot;
+        out[&quot;matches_engine&quot;] = (out[&quot;normal_handedness&quot;] == expected)
+        out[&quot;engine_target&quot;] = engine
+    return out
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--engine&quot;, choices=[&quot;unity&quot;, &quot;unreal&quot;, &quot;none&quot;], default=&quot;none&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    trimesh, np = _imports()
+    input_path = Path(os.path.expanduser(args.input))
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    try:
+        mesh = trimesh.load(str(input_path), force=&quot;mesh&quot;)
+    except Exception as e:
+        print(f&quot;ERROR: load failed: {e}&quot;, file=sys.stderr)
+        return 1
+
+    uv = _uv_analysis(mesh, np)
+    engine = _engine_analysis(mesh, np, args.engine)
+    payload = {&quot;uv&quot;: uv, &quot;engine&quot;: engine}
+
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;quality&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=False,
+    )
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if not uv.get(&quot;has_uv&quot;):
+            print(&quot;[game-check] ⚠ no UV channel — asset cannot take textures in-engine&quot;)
+        else:
+            ic = uv[&quot;island_count&quot;]
+            occ = uv.get(&quot;occupancy_ratio&quot;, 0.0)
+            mark = &quot;✓&quot;
+            if ic &gt; ISLAND_ERROR:
+                mark = &quot;✗&quot;
+            elif ic &gt; ISLAND_WARN or occ &lt; OCCUPANCY_WARN:
+                mark = &quot;⚠&quot;
+            print(f&quot;[game-check] UVs: {mark} {ic} texture patch(es), &quot;
+                  f&quot;{int(occ * 100)}% UV occupancy&quot;)
+        if engine.get(&quot;normal_handedness&quot;) and engine.get(&quot;engine_target&quot;):
+            if engine.get(&quot;matches_engine&quot;):
+                print(f&quot;[game-check] Engine: ✓ normals match {engine[&#x27;engine_target&#x27;]}&quot;)
+            else:
+                print(f&quot;[game-check] Engine: ⚠ normal handedness is &quot;
+                      f&quot;{engine[&#x27;normal_handedness&#x27;]}; &quot;
+                      f&quot;{engine[&#x27;engine_target&#x27;]} expects the opposite&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
 PIPELINE_EOF</pre></div>
             </details>
 
