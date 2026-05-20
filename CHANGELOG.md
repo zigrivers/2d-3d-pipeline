@@ -2,6 +2,23 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.2: input quality check + WebP/GIF normalisation (Tier 1)
+
+- `scripts/input_quality_check.py` — Pillow-based check (resolution,
+  aspect, file size, format) + crude background-uniformity probe
+  (feeds item 1's auto-mode). WebP and animated GIF inputs are
+  normalised to a single-frame PNG under `<assets>/concept/`. Result
+  merges into the per-asset meta.json `input` section.
+- `scripts/_pipeline_lib.sh` gains `check_and_normalize_input` — a
+  graceful wrapper around the Python script. No-op when
+  pipeline-tools-env or the script itself is missing (v0.2 preserved).
+- `scripts/generate.sh` calls it after `OUTPUT_NAME`/`CLEAN_PATH` are
+  set, before generator dispatch. `INPUT` may be reassigned to the
+  normalised PNG so the generator sees only PNG/JPEG.
+- `skill/SKILL.md` Flow 2 documents the new check + the issue tags
+  (`low_resolution`, `extreme_aspect_ratio`, `multi_frame_input`, etc.)
+  so Claude can speak them in user-friendly terms.
+
 ## 2026-05-20 — P1.1: pipeline_doctor.py + model_manifest.json (Tier 1)
 
 First Tier 1 PR. Lands the install-and-cache doctor that every later

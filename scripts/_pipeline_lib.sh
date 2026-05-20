@@ -315,6 +315,70 @@ warn_if_non_commercial() {
     fi
 }
 
+# --- v0.3: quality-check helpers ---
+
+# Run the input image quality check + format normalisation (item 4 in
+# improvement-spec.md). On success, may update $INPUT to point at a
+# normalised PNG (when the input was WebP or GIF). Writes the
+# `input` section of the per-asset meta.json at $META_PATH.
+#
+# Requires: scripts/input_quality_check.py + pipeline-tools-env venv
+# present. If either is missing, this function is a no-op so v0.2
+# behaviour is preserved (this is the documented graceful fallback).
+#
+# Reads:  $INPUT, $ASSETS_ROOT, $OUTPUT_NAME, $META_PATH
+# Writes: $INPUT (may be reassigned to the normalised path)
+check_and_normalize_input() {
+    local pipeline_tools="${PIPELINE_TOOLS_ENV:-${PIPELINE_ROOT:-$HOME/3d-pipeline}/pipeline-tools-env}"
+    local helper="${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/input_quality_check.py"
+    if [[ ! -f "$helper" ]]; then
+        helper="${PIPELINE_ROOT:-$HOME/3d-pipeline}/workspace/input_quality_check.py"
+    fi
+    if [[ ! -f "$helper" ]]; then
+        return 0  # v0.3 feature absent — v0.2 behaviour preserved
+    fi
+    if [[ ! -x "$pipeline_tools/bin/python" ]]; then
+        printf '[pipeline] input quality check skipped (pipeline-tools-env missing)\n' >&2
+        return 0
+    fi
+
+    local result_json
+    if ! result_json="$("$pipeline_tools/bin/python" "$helper" \
+            --input "$INPUT" \
+            --output-dir "$ASSETS_ROOT/concept" \
+            --meta "$META_PATH" \
+            --name "$OUTPUT_NAME" \
+            --json 2>/tmp/input-check-$$.err)"; then
+        local err
+        err="$(cat /tmp/input-check-$$.err 2>/dev/null || true)"
+        rm -f /tmp/input-check-$$.err
+        printf '[pipeline] input quality check failed (continuing): %s\n' "$err" >&2
+        return 0
+    fi
+    rm -f /tmp/input-check-$$.err
+
+    # Update $INPUT to the normalised path if a conversion happened.
+    local normalized
+    normalized="$(printf '%s\n' "$result_json" \
+        | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('normalized_path') or '')" \
+        2>/dev/null)"
+    if [[ -n "$normalized" && -f "$normalized" ]]; then
+        INPUT="$normalized"
+    fi
+
+    # Surface issues to stderr.
+    printf '%s\n' "$result_json" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+if 'error' in d:
+    sys.stderr.write(f'[pipeline] input-check error: {d[\"error\"]}\n')
+    if 'notes' in d:
+        sys.stderr.write(f'[pipeline]   {d[\"notes\"]}\n')
+for tag in d.get('issues', []):
+    sys.stderr.write(f'[pipeline] input ⚠ {tag}\n')
+" 2>&1 >&2 || true
+}
+
 # Print a friendly context summary at the top of each run.
 print_context() {
     if [[ "$PROJECT_MODE" == "project" ]]; then

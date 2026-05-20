@@ -1701,6 +1701,70 @@ warn_if_non_commercial() {
     fi
 }
 
+# --- v0.3: quality-check helpers ---
+
+# Run the input image quality check + format normalisation (item 4 in
+# improvement-spec.md). On success, may update $INPUT to point at a
+# normalised PNG (when the input was WebP or GIF). Writes the
+# `input` section of the per-asset meta.json at $META_PATH.
+#
+# Requires: scripts/input_quality_check.py + pipeline-tools-env venv
+# present. If either is missing, this function is a no-op so v0.2
+# behaviour is preserved (this is the documented graceful fallback).
+#
+# Reads:  $INPUT, $ASSETS_ROOT, $OUTPUT_NAME, $META_PATH
+# Writes: $INPUT (may be reassigned to the normalised path)
+check_and_normalize_input() {
+    local pipeline_tools=&quot;${PIPELINE_TOOLS_ENV:-${PIPELINE_ROOT:-$HOME/3d-pipeline}/pipeline-tools-env}&quot;
+    local helper=&quot;${SCRIPT_DIR:-$(dirname &quot;${BASH_SOURCE[0]}&quot;)}/input_quality_check.py&quot;
+    if [[ ! -f &quot;$helper&quot; ]]; then
+        helper=&quot;${PIPELINE_ROOT:-$HOME/3d-pipeline}/workspace/input_quality_check.py&quot;
+    fi
+    if [[ ! -f &quot;$helper&quot; ]]; then
+        return 0  # v0.3 feature absent — v0.2 behaviour preserved
+    fi
+    if [[ ! -x &quot;$pipeline_tools/bin/python&quot; ]]; then
+        printf &#x27;[pipeline] input quality check skipped (pipeline-tools-env missing)\n&#x27; &gt;&amp;2
+        return 0
+    fi
+
+    local result_json
+    if ! result_json=&quot;$(&quot;$pipeline_tools/bin/python&quot; &quot;$helper&quot; \
+            --input &quot;$INPUT&quot; \
+            --output-dir &quot;$ASSETS_ROOT/concept&quot; \
+            --meta &quot;$META_PATH&quot; \
+            --name &quot;$OUTPUT_NAME&quot; \
+            --json 2&gt;/tmp/input-check-$$.err)&quot;; then
+        local err
+        err=&quot;$(cat /tmp/input-check-$$.err 2&gt;/dev/null || true)&quot;
+        rm -f /tmp/input-check-$$.err
+        printf &#x27;[pipeline] input quality check failed (continuing): %s\n&#x27; &quot;$err&quot; &gt;&amp;2
+        return 0
+    fi
+    rm -f /tmp/input-check-$$.err
+
+    # Update $INPUT to the normalised path if a conversion happened.
+    local normalized
+    normalized=&quot;$(printf &#x27;%s\n&#x27; &quot;$result_json&quot; \
+        | python3 -c &quot;import json,sys; d=json.loads(sys.stdin.read()); print(d.get(&#x27;normalized_path&#x27;) or &#x27;&#x27;)&quot; \
+        2&gt;/dev/null)&quot;
+    if [[ -n &quot;$normalized&quot; &amp;&amp; -f &quot;$normalized&quot; ]]; then
+        INPUT=&quot;$normalized&quot;
+    fi
+
+    # Surface issues to stderr.
+    printf &#x27;%s\n&#x27; &quot;$result_json&quot; | python3 -c &quot;
+import json, sys
+d = json.loads(sys.stdin.read())
+if &#x27;error&#x27; in d:
+    sys.stderr.write(f&#x27;[pipeline] input-check error: {d[\&quot;error\&quot;]}\n&#x27;)
+    if &#x27;notes&#x27; in d:
+        sys.stderr.write(f&#x27;[pipeline]   {d[\&quot;notes\&quot;]}\n&#x27;)
+for tag in d.get(&#x27;issues&#x27;, []):
+    sys.stderr.write(f&#x27;[pipeline] input ⚠ {tag}\n&#x27;)
+&quot; 2&gt;&amp;1 &gt;&amp;2 || true
+}
+
 # Print a friendly context summary at the top of each run.
 print_context() {
     if [[ &quot;$PROJECT_MODE&quot; == &quot;project&quot; ]]; then
@@ -2300,6 +2364,11 @@ mkdir -p &quot;$RAW_DIR&quot; &quot;$CLEAN_DIR&quot;
 
 RAW_PATH=&quot;$RAW_DIR/${OUTPUT_NAME}_raw.glb&quot;
 CLEAN_PATH=&quot;$CLEAN_DIR/${OUTPUT_NAME}_clean.glb&quot;
+META_PATH=&quot;${CLEAN_PATH}.meta.json&quot;
+
+# v0.3: input quality check + WebP/GIF normalisation. No-op when the
+# helper script or pipeline-tools-env isn&#x27;t installed (v0.2 behaviour).
+check_and_normalize_input
 
 COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
 HUMAN_FD=1
@@ -5876,6 +5945,234 @@ PIPELINE_EOF</pre></div>
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>input_quality_check.py</code>
+                <span class="script-summary-desc">v0.3 input image quality check + WebP/GIF normalisation</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/input_quality_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — input image quality check + format normalisation.
+
+Called from generate.sh (via _pipeline_lib.sh::check_and_normalize_input)
+at the top of the image-to-3D pipeline. Validates the user-supplied
+image and, if needed, normalises non-PNG/JPEG formats to PNG so the
+downstream generators (SF3D / SPAR3D / TRELLIS) see only the formats
+they actually support.
+
+Writes the result into the per-asset meta.json under the `input`
+section via meta_helper.py. Sidecar files live under $ASSETS_ROOT,
+never next to the user&#x27;s input (codex P1).
+
+Usage:
+    input_quality_check.py --input PATH --output-dir DIR --meta PATH
+                           [--name NAME] [--json]
+
+Behaviour summary:
+    - Resolution: warn &lt; 512, error-level warn &lt; 384
+    - Aspect ratio: warn outside [0.5, 2.0]
+    - File size: warn &lt; 5 KB
+    - Format: error if not in {png, jpg, jpeg, webp, gif}
+    - Animated GIF / multi-frame: take first frame, warn
+    - WebP / GIF input: convert to PNG at &lt;output-dir&gt;/&lt;name&gt;_normalized.png
+    - PNG / JPEG: kept as-is; normalized_path = original_path
+
+Issues are recorded as string tags in `input.issues` and surfaced by
+the wrapper.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+VALID_EXTS = {&quot;.png&quot;, &quot;.jpg&quot;, &quot;.jpeg&quot;, &quot;.webp&quot;, &quot;.gif&quot;}
+NORMALIZE_FROM = {&quot;.webp&quot;, &quot;.gif&quot;}
+MIN_RESOLUTION_WARN = 512
+MIN_RESOLUTION_LOUD = 384
+MIN_FILE_SIZE_BYTES = 5 * 1024
+ASPECT_MIN = 0.5
+ASPECT_MAX = 2.0
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+
+def _check_pil() -&gt; &quot;type&quot;:
+    try:
+        from PIL import Image  # type: ignore
+        return Image
+    except ImportError:
+        print(
+            &quot;ERROR: Pillow not installed. Activate pipeline-tools-env first:\n&quot;
+            &quot;    source ~/3d-pipeline/pipeline-tools-env/bin/activate&quot;,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _measure_background_uniformity(img) -&gt; float:
+    &quot;&quot;&quot;Crude proxy: stdev of luminance across the 4 image edges.
+    Returns a value in [0, 1] where 1.0 = perfectly uniform edges
+    (likely studio backdrop) and 0.0 = high variance (cluttered).&quot;&quot;&quot;
+    try:
+        import numpy as np  # type: ignore
+    except ImportError:
+        return -1.0  # numpy unavailable; signal &quot;unknown&quot;
+    gray = img.convert(&quot;L&quot;)
+    arr = np.array(gray)
+    h, w = arr.shape
+    strip = 8  # px
+    edges = np.concatenate([
+        arr[:strip, :].flatten(),
+        arr[-strip:, :].flatten(),
+        arr[:, :strip].flatten(),
+        arr[:, -strip:].flatten(),
+    ])
+    stdev = float(edges.std())
+    # Map stdev → uniformity. stdev=0 → 1.0; stdev&gt;=64 (very cluttered) → 0.0.
+    return max(0.0, min(1.0, 1.0 - stdev / 64.0))
+
+
+def check_and_normalize(input_path: Path, output_dir: Path, name: str) -&gt; dict:
+    Image = _check_pil()
+
+    issues: list[str] = []
+
+    if not input_path.exists():
+        return {&quot;error&quot;: &quot;input_not_found&quot;, &quot;original_path&quot;: str(input_path), &quot;issues&quot;: [&quot;input_not_found&quot;]}
+
+    ext = input_path.suffix.lower()
+    if ext not in VALID_EXTS:
+        return {
+            &quot;error&quot;: &quot;unsupported_format&quot;,
+            &quot;original_path&quot;: str(input_path),
+            &quot;format_original&quot;: ext.lstrip(&quot;.&quot;),
+            &quot;issues&quot;: [&quot;unsupported_format&quot;],
+            &quot;notes&quot;: f&quot;Supported: {sorted(VALID_EXTS)}&quot;,
+        }
+
+    file_size = input_path.stat().st_size
+    if file_size &lt; MIN_FILE_SIZE_BYTES:
+        issues.append(&quot;very_small_file&quot;)
+
+    try:
+        img = Image.open(input_path)
+        # Force load to catch corruption early.
+        img.load()
+    except Exception as e:
+        return {
+            &quot;error&quot;: &quot;image_unreadable&quot;,
+            &quot;original_path&quot;: str(input_path),
+            &quot;issues&quot;: [&quot;image_unreadable&quot;],
+            &quot;notes&quot;: str(e),
+        }
+
+    width, height = img.size
+    format_original = (img.format or ext.lstrip(&quot;.&quot;)).upper()
+    aspect = width / height if height else 1.0
+
+    if min(width, height) &lt; MIN_RESOLUTION_LOUD:
+        issues.append(&quot;very_low_resolution&quot;)
+    elif min(width, height) &lt; MIN_RESOLUTION_WARN:
+        issues.append(&quot;low_resolution&quot;)
+
+    if aspect &lt; ASPECT_MIN or aspect &gt; ASPECT_MAX:
+        issues.append(&quot;extreme_aspect_ratio&quot;)
+
+    # Animated / multi-frame
+    is_animated = getattr(img, &quot;is_animated&quot;, False)
+    n_frames = getattr(img, &quot;n_frames&quot;, 1)
+    if is_animated or n_frames &gt; 1:
+        issues.append(&quot;multi_frame_input&quot;)
+
+    # Normalise WebP / GIF to PNG. Always grab frame 0.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if ext in NORMALIZE_FROM:
+        # Save first frame as PNG. Preserve RGBA if present.
+        frame = img.convert(&quot;RGBA&quot;) if img.mode in (&quot;P&quot;, &quot;RGBA&quot;) else img.convert(&quot;RGB&quot;)
+        normalized_path = output_dir / f&quot;{name}_normalized.png&quot;
+        frame.save(normalized_path, &quot;PNG&quot;)
+        format_normalized = &quot;PNG&quot;
+    else:
+        normalized_path = input_path
+        format_normalized = format_original
+
+    # Re-open the (now possibly converted) image for background uniformity
+    img_for_check = Image.open(normalized_path) if normalized_path != input_path else img
+    bg_uniformity = _measure_background_uniformity(img_for_check)
+
+    return {
+        &quot;original_path&quot;: str(input_path),
+        &quot;normalized_path&quot;: str(normalized_path) if normalized_path != input_path else None,
+        &quot;format_original&quot;: format_original,
+        &quot;format_normalized&quot;: format_normalized,
+        &quot;width&quot;: int(width),
+        &quot;height&quot;: int(height),
+        &quot;aspect_ratio&quot;: round(aspect, 3),
+        &quot;background_uniformity&quot;: round(bg_uniformity, 3) if bg_uniformity &gt;= 0 else None,
+        &quot;file_size_bytes&quot;: int(file_size),
+        &quot;issues&quot;: issues,
+    }
+
+
+def _merge_into_meta(meta_path: Path, payload: dict) -&gt; None:
+    &quot;&quot;&quot;Forward result to meta_helper.py via subprocess so we get the file lock.&quot;&quot;&quot;
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;input&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True, help=&quot;Path to user-supplied image&quot;)
+    p.add_argument(&quot;--output-dir&quot;, required=True,
+                   help=&quot;Directory under $ASSETS_ROOT where the normalised PNG goes&quot;)
+    p.add_argument(&quot;--meta&quot;, required=True,
+                   help=&quot;Path to &lt;output&gt;.meta.json (created if missing)&quot;)
+    p.add_argument(&quot;--name&quot;, default=&quot;&quot;,
+                   help=&quot;Asset name (used for the normalised filename; default: input basename)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, help=&quot;Emit JSON result on stdout&quot;)
+    args = p.parse_args()
+
+    input_path = Path(os.path.expanduser(args.input))
+    output_dir = Path(os.path.expanduser(args.output_dir))
+    meta_path = Path(os.path.expanduser(args.meta))
+    name = args.name or input_path.stem
+
+    result = check_and_normalize(input_path, output_dir, name)
+    _merge_into_meta(meta_path, result)
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        if &quot;error&quot; in result:
+            print(f&quot;[input-check] ERROR: {result[&#x27;error&#x27;]}&quot;, file=sys.stderr)
+            if &quot;notes&quot; in result:
+                print(f&quot;[input-check]   {result[&#x27;notes&#x27;]}&quot;, file=sys.stderr)
+            return 1
+        print(f&quot;[input-check] {result[&#x27;width&#x27;]}x{result[&#x27;height&#x27;]} {result[&#x27;format_original&#x27;]}&quot;
+              f&quot; ({result[&#x27;file_size_bytes&#x27;] // 1024} KB)&quot;)
+        if result[&quot;normalized_path&quot;]:
+            print(f&quot;[input-check] normalised → {result[&#x27;normalized_path&#x27;]}&quot;)
+        if result[&quot;issues&quot;]:
+            for tag in result[&quot;issues&quot;]:
+                print(f&quot;[input-check] ⚠ {tag}&quot;)
+        if result.get(&quot;background_uniformity&quot;) is not None:
+            print(f&quot;[input-check] background_uniformity={result[&#x27;background_uniformity&#x27;]:.2f}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
@@ -6200,6 +6497,29 @@ line as JSON; `outputs[0]` is the first image.
 Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
+
+### Input quality check (v0.3+)
+
+When `pipeline-tools-env` is installed, the wrapper runs an input
+quality + format-normalisation pass before the generator. WebP and
+animated GIF inputs are converted to a static PNG under
+`&lt;assets&gt;/concept/&lt;name&gt;_normalized.png` first; the original is
+preserved. Quality issues are surfaced on stderr as
+`[pipeline] input ⚠ &lt;tag&gt;` lines and recorded in the per-asset
+meta.json under the `input` section. Common tags:
+
+- `low_resolution` (&lt; 512 px on shortest edge) — recommend the user
+  upscale via `texture.sh --mode upscale --scale 2` first
+- `very_low_resolution` (&lt; 384 px) — strongly recommend regenerating
+  or upscaling; downstream quality will suffer
+- `extreme_aspect_ratio` (outside 1:2 to 2:1) — output mesh will be
+  distorted; suggest cropping or re-shooting
+- `multi_frame_input` — animated GIF or multi-frame WebP; only frame
+  0 is used; mention this to the user
+- `unsupported_format` — error; the wrapper exits
+
+If pipeline-tools-env is missing, the check is a silent no-op and the
+generator runs on the raw input (v0.2 behaviour).
 
 Polycount guidance:
 - Tiny pickup: 500–1000

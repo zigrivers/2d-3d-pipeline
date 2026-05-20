@@ -135,6 +135,11 @@ mkdir -p "$RAW_DIR" "$CLEAN_DIR"
 
 RAW_PATH="$RAW_DIR/${OUTPUT_NAME}_raw.glb"
 CLEAN_PATH="$CLEAN_DIR/${OUTPUT_NAME}_clean.glb"
+META_PATH="${CLEAN_PATH}.meta.json"
+
+# v0.3: input quality check + WebP/GIF normalisation. No-op when the
+# helper script or pipeline-tools-env isn't installed (v0.2 behaviour).
+check_and_normalize_input
 
 COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
 HUMAN_FD=1

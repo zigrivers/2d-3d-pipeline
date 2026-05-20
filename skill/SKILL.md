@@ -243,6 +243,29 @@ Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
 
+### Input quality check (v0.3+)
+
+When `pipeline-tools-env` is installed, the wrapper runs an input
+quality + format-normalisation pass before the generator. WebP and
+animated GIF inputs are converted to a static PNG under
+`<assets>/concept/<name>_normalized.png` first; the original is
+preserved. Quality issues are surfaced on stderr as
+`[pipeline] input ⚠ <tag>` lines and recorded in the per-asset
+meta.json under the `input` section. Common tags:
+
+- `low_resolution` (< 512 px on shortest edge) — recommend the user
+  upscale via `texture.sh --mode upscale --scale 2` first
+- `very_low_resolution` (< 384 px) — strongly recommend regenerating
+  or upscaling; downstream quality will suffer
+- `extreme_aspect_ratio` (outside 1:2 to 2:1) — output mesh will be
+  distorted; suggest cropping or re-shooting
+- `multi_frame_input` — animated GIF or multi-frame WebP; only frame
+  0 is used; mention this to the user
+- `unsupported_format` — error; the wrapper exits
+
+If pipeline-tools-env is missing, the check is a silent no-op and the
+generator runs on the raw input (v0.2 behaviour).
+
 Polycount guidance:
 - Tiny pickup: 500–1000
 - Standard prop (default 3000): 2000–4000
