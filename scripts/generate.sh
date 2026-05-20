@@ -314,16 +314,20 @@ info "Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)..."
 
 [[ -f "$CLEAN_PATH" ]] || { err "Cleanup did not produce $CLEAN_PATH"; exit 1; }
 
-# v0.3 — mesh quality check (watertight + scale sanity). Silent no-op
-# when pipeline-tools-env isn't installed.
+# v0.3 — mesh quality + texture quality checks (silent no-op when
+# pipeline-tools-env isn't installed).
 PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
-MESH_CHECK="$SCRIPT_DIR/mesh_quality_check.py"
-[[ -f "$MESH_CHECK" ]] || MESH_CHECK="$PIPELINE_ROOT/workspace/mesh_quality_check.py"
-if [[ -f "$MESH_CHECK" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
-    "$PIPELINE_TOOLS_ENV/bin/python" "$MESH_CHECK" \
-        --input "$CLEAN_PATH" --meta "$META_PATH" --mode normalized 2>&1 \
-        | { while IFS= read -r line; do printf "[pipeline] %s\n" "${line#\[mesh-check\] }" >&"$HUMAN_FD"; done; } || true
-fi
+run_pipeline_check() {
+    local script_name="$1"; shift
+    local script="$SCRIPT_DIR/$script_name"
+    [[ -f "$script" ]] || script="$PIPELINE_ROOT/workspace/$script_name"
+    if [[ -f "$script" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        "$PIPELINE_TOOLS_ENV/bin/python" "$script" "$@" 2>&1 \
+            | { while IFS= read -r line; do printf "[pipeline] %s\n" "${line#\[*\] }" >&"$HUMAN_FD"; done; } || true
+    fi
+}
+run_pipeline_check mesh_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --mode normalized
+run_pipeline_check texture_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH"
 
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is

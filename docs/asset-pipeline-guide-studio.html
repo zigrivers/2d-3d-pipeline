@@ -2572,16 +2572,20 @@ info &quot;Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)...&quot;
 
 [[ -f &quot;$CLEAN_PATH&quot; ]] || { err &quot;Cleanup did not produce $CLEAN_PATH&quot;; exit 1; }
 
-# v0.3 — mesh quality check (watertight + scale sanity). Silent no-op
-# when pipeline-tools-env isn&#x27;t installed.
+# v0.3 — mesh quality + texture quality checks (silent no-op when
+# pipeline-tools-env isn&#x27;t installed).
 PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
-MESH_CHECK=&quot;$SCRIPT_DIR/mesh_quality_check.py&quot;
-[[ -f &quot;$MESH_CHECK&quot; ]] || MESH_CHECK=&quot;$PIPELINE_ROOT/workspace/mesh_quality_check.py&quot;
-if [[ -f &quot;$MESH_CHECK&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
-    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$MESH_CHECK&quot; \
-        --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized 2&gt;&amp;1 \
-        | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[mesh-check\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
-fi
+run_pipeline_check() {
+    local script_name=&quot;$1&quot;; shift
+    local script=&quot;$SCRIPT_DIR/$script_name&quot;
+    [[ -f &quot;$script&quot; ]] || script=&quot;$PIPELINE_ROOT/workspace/$script_name&quot;
+    if [[ -f &quot;$script&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$script&quot; &quot;$@&quot; 2&gt;&amp;1 \
+            | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[*\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    fi
+}
+run_pipeline_check mesh_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized
+run_pipeline_check texture_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot;
 
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is
@@ -6546,6 +6550,201 @@ def main() -&gt; int:
             else:
                 dim = scale[&quot;longest_dim_normalized&quot;]
                 print(f&quot;[mesh-check] Scale: ⚠ longest dim {dim} is outside the sane normalized range&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>texture_quality_check.py</code>
+                <span class="script-summary-desc">v0.3 texture map quality validation (albedo / roughness / metallic / normal)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/texture_quality_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — texture quality validation.
+
+Loads a GLB with trimesh, extracts PBR texture maps (baseColor /
+roughness / metallic / normal), and flags degenerate patterns the
+generator can emit:
+
+  - flat-black-albedo:   pure-black albedo (model defaulted)
+  - flat-color-albedo:   single-colour albedo (no real material)
+  - uniform-roughness:   stdev &lt; threshold (model defaulted)
+  - uniform-metallic:    stdev &lt; threshold (same)
+  - low-detail-normal:   normal map has near-zero XY magnitude
+  - uninitialised:       all-white / never-written buffer
+  - no_textures:         TRELLIS-on-Mac (vertex colours only)
+
+Writes `quality.textures` to the per-asset meta.json.
+
+Usage:
+    texture_quality_check.py --input PATH.glb --meta PATH [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+ALBEDO_FLAT_BLACK_MAX = 8       # mean luminance below this -&gt; flat-black
+FLAT_STDEV_THRESHOLD = 5        # stdev below this -&gt; single-colour
+UNIFORM_STDEV_THRESHOLD = 2     # roughness/metallic flat
+NORMAL_XY_MIN = 8               # normal map detail floor (XY mag)
+UNINIT_MEAN = 250               # near-white mean
+UNINIT_STDEV = 2
+
+
+def _imports():
+    try:
+        import trimesh  # type: ignore
+        import numpy as np  # type: ignore
+        from PIL import Image  # type: ignore
+        return trimesh, np, Image
+    except ImportError as e:
+        print(
+            f&quot;ERROR: missing dep ({e}). Activate pipeline-tools-env first.&quot;,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _get_pil_image(material_image, Image):
+    &quot;&quot;&quot;trimesh sometimes returns a PIL image directly, sometimes a numpy array.&quot;&quot;&quot;
+    if material_image is None:
+        return None
+    if hasattr(material_image, &quot;size&quot;):
+        return material_image
+    try:
+        import numpy as np
+        arr = np.asarray(material_image)
+        if arr.ndim &lt; 2:
+            return None
+        return Image.fromarray(arr)
+    except Exception:
+        return None
+
+
+def _analyse_map(img, np, channel: str) -&gt; dict:
+    &quot;&quot;&quot;Mean/stdev stats for a texture map.&quot;&quot;&quot;
+    arr = np.asarray(img)
+    if arr.ndim == 2:
+        gray = arr
+    else:
+        gray = arr.mean(axis=-1)
+    return {
+        &quot;mean&quot;: round(float(gray.mean()), 2),
+        &quot;stdev&quot;: round(float(gray.std()), 2),
+        &quot;_arr&quot;: arr,  # consumer pops this
+    }
+
+
+def check(input_path: Path) -&gt; dict:
+    trimesh, np, Image = _imports()
+    try:
+        mesh = trimesh.load(str(input_path), force=&quot;mesh&quot;)
+    except Exception as e:
+        return {&quot;textures_present&quot;: [], &quot;issues&quot;: [&quot;load_failed&quot;], &quot;error&quot;: str(e), &quot;stats&quot;: {}}
+
+    material = getattr(getattr(mesh, &quot;visual&quot;, None), &quot;material&quot;, None)
+    if material is None:
+        return {&quot;textures_present&quot;: [], &quot;issues&quot;: [&quot;no_textures&quot;], &quot;stats&quot;: {}}
+
+    textures = {
+        &quot;albedo&quot;: _get_pil_image(getattr(material, &quot;baseColorTexture&quot;, None), Image),
+        &quot;roughness&quot;: _get_pil_image(getattr(material, &quot;roughnessTexture&quot;, None) or getattr(material, &quot;metallicRoughnessTexture&quot;, None), Image),
+        &quot;metallic&quot;: _get_pil_image(getattr(material, &quot;metallicTexture&quot;, None) or getattr(material, &quot;metallicRoughnessTexture&quot;, None), Image),
+        &quot;normal&quot;: _get_pil_image(getattr(material, &quot;normalTexture&quot;, None), Image),
+    }
+
+    issues: list[str] = []
+    stats: dict = {}
+    present: list[str] = []
+
+    for name, img in textures.items():
+        if img is None:
+            continue
+        present.append(name)
+        s = _analyse_map(img, np, name)
+        mean, stdev = s[&quot;mean&quot;], s[&quot;stdev&quot;]
+        arr = s.pop(&quot;_arr&quot;)
+        # Per-map degeneracy checks
+        if name == &quot;albedo&quot;:
+            if mean &lt; ALBEDO_FLAT_BLACK_MAX:
+                issues.append(&quot;flat-black-albedo&quot;)
+            elif stdev &lt; FLAT_STDEV_THRESHOLD:
+                issues.append(&quot;flat-color-albedo&quot;)
+        elif name == &quot;roughness&quot;:
+            if stdev &lt; UNIFORM_STDEV_THRESHOLD:
+                issues.append(&quot;uniform-roughness&quot;)
+        elif name == &quot;metallic&quot;:
+            if stdev &lt; UNIFORM_STDEV_THRESHOLD:
+                issues.append(&quot;uniform-metallic&quot;)
+        elif name == &quot;normal&quot;:
+            # Normal map XY magnitude (offset from 128)
+            try:
+                if arr.ndim == 3 and arr.shape[-1] &gt;= 2:
+                    xy = arr[..., :2].astype(&quot;int32&quot;) - 128
+                    xy_mag_mean = float(np.abs(xy).mean())
+                else:
+                    xy_mag_mean = 0.0
+                s[&quot;xy_magnitude_mean&quot;] = round(xy_mag_mean, 2)
+                if xy_mag_mean &lt; NORMAL_XY_MIN:
+                    issues.append(&quot;low-detail-normal&quot;)
+            except Exception:
+                pass
+        if mean &gt; UNINIT_MEAN and stdev &lt; UNINIT_STDEV:
+            issues.append(f&quot;uninitialised-{name}&quot;)
+        stats[name] = s
+
+    if not present:
+        issues.append(&quot;no_textures&quot;)
+
+    return {
+        &quot;textures_present&quot;: present,
+        &quot;issues&quot;: issues,
+        &quot;stats&quot;: stats,
+    }
+
+
+def _merge(meta_path: Path, payload: dict) -&gt; None:
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;quality&quot;,
+         &quot;--data&quot;, json.dumps({&quot;textures&quot;: payload})],
+        check=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    result = check(Path(os.path.expanduser(args.input)))
+    _merge(Path(os.path.expanduser(args.meta)), result)
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        n = len(result[&quot;textures_present&quot;])
+        if &quot;no_textures&quot; in result[&quot;issues&quot;]:
+            print(&quot;[texture-check] Textures: none embedded (vertex colours only)&quot;)
+        elif not result[&quot;issues&quot;]:
+            print(f&quot;[texture-check] Textures: {n} map(s), all look healthy&quot;)
+        else:
+            print(f&quot;[texture-check] Textures: {n} map(s) — ⚠ issues: &quot; + &quot;, &quot;.join(result[&quot;issues&quot;]))
     return 0
 
 

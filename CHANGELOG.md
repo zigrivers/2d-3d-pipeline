@@ -2,6 +2,18 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.5: texture quality validation (Tier 1)
+
+- `scripts/texture_quality_check.py` (in pipeline-tools-env) —
+  trimesh + Pillow + numpy extraction and per-map degeneracy probes.
+  Flags: `flat-black-albedo`, `flat-color-albedo`, `uniform-roughness`,
+  `uniform-metallic`, `low-detail-normal`, `uninitialised-<map>`,
+  `no_textures` (TRELLIS Mac).
+- `scripts/generate.sh` — runs both mesh_quality_check and the new
+  texture_quality_check through a small shared `run_pipeline_check`
+  bash helper. Easier to add new quality scripts going forward.
+- Result writes to `quality.textures` in the per-asset meta.json.
+
 ## 2026-05-20 — P1.4: mesh watertight + scale sanity check (Tier 1)
 
 - `scripts/mesh_quality_check.py` (in pipeline-tools-env) — trimesh-
