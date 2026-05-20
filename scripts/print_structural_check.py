@@ -51,44 +51,83 @@ def _imports():
         sys.exit(2)
 
 
-def _min_wall_thickness(mesh, np) -> float | None:
-    """Approximate min wall thickness via interior ray casts.
-    For each face, cast a ray from its centroid inward along the
-    negative normal; the closest hit distance bounds the wall
-    thickness at that face. Returns the minimum across a sample.
+def _min_wall_thickness(mesh, np) -> tuple[float | None, str | None]:
+    """Min wall thickness in mesh units (mm for the print path).
+
+    Returns (value_mm, method) where method is "proximity-sdf" (rigorous),
+    "ray-cast" (legacy fallback), or None (no method available).
+
+    Rigorous path (preferred): sample N interior points uniformly inside
+    the mesh's bounding box, keep only those that pass `mesh.contains`,
+    and for each compute the distance to the nearest surface via
+    `trimesh.proximity.ProximityQuery.on_surface`. The minimum × 2 is
+    the thinnest wall any of those points sits in. Requires `rtree` for
+    fast nearest-neighbour queries; falls back to slow brute-force
+    without it (still correct, just slower for dense meshes).
+
+    Fallback (ray-cast): the v0.3.1 algorithm — for each face's centroid
+    cast a ray along -normal and use the nearest hit. Underestimates
+    when faces are sparse; can miss the actual narrowest section
+    entirely. Kept as a fallback for non-watertight meshes (where
+    mesh.contains is unreliable) and for environments without rtree
+    or the proximity module.
     """
+    # --- preferred: signed-distance via interior sampling ---
+    try:
+        from trimesh.proximity import ProximityQuery  # type: ignore
+        if not mesh.is_watertight:
+            # mesh.contains on a non-watertight mesh is unreliable;
+            # fall through to ray-cast.
+            raise RuntimeError("mesh not watertight")
+        bounds = mesh.bounds
+        # Adaptive sample count: O(volume) up to a cap.
+        diag = float(np.linalg.norm(bounds[1] - bounds[0]))
+        n_samples = max(1000, min(8000, int(diag * 100)))
+        rng = np.random.default_rng(0)
+        candidates = rng.uniform(bounds[0], bounds[1], (n_samples, 3))
+        inside_mask = mesh.contains(candidates)
+        interior = candidates[inside_mask]
+        if len(interior) < 20:
+            raise RuntimeError("too few interior points")
+        pq = ProximityQuery(mesh)
+        # on_surface returns (closest_points, distances, triangle_ids)
+        _, distances, _ = pq.on_surface(interior)
+        if not len(distances):
+            raise RuntimeError("on_surface returned no distances")
+        # Distance from interior point to the nearest surface is the
+        # half-wall-thickness at the *thinnest wall passing through that
+        # point*. The minimum × 2 gives the thinnest wall the mesh has.
+        min_half = float(distances.min())
+        return round(min_half * 2.0, 3), "proximity-sdf"
+    except Exception:
+        pass
+
+    # --- fallback: ray-cast (v0.3.1 algorithm) ---
     try:
         n_samples = min(500, len(mesh.faces))
         if n_samples == 0:
-            return None
+            return None, None
         idx = np.linspace(0, len(mesh.faces) - 1, n_samples).astype(int)
-        # Centroid per face
         verts = mesh.vertices
         faces = mesh.faces[idx]
         centroids = verts[faces].mean(axis=1)
         normals = mesh.face_normals[idx]
-        # Inward ray = -normal, start slightly inside to avoid self-hit
         origins = centroids - normals * 1e-4
-        # Use trimesh.intersections.ray_triangle for cross-platform support
-        try:
-            ray = mesh.ray
-            locations, ray_indices, _ = ray.intersects_location(
-                ray_origins=origins,
-                ray_directions=-normals,
-                multiple_hits=False,
-            )
-            if len(ray_indices) == 0:
-                return None
-            distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
-            # Filter out zero-length grazes
-            distances = distances[distances > 1e-3]
-            if not len(distances):
-                return None
-            return float(distances.min())
-        except Exception:
-            return None
+        ray = mesh.ray
+        locations, ray_indices, _ = ray.intersects_location(
+            ray_origins=origins,
+            ray_directions=-normals,
+            multiple_hits=False,
+        )
+        if len(ray_indices) == 0:
+            return None, None
+        distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
+        distances = distances[distances > 1e-3]
+        if not len(distances):
+            return None, None
+        return round(float(distances.min()), 3), "ray-cast"
     except Exception:
-        return None
+        return None, None
 
 
 def _self_intersections(mesh) -> int:
@@ -147,7 +186,7 @@ def check(input_path: Path) -> dict:
     except Exception as e:
         return {"error": f"load_failed: {e}"}
 
-    wall = _min_wall_thickness(mesh, np)
+    wall, wall_method = _min_wall_thickness(mesh, np)
     wall_safe = (wall is None or wall >= WALL_WARN_MM)
 
     bodies = 1
@@ -172,7 +211,8 @@ def check(input_path: Path) -> dict:
     base = _base_geometry(mesh, np)
 
     return {
-        "min_wall_thickness_mm": round(wall, 3) if wall is not None else None,
+        "min_wall_thickness_mm": wall,
+        "wall_thickness_method": wall_method,
         "wall_thickness_safe": bool(wall_safe),
         "disconnected_islands": int(bodies),
         "self_intersections": int(self_int) if self_int >= 0 else None,

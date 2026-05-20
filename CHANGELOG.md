@@ -2,6 +2,29 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q1 (open question): rigorous wall-thickness algorithm
+
+Replaces the ray-cast wall-thickness heuristic in
+`scripts/print_structural_check.py` with a proper signed-distance
+approach. For watertight meshes:
+
+  1. Sample N interior points uniformly inside the bounding box.
+  2. Keep only points the mesh contains (`mesh.contains`).
+  3. For each interior point, compute distance to the nearest surface
+     via `trimesh.proximity.ProximityQuery.on_surface`.
+  4. The minimum distance × 2 is the thinnest wall any of those
+     interior points passes through — the true mesh-wide minimum.
+
+Adaptive sample count from 1k to 8k based on mesh bbox diagonal.
+The ray-cast algorithm is kept as a graceful fallback for non-
+watertight meshes (where `mesh.contains` is unreliable) and for
+environments without `rtree` (where ProximityQuery is slow but
+still correct).
+
+`print.structural.wall_thickness_method` recorded in the meta.json
+so the skill can tell the user which method was used ("proximity-sdf"
+= rigorous; "ray-cast" = legacy fallback).
+
 ## 2026-05-20 — Q4 (open question): hero PNG staged into engine folder
 
 When `generate.sh` stages a cleaned GLB into Unity / Unreal's
