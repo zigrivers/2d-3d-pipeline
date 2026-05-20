@@ -2,6 +2,16 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q4 (open question): hero PNG staged into engine folder
+
+When `generate.sh` stages a cleaned GLB into Unity / Unreal's
+auto-import folder, the v0.3 turntable hero PNG now follows along
+with matching name. Unity / Unreal can pick it up as a thumbnail or
+in-editor preview without the user having to open Blender.
+
+Silent no-op when no engine stage happened (e.g. global mode) or
+no preview was rendered (`--preview none`).
+
 ## 2026-05-20 — P3.1a.2: Document the MV-2D install in section 10
 
 Adds a second optional step to "section 10 / v0.3 prep" in both

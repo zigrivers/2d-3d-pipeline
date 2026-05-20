@@ -487,6 +487,19 @@ PY
     fi
 fi
 
+# v0.3 — also stage the hero preview PNG alongside the GLB in the engine
+# folder when applicable. Useful for in-editor thumbnails / quick visual
+# previews without opening the asset. Same naming as the GLB (just .png).
+# Silent no-op when no engine stage happened or the PNG isn't there.
+if [[ -n "$ENGINE_STAGED_PATH" ]]; then
+    HERO_PNG="$ASSETS_ROOT/preview/${OUTPUT_NAME}.png"
+    if [[ -f "$HERO_PNG" ]]; then
+        ENGINE_PNG="${ENGINE_STAGED_PATH%.glb}.png"
+        cp "$HERO_PNG" "$ENGINE_PNG" 2>/dev/null \
+            && info "Staged hero PNG for engine: $ENGINE_PNG" || true
+    fi
+fi
+
 END_TS=$(date +%s)
 DURATION=$((END_TS - START_TS))
 done_ "Pipeline complete in ${DURATION}s"
