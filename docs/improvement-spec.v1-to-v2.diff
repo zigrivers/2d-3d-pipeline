@@ -1,0 +1,2707 @@
+--- /tmp/improvement-spec.v1.md	2026-05-20 05:57:20
++++ docs/improvement-spec.md	2026-05-20 06:09:22
+@@ -1,381 +1,491 @@
+-# Pipeline quality-improvement spec (v1 — pre-MMR review)
++# Pipeline quality-improvement spec (v2 — post-MMR)
+ 
+-**Status:** draft for review · **Author:** asset-pipeline maintainers ·
+-**Target release:** v0.3.x (Tier 1) · v0.4 (Tier 2 + 3 selections)
++**Status:** ready for implementation review · **Author:** asset-pipeline
++maintainers · **Target release:** v0.3.x (Tier 1) · v0.4 (Tier 2 + 3 selections)
+ 
+-This spec captures eleven proposed improvements to the 2D-to-3D asset
++This spec captures fourteen proposed improvements to the 2D-to-3D asset
+ pipeline. The pipeline serves non-technical users via the
+ `asset-pipeline` Claude Code skill, so quality, predictability, and
+ clear feedback matter more than raw flexibility. Items are grouped by
+ tier; tier reflects impact × implementability, not priority of value.
+ 
+-Each item answers nine questions:
++Each item answers nine questions: problem, approach, dependencies +
++license bucket, hardware tier, manifest changes, user-facing output,
++failure modes, test strategy, effort (S ≤ 1 day, M ≤ 3 days, L > 3 days).
+ 
+-1. **Problem** — grounded in the current code, not abstract
+-2. **Approach** — file paths and function names that will change
+-3. **Dependencies** — package + license bucket
+-4. **Hardware tier** — laptop / studio / both
+-5. **Manifest schema changes** — additive only, opt-in fields
+-6. **User-facing output** — what the wrapper prints, what the skill says
+-7. **Failure modes** — how the pipeline degrades when the new step fails
+-8. **Test strategy** — fast end-to-end cases using Z-Image Turbo + SF3D
+-9. **Effort** — S (≤ 1 day), M (1–3 days), L (≥ 3 days)
++## What changed from v1 (post-MMR)
+ 
++This is v2. v1 was reviewed by `mmr review` (gemini + codex channels);
++17 findings drove the following structural changes. Reviewers cited by
++name in the bullet are the source of each change.
++
++- **Single per-asset metadata file** instead of seven sidecars. `<output>.meta.json`
++  is the canonical per-asset record, written by a merge helper that all
++  passes share. Eliminates the race condition where items 2 and 6 both
++  wrote `clean_meta.json` (gemini, codex). Manifest fields land in one
++  `quality` block with documented merge precedence (codex).
++- **One `pipeline-tools-env` venv** for rembg + CLIP + trimesh, sharing
++  Torch / Pillow / numpy. Saves ~15 GB of duplicated dep trees on
++  laptop tier (gemini). ComfyUI stays separate (different stack).
++- **Three new Tier 1 items**: item 10 (pipeline-doctor + cache
++  manager), item 13 (UV / game-engine validation), item 14 (print-
++  structural gates). All three were genuine gaps cited by codex.
++- **Background removal demoted to conditional default-on.** The cross-
++  cutting rule says default-on requires < 1 s + never wrong; rembg
++  is 2 s and silently degrades on legitimate inputs with thin geometry
++  or transparency (codex). Now runs only when the input-quality check
++  detects a non-uniform background, with a foreground-coverage sanity
++  check that falls back to the original on suspicious results.
++- **Turntable preview demoted to opt-in on laptop.** Same rule
++  violation (3–6 s on laptop). Static hero PNG ships default-on
++  (cheap); GIF is opt-in or default-on-studio (codex).
++- **CLIP scoring repositioned as variant-ranking + soft signal**,
++  not an absolute pass/fail threshold. ViT-L/14 scores aren't
++  calibrated across prompt length / style / generator (codex).
++- **Input format normalisation step added** for WebP / GIF / multi-
++  frame inputs before generator dispatch (codex).
++- **Scale sanity threshold** added to item 2 (gemini).
++- **User-facing translation map** added under cross-cutting design
++  principles — turns "non-manifold boundary edge" into "small gap in
++  the surface" for skill output (gemini).
++- **ComfyUI license clarified** (item 11): the GPL classification
++  applies to redistribution of ComfyUI itself, not to image outputs;
++  outputs retain the bucket of their generating model (gemini).
++- **Item numbering**: the numbering hole at 10 from v1 is now filled
++  by the new pipeline-doctor item.
++
++The v1 → v2 diff is available alongside this document and is the
++authoritative record of what changed.
++
+ ---
+ 
+ ## Cross-cutting design principles
+ 
+ These apply to every item below. Repeating them once here avoids
+-restating them eleven times.
++restating them eleven (now fourteen) times.
+ 
+-- **Additive, never breaking.** Every change preserves existing
+-  `--json` contracts, existing CLI flags, and existing default
+-  behaviour. New behaviour ships behind a flag default-on only when
+-  it is fast (< 1 s) and never wrong; otherwise opt-in.
+-- **Sidecar JSON for in-band cleanup signal.** `prepare_for_print.py`
+-  already emits `<output>.print_meta.json`. New quality checks
+-  follow that pattern: write a sidecar JSON next to the output,
+-  let the wrapper's `--json` mode pick it up. Avoid changing
+-  `clean_asset.py`'s stdout contract.
+-- **License-bucket every new model.** Every new dependency that ships
+-  weights must declare a bucket in
+-  `_pipeline_lib.sh::license_bucket_for_model`. New buckets only when
+-  the existing five don't fit.
+-- **Stderr for human output under `--json`.** Any new subprocess
+-  must be routed through `json_mode_begin`/`json_mode_end`, or its
+-  noise will corrupt the wrapper's JSON.
+-- **Skill changes are first-class deliverables.** A code change that
+-  doesn't propagate into `skill/SKILL.md` is invisible to the
+-  non-technical user. Every item in this spec lists the skill change
+-  even when it's "one sentence in flow 2."
+-- **Doc regeneration is required.** Any script change must be followed
+-  by `make regenerate && make verify`. The pre-commit hook enforces
+-  this; CI re-checks. Bundle (`make bundle`) must still build.
+-- **Failure mode default: warn, don't block.** Quality gates report,
+-  they don't refuse. Exceptions: the existing all-axis 270 mm check
+-  (blocking by design) and any new dimension that would produce a
+-  silently corrupt asset.
++### 1. Additive, never breaking
+ 
++Every change preserves existing `--json` contracts, existing CLI
++flags, and existing default behaviour. New behaviour ships behind a
++flag default-on **only when**:
++
++(a) it's fast (< 1 s on the slower of the two hardware tiers), AND
++(b) it cannot silently degrade output quality, AND
++(c) its failure modes are observable to a non-technical user.
++
++If any of these fails, the feature is opt-in or tier-conditional.
++This rule blocks two v1 default-ons: rembg (item 1) and turntable
++(item 5).
++
++### 2. One metadata file per asset
++
++Replacing v1's "seven sidecars" pattern. Each generated asset gets
++a single `<output>.meta.json` that all quality passes merge into.
++
++Merge contract:
++
++- Each pass calls `scripts/meta_helper.py merge <meta-json-path>
++  --section <name> --data <inline-json>`.
++- The helper takes an advisory file lock (`fcntl.flock` on macOS) to
++  prevent concurrent writes.
++- The schema is namespaced: `input`, `preprocessing`, `cleanup`,
++  `quality`, `print`, `preview`, `clip` are top-level sections.
++- Each section is owned by exactly one pass. No cross-pass writes.
++- Adding a new section requires a CHANGELOG entry; never modifying
++  an existing section's shape after release.
++
++Example end-state:
++
++```json
++{
++  "schema_version": 1,
++  "asset_name": "dragon",
++  "input": { "width": 1024, "height": 1024, "format": "PNG", "issues": [] },
++  "preprocessing": {
++    "bg_removal": { "applied": true, "model": "u2net", "alpha_mean": 0.42 },
++    "input_normalization": { "applied": false }
++  },
++  "cleanup": {
++    "duplicate_vertices_removed": 47,
++    "loose_elements_deleted": 3,
++    "holes_filled": 2,
++    "decimate": { "before": 18432, "after": 2987 }
++  },
++  "quality": {
++    "manifold": { "is_watertight": true, "hole_count": 0 },
++    "textures": { "issues": [] },
++    "uv": { "island_count": 14, "occupancy_ratio": 0.78, "has_overlap": false },
++    "scale": { "longest_dim_mm": 50.0, "in_sane_range": true }
++  },
++  "preview": { "hero_png_path": "...", "gif_path": null },
++  "clip": { "similarity": 0.84, "model": "ViT-L-14" }
++}
++```
++
++`update_manifest.py` gains a single `--meta-json PATH` arg that
++merges the entire file into the manifest entry's `quality` block,
++plus a documented mapping table for which sidecar sections map to
++which manifest fields. No more per-section flags.
++
++### 3. One `pipeline-tools-env` venv for the new deps
++
++Items 1 (rembg), 2/3/6/13/14 (trimesh + Pillow), 8 (open_clip)
++share a single venv at `~/3d-pipeline/pipeline-tools-env/`:
++
++```
++trimesh
++numpy
++Pillow
++rembg[cpu]
++open_clip_torch
++torch  # already brought in by open_clip; reused by rembg
++```
++
++ComfyUI (item 11, if it ships) stays in its own venv —
++incompatible PyTorch builds / model assumptions.
++
++Estimated disk impact: ~6 GB for the consolidated env vs. ~15 GB
++across four separate envs (rembg + clip + trimesh + comfyui).
++
++### 4. License-bucket every new model
++
++Every new dependency that ships weights must declare a bucket in
++`_pipeline_lib.sh::license_bucket_for_model`. New buckets only when
++the existing five don't fit. Below, each item declares the bucket
++for its weights.
++
++### 5. Stderr for human output under `--json`
++
++Any new subprocess must be routed through `json_mode_begin` /
++`json_mode_end`, or its noise will corrupt the wrapper's JSON.
++
++### 6. Skill changes are first-class deliverables
++
++A code change that doesn't propagate into `skill/SKILL.md` is
++invisible to the non-technical user. Every item lists the skill
++change, even when it's one sentence.
++
++### 7. Doc regeneration is required
++
++Any script change must be followed by `make regenerate && make verify`.
++The pre-commit hook enforces this; CI re-checks. Bundle
++(`make bundle`) must still build.
++
++### 8. User-friendly translations (jargon map)
++
++The skill should speak the user's language, not the engine's. A
++shared translation table lives in `skill/SKILL.md` and the
++wrappers reference it for any user-facing message:
++
++| Engine term | User-facing translation |
++|---|---|
++| "non-manifold edge" | "small gap in the surface" |
++| "watertight ✓" | "fully sealed (good for printing)" |
++| "is_watertight=false, hole_count=3" | "3 small gaps in the surface — may print fine but worth knowing" |
++| "boundary edge" | "open edge" |
++| "UV island" | "texture patch" |
++| "decimate ratio 0.16" | "simplified mesh: 18,400 → 3,000 polygons" |
++| "alpha_mean 0.42" | "subject takes up about 42% of the image" |
++| "CLIP similarity 0.84" | "image matches your prompt: very good (0.84/1.0)" |
++| "CLIP similarity 0.71" | "image matches your prompt: weak (0.71/1.0) — consider re-generating" |
++| "non-manifold internal shell" | "hidden geometry inside the mesh" |
++| "wall thickness 0.4mm" | "thinnest part is 0.4mm — may fail to print" |
++
++The wrapper outputs the raw value in `--json`; the skill text
++translates when speaking to the user.
++
++### 9. Sidecar files never write next to user inputs
++
++User inputs may be read-only, in unexpected directories, or
++collision-prone with other jobs reusing the same basename. All
++sidecars live under `$ASSETS_ROOT` next to their generated output,
++not next to the input.
++
++### 10. Failure mode default: warn, don't block
++
++Quality gates report; they don't refuse. Exceptions: the existing
++all-axis 270 mm check (blocking by design) and any new dimension
++that would produce a silently corrupt asset.
++
+ ---
+ 
+ # Tier 1 — high impact, automatable
+ 
+-## 1. Background removal before image→3D
++## 1. Conditional background removal before image→3D
+ 
+ ### Problem
+ 
+-`generate.sh` accepts any PNG/JPG and feeds it directly to SF3D /
+-SPAR3D / TRELLIS. When the input image has a non-trivial background
+-(common when users supply photos or images generated without the
+-`game-asset` prompt suffix), the generator wastes capacity modelling
+-the background and bleeds it into the mesh geometry. The 2026 best-
+-practice survey identifies background removal as the single highest-
+-impact preprocessing step for image-to-3D quality.
++`generate.sh` accepts any image and feeds it directly to SF3D / SPAR3D
++/ TRELLIS. Non-uniform backgrounds bleed into mesh geometry. The
++2026 best-practice survey identifies background removal as the
++single highest-impact preprocessing step for image-to-3D quality.
+ 
+-Today, `concept.sh` partially mitigates this with its
+-`GAME_SUFFIX` ("clean white background, even studio lighting…") but
+-the suffix is opt-out, and `generate.sh` also accepts user-supplied
+-images that never went through `concept.sh`.
++**MMR-noted risk (codex P1):** Background removal isn't safe to apply
++blindly. Inputs with intentional transparency, thin geometry (hair,
++filaments), reflective bases, or shadow context can be silently
++damaged by rembg. v2 makes the step **conditional** rather than
++unconditional default-on.
+ 
+ ### Approach
+ 
+-Add a new preprocessing step in `scripts/generate.sh`, between
+-"input file exists" validation and the generator invocation.
++New script `scripts/rembg_preprocess.py` — thin wrapper around the
++`rembg` library. Takes `--input PATH --output PATH [--model u2net|isnet-general-use]`.
++Lives in `pipeline-tools-env`.
+ 
+-```bash
+-# After line ~108 (INPUT canonicalised), before generator dispatch
+-if [[ "$REMBG_ENABLED" == "1" ]]; then
+-    process_input_image  # new helper in _pipeline_lib.sh
+-fi
+-```
++New helper `process_input_image` in `_pipeline_lib.sh` decides
++whether to run rembg based on signals from item 4 (input image
++quality check):
+ 
+-Implementation:
++```
++case "$BG_REMOVAL_MODE" in
++    auto)
++        # The input quality check already wrote $ASSETS_ROOT/<basename>.meta.json
++        # with input.background_uniformity. Read it; run rembg only when
++        # the background is non-uniform AND the image isn't already RGBA-with-
++        # low-alpha-coverage (i.e. already cropped).
++        ;;
++    on)   # explicit --bg-removal
++        ;;
++    off)  # explicit --no-bg-removal
++        ;;
++esac
++```
+ 
+-- New script `scripts/rembg_preprocess.py` — a thin Python wrapper
+-  around the `rembg` library. Takes `--input PATH --output PATH
+-  [--alpha-threshold 200] [--model u2net|isnet-general-use]`.
+-  Writes a 4-channel PNG with the background removed. Emits a small
+-  sidecar JSON `<input>.rembg.json` with `{"model": ..., "alpha_mean":
+-  ..., "background_removed": true, "duration_seconds": ...}`.
+-- New helper `process_input_image` in `_pipeline_lib.sh` that:
+-  1. Checks if the input is already RGBA with a low-coverage alpha
+-     channel (already cropped); if so, skips.
+-  2. Otherwise runs `rembg_preprocess.py`, writes to
+-     `$ASSETS_ROOT/concept/<basename>_nobg.png`, updates `INPUT` to
+-     the new path.
+-- New `generate.sh` flag: `--skip-bg-removal` (or
+-  `--no-bg-removal`) for users who pre-cropped their input.
+-- New `.asset-pipeline.json` field `defaults.bg_removal` (boolean,
+-  default true). Read via `config_default bg_removal true`.
+-- New per-machine toggle in `~/3d-pipeline/.config`:
+-  `bg_removal_default = true|false`. Read via `read_pipeline_config`.
++Detection logic for `auto`:
+ 
+-The rembg call lives in a dedicated venv (`~/3d-pipeline/rembg-env/`)
+-to keep its torch dependency off the mflux venv. The setup guides
+-gain a small new install step (~6 lines).
++- Skip rembg if input is RGBA with alpha coverage < 80% (already cropped).
++- Skip rembg if input is grayscale (probably a sketch / line art).
++- Skip rembg if input.background_uniformity score > 0.85 (probably
++  already a clean studio image).
++- Run rembg otherwise.
+ 
++Sanity check after rembg:
++
++- Compute foreground coverage on the result (alpha mean).
++- If `foreground_coverage < 0.05`, rembg likely destroyed the subject.
++  Fall back to the original input. Log `preprocessing.bg_removal.fallback="subject_lost"`.
++- If `foreground_coverage > 0.95`, rembg didn't actually remove
++  anything. Log `preprocessing.bg_removal.applied=false, reason="nothing_to_remove"`.
++
++`generate.sh` flag: `--bg-removal {auto,on,off}` (default `auto`).
++
++New `.asset-pipeline.json` field `defaults.bg_removal_mode` (default
++`auto`).
++
++Output path: rembg writes to `$ASSETS_ROOT/concept/<asset_name>_nobg.png`
++(under ASSETS_ROOT, not next to the input — addresses codex P1 on
++sidecar locations).
++
+ ### Dependencies
+ 
+-- `rembg[cpu]` (PyPI) — MIT. Pure-CPU build on Apple Silicon is
+-  fast enough (< 2 s for a 1024×1024 image).
+-- `u2net.onnx` model (Apache 2.0) — bucket `commercial_safe`.
+-- `isnet-general-use.onnx` (Apache 2.0) — bucket `commercial_safe`.
+-  Slightly higher quality; default to u2net for speed, expose isnet
+-  via flag.
+-- Model cache: `~/3d-pipeline/models/rembg/` (parallel to existing
+-  caches). Rembg respects `U2NET_HOME` env var.
++- `rembg[cpu]` (PyPI) — MIT — `commercial_safe`
++- `u2net.onnx` (Apache 2.0) — `commercial_safe` (default)
++- `isnet-general-use.onnx` (Apache 2.0) — `commercial_safe` (better,
++  slower; opt-in)
++- Lives in `pipeline-tools-env` (shared with items 2/3/6/8/13/14)
++- Model cache: `~/3d-pipeline/models/rembg/` (env var `U2NET_HOME`)
+ 
+-License-bucket addition to `_pipeline_lib.sh::license_bucket_for_model`:
+-no new bucket needed; `rembg_u2net` → `commercial_safe`.
++License-bucket addition: `rembg_u2net` → `commercial_safe`.
+ 
+ ### Hardware tier
+ 
+-Both. CPU-only build is fast enough on the laptop tier. Studio tier
+-can use the same code path; no benefit to a different backend.
++Both. CPU-only build is < 2 s on a 1024×1024 image on either tier.
+ 
+ ### Manifest schema changes
+ 
+-In manifest v3 `generation` block, add:
++Lives under `preprocessing.bg_removal` in the per-asset meta.json
++(see cross-cutting principle 2):
+ 
+ ```json
+ "preprocessing": {
+   "bg_removal": {
+     "applied": true,
++    "mode": "auto",
++    "trigger": "non_uniform_background",
+     "model": "u2net",
+     "alpha_mean": 0.42,
++    "fallback": null,
+     "duration_seconds": 1.3
+   }
+ }
+ ```
+ 
+-`update_manifest.py` gains a `--bg-removal-json` arg that forwards
+-the rembg sidecar JSON if present.
++`update_manifest.py` merges via `--meta-json PATH`.
+ 
+ ### User-facing output
+ 
+-`generate.sh` prints (under non-`--json`):
++```
++[pipeline] Background removal: auto mode, ran u2net (1.3s)
++[pipeline]   Subject covers 42% of the frame.
++```
+ 
++When skipped:
++
+ ```
+-[pipeline] Background removal: u2net (1.3s) → assets/concept/dragon_nobg.png
+-[pipeline] alpha_mean=0.42 (foreground coverage ~42%)
++[pipeline] Background removal: skipped (image is already cropped)
+ ```
+ 
+-Under `--json`, the result JSON gains a `preprocessing.bg_removal`
+-object mirroring the manifest schema above.
++When fallback:
+ 
+-Skill change (in `skill/SKILL.md` Flow 2):
++```
++[pipeline] Background removal: result discarded (subject was lost)
++[pipeline]   Used the original image instead.
++```
+ 
+-> Background removal now runs by default on every image-to-3D
+-> generation. If a user has already cropped the subject onto
+-> transparent or pure-white background, mention they can skip with
+-> `--no-bg-removal`. If `bg_removal_default=false` is set in their
+-> `~/3d-pipeline/.config`, they have opted out globally — you can
+-> re-enable per-run with `--bg-removal` (override of override).
++Skill change in Flow 2: same as v1 but mention the `auto` mode
++explicitly and tell the user when to override (e.g. "this is a sketch,
++not a photo — pass `--no-bg-removal`").
+ 
+ ### Failure modes
+ 
+-- **Rembg not installed:** print clear install hint and run the
+-  generator on the raw image (don't block). Set
+-  `preprocessing.bg_removal.applied=false`,
+-  `error="not_installed"`.
+-- **Rembg run fails (out of memory, corrupt input):** same fallback.
+-  Log to stderr; continue.
+-- **Image already has alpha channel:** detect via Pillow, skip rembg
+-  if alpha coverage < 80% (already cropped). Set
+-  `preprocessing.bg_removal.applied=false`, `reason="already_cropped"`.
+-- **Result has near-zero foreground (subject not detected):** if
+-  `alpha_mean < 0.05`, warn and proceed with the original image.
++Per the cross-cutting "warn, don't block" rule:
+ 
++- Rembg not installed → log + use original image.
++- Rembg crash → log + use original image.
++- Subject lost (foreground < 5%) → fall back to original (already in
++  the approach).
++- ONNX model not downloaded on first run → emit a clear "first run:
++  downloading u2net (~170 MB)…" message via item 10's progress mechanism.
++
+ ### Test strategy
+ 
+-End-to-end test:
+-```bash
+-concept.sh "ornate treasure chest" --json | jq -r '.outputs[0]' > /tmp/c.png
+-generate.sh -i /tmp/c.png --json | jq '.preprocessing.bg_removal'
+-# Expect: applied=true, alpha_mean between 0.2 and 0.7
+-```
++- Clean studio image → expect `applied=false, reason="already_cropped"` or
++  `reason="nothing_to_remove"`.
++- Photo with cluttered background → expect `applied=true, alpha_mean ∈ [0.2, 0.7]`.
++- Grayscale sketch → expect `applied=false, reason="grayscale"`.
++- 1024×1024 of pure black → expect `applied=true` followed by
++  `fallback="subject_lost"`.
+ 
+-Smoke test using a checked-in fixture with an obvious background
+-(e.g. studio-lit object in front of a textured wall) and verify the
+-output mesh has noticeably less "background bleed" than the baseline.
+-
+ ### Effort
+ 
+ **M.** Most work is the venv setup + setup-guide HTML embeds + the
+-config plumbing. The rembg call itself is ~30 lines of Python.
++auto-detection plumbing + the sanity checks.
+ 
+ ---
+ 
+-## 2. Watertight check with human-readable report
++## 2. Watertight + scale sanity check
+ 
+ ### Problem
+ 
+-`clean_asset.py` runs five hygiene passes (dedupe, normals, delete
+-loose, fill holes, decimate) but never validates that the resulting
+-mesh is actually watertight. `prepare_for_print.py` enables the
+-Blender 3D Print Toolbox when available but never captures
+-`is_manifold` / `is_watertight` results into its sidecar JSON. The
+-user has no signal that their asset is print- or production-ready
+-until they try to slice it (at which point the slicer's error
+-messages are cryptic).
++`clean_asset.py` runs five hygiene passes silently. No watertight
++check; no scale validation. Users don't learn about problems until
++they slice or import.
+ 
+-The manifest tracks polycount but not watertightness. Non-watertight
+-GLBs sometimes still print fine after slicer auto-repair; sometimes
+-they catastrophically fail mid-print. The pipeline should at least
+-tell the user which they're dealing with.
++**MMR-noted gap (gemini P2):** AI generators sometimes produce
++assets at the wrong scale entirely — microscopic (0.01 mm bounding
++box) or massive (5,000 mm). Currently undetected.
+ 
+ ### Approach
+ 
+-Two scripts touched:
++Two scripts touched.
+ 
+-**`scripts/clean_asset.py`** — add a final post-pass after export:
++**`scripts/clean_asset.py`** — after the existing 6-pass cleanup and
++export, invoke a separate check via the `pipeline-tools-env` venv:
+ 
+-1. Re-open the exported GLB via `trimesh.load(output_path,
+-   force='mesh')` (avoids re-running expensive Blender ops).
+-2. Compute:
+-   - `is_watertight` (`trimesh.Trimesh.is_watertight`)
+-   - `is_winding_consistent`
+-   - `boundary_edges` count (`mesh.edges_unique` minus interior)
+-   - `hole_count` (connected components of boundary edges)
+-   - `polycount`, `vertex_count`, `bounding_box_mm`
+-3. Write sidecar `<output>.clean_meta.json`:
+-   ```json
+-   {
+-     "manifold": {
+-       "is_watertight": true,
+-       "is_winding_consistent": true,
+-       "boundary_edges": 0,
+-       "hole_count": 0
+-     },
+-     "polycount": 2987,
+-     "vertex_count": 1543,
+-     "bounding_box_normalized": [1.0, 0.62, 0.43]
+-   }
+-   ```
++```python
++# Called via subprocess from generate.sh, not from inside Blender's Python.
++# This avoids fragile Blender-version-specific trimesh installs.
++import trimesh
++mesh = trimesh.load(output_path, force='mesh')
++meta = {
++    "manifold": {
++        "is_watertight": bool(mesh.is_watertight),
++        "is_winding_consistent": bool(mesh.is_winding_consistent),
++        "boundary_edges": int(...),
++        "hole_count": int(...),
++    },
++    "scale": {
++        "longest_dim_normalized": float(max(mesh.extents)),
++        "in_sane_range": bool(0.001 < max(mesh.extents) < 1000.0),
++    },
++    "polycount": int(len(mesh.faces)),
++}
++# Merge into <output>.meta.json via meta_helper.py
++```
+ 
+-`generate.sh` reads the sidecar and surfaces the data in its `--json`
+-result under a new `quality` block:
++Scale sanity at the clean stage uses normalised units (the cleaned
++GLB is normalised so longest dim ≈ 1.0). The check confirms that
++normalisation worked. Print stage (next paragraph) checks real-world
++mm.
+ 
+-```json
+-"quality": {
+-  "manifold": {
+-    "is_watertight": true,
+-    "hole_count": 0
+-  },
+-  "polycount_actual": 2987
++**`scripts/prepare_for_print.py`** — extend `write_meta()` similarly,
++but the scale check is in mm:
++
++```python
++"scale": {
++    "longest_dim_mm": dims_mm[max_axis_index],
++    "in_sane_range": 1.0 < longest_dim_mm < 1000.0
+ }
+ ```
+ 
+-**`scripts/prepare_for_print.py`** — extend `write_meta()` to add a
+-`manifold` block using the same trimesh check, post-STL-export. STL
+-is converted back to a mesh for the check; trimesh handles binary STL
+-natively.
++The 1 mm / 1000 mm bounds reject anything that's almost certainly
++a mistake. The existing 270 mm Snapmaker U1 check is unchanged
++(it still blocks export when exceeded without `--allow-oversize`).
+ 
+-The trimesh call is wrapped in a try/except; on any exception, the
+-sidecar still writes with `manifold.error=<message>` rather than
+-omitting the field entirely. This makes the absence of a value
+-discoverable instead of ambiguous.
++Both scripts use the merge helper from cross-cutting principle 2.
+ 
+ ### Dependencies
+ 
+-- `trimesh` (PyPI) — MIT — `commercial_safe`.
+-- `numpy` (already present transitively) — BSD — `commercial_safe`.
+-- Lives in the existing pipeline venv (or a new `mesh-tools-env` if
+-  trimesh conflicts with anything). Recommend mesh-tools-env to keep
+-  Blender's Python environment untouched.
++- `trimesh` — MIT — `commercial_safe` (in `pipeline-tools-env`)
++- `numpy` — BSD — `commercial_safe` (already transitively)
+ 
+ ### Hardware tier
+ 
+-Both. trimesh's watertight check is O(faces) — milliseconds for any
+-mesh small enough to be in this pipeline.
++Both. trimesh check is sub-second up to ~250 k polys.
+ 
+ ### Manifest schema changes
+ 
+-Manifest v3 `print` block already has `polygons`, `vertices`,
+-`fits_snapmaker_u1`. Add:
++Under `quality.manifold` and `quality.scale` in the per-asset
++meta.json. Merged into the manifest entry's `quality` block by
++`update_manifest.py --meta-json PATH`.
+ 
+-```json
+-"quality": {
+-  "manifold": {
+-    "is_watertight": true,
+-    "is_winding_consistent": true,
+-    "boundary_edges": 0,
+-    "hole_count": 0
+-  }
+-}
+-```
+-
+-For non-print outputs (clean GLB), the same `quality.manifold` block
+-lives at the top level of the manifest entry, written by
+-`update_manifest.py` via a new `--clean-meta-json PATH` arg.
+-
+ ### User-facing output
+ 
+-`generate.sh` (after cleanup):
++Using the translation map:
+ 
+ ```
+-[pipeline] Mesh: watertight ✓  (0 holes, 2,987 polys)
++[pipeline] Mesh: fully sealed (good for printing) — 2,987 polygons
+ ```
+ 
+-Or, when not watertight:
++Or:
+ 
+ ```
+-[pipeline] Mesh: 3 holes remain (boundary edges: 47)
+-[pipeline]   → asset may slice with errors. Consider re-generating or
+-[pipeline]     opening in Blender → Mesh → Print → Make Manifold.
++[pipeline] Mesh: 3 small gaps in the surface (may still print)
++[pipeline]   Tip: Snapmaker Orca's Auto Repair often fixes these.
+ ```
+ 
+-`print.sh` (after prepare_for_print):
++Scale warning:
+ 
+ ```
+-[pipeline] Print mesh: watertight ✓
++[pipeline] Scale: ⚠ asset is unusually small (longest dimension 0.003 of normalised unit)
++[pipeline]   This is usually a generator bug. Try a different seed or generator.
+ ```
+ 
+-Or:
++Skill change in Flow 2 + Flow 4: relay the translated message, not
++the raw terms. Don't say "non-manifold" or "boundary edge".
+ 
+-```
+-[pipeline] Print mesh: NOT watertight — 2 holes
+-[pipeline]   Snapmaker Orca's Auto Repair may handle this; try slicing first.
+-[pipeline]   If slicing fails, re-run with a higher polycount or different generator.
+-```
+-
+-Skill change in `skill/SKILL.md` Flows 2 and 4:
+-
+-> After generation, the `--json` output now includes `quality.manifold`.
+-> If `is_watertight=false`, mention the hole count to the user and
+-> offer to re-generate (sometimes a different seed produces a clean
+-> mesh) or to open it in Blender for manual repair. Don't block
+-> handoff to the slicer; Orca's Auto Repair handles many cases.
+-
+ ### Failure modes
+ 
+-- **trimesh import fails:** sidecar omits `manifold` block; wrapper
+-  prints `[pipeline] (watertight check unavailable — trimesh not
+-  installed)`. Pipeline continues.
+-- **GLB unreadable by trimesh (corrupt export):** sidecar writes
+-  `manifold.error="load_failed: <reason>"`. Pipeline continues with
+-  warning.
+-- **Slow on very dense meshes (> 100 k polys):** trimesh is < 1 s up
+-  to ~250 k. Above that, gate behind a `--skip-quality-check` flag.
+-  Document the threshold.
++- trimesh import fails → meta omits `quality.manifold`; wrapper
++  prints "(quality check unavailable — pipeline-tools-env missing)".
++- GLB unreadable → meta writes `quality.manifold.error="load_failed: ..."`.
++- Mesh > 250 k polys → check still completes but warns; gate behind
++  `--skip-quality-check` if it becomes a bottleneck.
+ 
+ ### Test strategy
+ 
+-End-to-end:
+-```bash
+-concept.sh "treasure chest" --json | jq -r '.outputs[0]' > /tmp/c.png
+-generate.sh -i /tmp/c.png --json | jq '.quality.manifold'
+-# Expect: is_watertight=true on a well-formed SF3D output
+-```
++- Generate a known-good asset → expect `is_watertight=true,
++  scale.in_sane_range=true`.
++- Generate against a deliberately broken input → expect
++  `is_watertight=false, hole_count > 0`.
++- Hand-corrupt a clean GLB (delete a face in Blender) → re-run
++  check → expect `is_watertight=false, hole_count=1`.
+ 
+-Negative test: intentionally damage the cleaned GLB (delete a face
+-in Blender), re-run trimesh check, expect `is_watertight=false` and
+-`hole_count=1`.
+-
+ ### Effort
+ 
+-**S.** trimesh integration is ~50 lines. Sidecar pattern already
+-exists. The skill text and tests are the longer part.
++**S.** trimesh integration is ~50 lines; merge helper handles the
++sidecar plumbing.
+ 
+ ---
+ 
+@@ -383,197 +493,168 @@
+ 
+ ### Problem
+ 
+-SF3D ships PBR textures (albedo + roughness + metallic + normal) on
+-every output. Most outputs are good, but a non-trivial minority are
+-degenerate:
++SF3D + SPAR3D ship PBR textures but sometimes produce degenerate
++ones: pure-black albedo, flat roughness/metallic, zero-magnitude
++normal maps. TRELLIS-on-Mac emits vertex colours only.
+ 
+-- Pure-black albedo (model defaulted; mesh is colourless)
+-- Roughness or metallic set to a flat constant (model didn't infer
+-  material properties; gave a flat 1.0 or 0.0)
+-- Normal map with near-zero magnitude (no detail; mesh will look
+-  flat-shaded in-engine)
+-- White / 255-everywhere maps (uninitialised buffer; never written)
++No detection today. Users discover broken textures during engine
++import.
+ 
+-SPAR3D similarly emits sometimes-degenerate outputs. TRELLIS on Mac
+-emits vertex colors only (no PBR textures), so this check is N/A for
+-that generator.
+-
+-Currently the pipeline has no signal that a texture is degenerate.
+-The user only finds out when their engine import looks wrong.
+-
+ ### Approach
+ 
+-New script `scripts/texture_quality_check.py` — runs after
+-`clean_asset.py`, before engine staging. Reads the embedded textures
+-from the cleaned GLB via Pillow (trimesh exposes them as PIL
+-images on `mesh.visual.material`). Computes:
++New script `scripts/texture_quality_check.py` (in `pipeline-tools-env`).
++Runs after `clean_asset.py`, before engine staging. Uses trimesh
++to extract embedded PIL images from the cleaned GLB.
+ 
+-| Map | Check | Threshold |
++Checks per map:
++
++| Map | Check | Issue tag |
+ |---|---|---|
+-| Albedo (baseColor) | mean luminance, stdev | mean < 8/255 → "flat-black"; stdev < 5 → "flat-color" |
+-| Roughness | mean, stdev | stdev < 2 → "uniform-roughness" |
+-| Metallic | mean, stdev | stdev < 2 → "uniform-metallic" |
+-| Normal | XY magnitude (offset from 128) | mean magnitude < 8/255 → "low-detail-normal" |
+-| Any map | all-white (mean > 250 and stdev < 2) | "uninitialised" |
++| Albedo | mean luminance < 8/255 | `flat-black-albedo` |
++| Albedo | stdev < 5 across image | `flat-color-albedo` |
++| Roughness | stdev < 2 across image | `uniform-roughness` |
++| Metallic | stdev < 2 across image | `uniform-metallic` |
++| Normal | XY magnitude (offset from 128) mean < 8/255 | `low-detail-normal` |
++| Any map | mean > 250 and stdev < 2 | `uninitialised` |
+ 
+-Writes sidecar `<clean_path>.texture_meta.json`:
++Writes to the per-asset meta.json under `quality.textures`:
+ 
+ ```json
+-{
+-  "textures_present": ["albedo", "roughness", "metallic", "normal"],
+-  "issues": ["flat-black-albedo"],
+-  "stats": {
+-    "albedo": {"mean": 4.2, "stdev": 1.8, "luminance": 4.1},
+-    "roughness": {"mean": 192.0, "stdev": 1.2},
+-    "metallic": {"mean": 8.0, "stdev": 0.5},
+-    "normal": {"xy_magnitude_mean": 14.2}
++"quality": {
++  "textures": {
++    "textures_present": ["albedo", "roughness", "metallic", "normal"],
++    "issues": ["flat-black-albedo"],
++    "stats": {
++      "albedo": {"mean": 4.2, "stdev": 1.8, "luminance": 4.1},
++      "roughness": {"mean": 192.0, "stdev": 1.2},
++      "metallic": {"mean": 8.0, "stdev": 0.5},
++      "normal": {"xy_magnitude_mean": 14.2}
++    }
+   }
+ }
+ ```
+ 
+-`generate.sh` reads the sidecar; surfaces `issues` array in `--json`
+-result and stderr.
+-
+ ### Dependencies
+ 
+-- `trimesh` + `numpy` + `Pillow` — already in scope from item 2.
+-  No new deps.
+-- Lives in the same `mesh-tools-env` venv as item 2.
++`trimesh`, `Pillow`, `numpy` — all in `pipeline-tools-env`. No
++new deps over item 2.
+ 
+ ### Hardware tier
+ 
+-Both. Texture sampling is sub-second on any sane texture size.
++Both. Sub-second on any texture size used by the pipeline.
+ 
+ ### Manifest schema changes
+ 
+-In `generation` block:
++Under `quality.textures` in the per-asset meta.json. Merged into
++manifest via `--meta-json`.
+ 
+-```json
+-"quality": {
+-  "textures": {
+-    "issues": ["flat-black-albedo"],
+-    "albedo_mean": 4.2,
+-    "roughness_stdev": 1.2,
+-    "metallic_stdev": 0.5,
+-    "normal_xy_mean": 14.2
+-  }
+-}
+-```
+-
+-`update_manifest.py` gains `--texture-meta-json PATH`.
+-
+ ### User-facing output
+ 
+-When all textures pass:
++When clean:
+ 
+ ```
+-[pipeline] Textures: 4 maps, all within quality bounds
++[pipeline] Textures: 4 maps, all look healthy
+ ```
+ 
+-When one or more issues:
++When issues:
+ 
+ ```
+-[pipeline] Textures: ⚠ flat-black albedo detected
+-[pipeline]   The mesh has no colour data. Likely causes:
+-[pipeline]     • generator failed to extract material from the input image
+-[pipeline]     • input image is itself near-black
+-[pipeline]   Try a different generator (e.g. SPAR3D) or improve input lighting.
++[pipeline] Textures: ⚠ the colour map is almost entirely black
++[pipeline]   This usually means the generator couldn't read the input image's
++[pipeline]   colours. Try a different generator (SPAR3D) or a better-lit input.
+ ```
+ 
+-Skill change in Flow 2:
++Each issue tag has a fixed user-facing translation in the skill.
+ 
+-> If `quality.textures.issues` is non-empty, mention the specific
+-> issue (flat-black albedo, uniform roughness, low-detail normal)
+-> and offer to re-generate. For `flat-black-albedo`, suggest the
+-> user check that the input image isn't mostly-black; for
+-> `uniform-roughness/metallic`, suggest trying a different generator
+-> as the issue is generator-specific.
+-
+ ### Failure modes
+ 
+-- **GLB has no embedded textures:** for TRELLIS-on-Mac outputs.
+-  Skip the check; write sidecar with
+-  `textures_present=[]`, `issues=["no_textures"]` (informational,
+-  not an error). Skill should mention vertex-colour mode is in
+-  effect.
+-- **Pillow can't decode a texture (rare):** record per-map
+-  `error="decode_failed"` instead of omitting.
+-- **All textures uninitialised:** this is a real failure mode (the
+-  generator silently failed). Surface as `issues=["all_uninitialised"]`
+-  and the skill should strongly recommend re-running.
++- GLB has no embedded textures (TRELLIS on Mac) → `textures_present=[]`,
++  `issues=["no_textures"]`. Informational; the skill mentions
++  vertex-colour mode is in effect.
++- Pillow can't decode a specific map → per-map `error="decode_failed"`.
++- All maps uninitialised → strong signal of generator failure; skill
++  should recommend re-run.
+ 
+ ### Test strategy
+ 
+-Generate a known-good asset, expect `issues=[]`.
++- Generate a known-good SF3D asset → expect `issues=[]`.
++- Generate against a deliberately-black input → expect `issues
++  contains "flat-black-albedo"`.
++- Run against a TRELLIS output → expect `issues=["no_textures"]`.
+ 
+-Generate against a deliberately-black input image (1024×1024 of
+-RGB(0,0,0)), expect `issues=["flat-black-albedo"]`.
+-
+-Run against a TRELLIS output, expect
+-`issues=["no_textures"]` and graceful handling.
+-
+ ### Effort
+ 
+-**S.** Texture sampling via Pillow is straightforward; thresholds
+-are the trickiest part and may need tuning against real outputs.
++**S.** ~80 lines of Python; thresholds may need calibration after
++real-world runs.
+ 
+ ---
+ 
+-## 4. Input image quality check
++## 4. Input image quality check + format normalisation
+ 
+ ### Problem
+ 
+-`generate.sh` accepts any image without validating that it's
+-suitable for image-to-3D conversion. Real failure modes seen:
++`generate.sh` accepts any image without validating suitability.
++Low-resolution, extreme aspect ratios, watermarks, and multi-subject
++images all degrade output silently.
+ 
+-- Resolution < 512 px → SF3D output is mushy
+-- Extreme aspect ratio (e.g. 1:3) → mesh is distorted
+-- Complex non-uniform background → mesh has background bleed
+-  (already addressed by item 1, but user should still be warned
+-  if they pass `--no-bg-removal`)
+-- Watermarks / text overlays → generator faithfully reproduces them
+-  as mesh detail
+-- Multi-subject images → generator picks one, often badly
++**MMR-noted gap (codex P1):** The v1 spec promised PNG/JPG/WEBP
++support but never normalised WebP / multi-frame inputs to a static
++PNG. SF3D / SPAR3D / TRELLIS document PNG/JPG only; passing WebP
++through silently risks downstream failure inside the generator.
+ 
+-The wrapper checks "file exists" and that's it.
+-
+ ### Approach
+ 
+-New helper in `scripts/_pipeline_lib.sh`:
+-`check_input_image_quality "$INPUT"`. Called at the top of
+-`generate.sh` after the existence check but before background
+-removal.
++New helper `check_and_normalize_input` in `_pipeline_lib.sh`, called
++at the top of `generate.sh` after the existence check but before
++background removal.
+ 
+-Checks performed:
++**Checks (read-only):**
+ 
+ | Check | Trigger | Action |
+ |---|---|---|
+ | Resolution | width OR height < 512 | warn |
+-| Resolution | < 384 px | warn loudly + suggest upscale-first |
++| Resolution | < 384 px | warn loudly; suggest upscale-first |
+ | Aspect ratio | > 2:1 or < 1:2 | warn |
+-| Background uniformity | (only if `--no-bg-removal`) edge pixel stdev < threshold | informational |
+-| File size | < 5 KB | warn (probably corrupt) |
+-| Format | not in {png, jpg, jpeg, webp} | error |
++| Background uniformity | edge-pixel stdev < threshold | informational; consumed by item 1 |
++| File size | < 5 KB | warn |
++| Format | not in {png, jpg, jpeg, webp, gif} | error |
+ 
+-Implementation uses Pillow only (already a dep). Single image open
+-+ a few np.array stats. Sub-second.
++**Normalisation (writes a converted file):**
+ 
+-Writes sidecar `<input>.input_meta.json`:
++- WebP → PNG, single-frame: convert via Pillow, write to
++  `$ASSETS_ROOT/concept/<basename>_normalized.png`. Record
++  conversion in meta.json.
++- Animated GIF / multi-frame WebP → first frame to PNG, warn that
++  remaining frames are ignored.
++- JPEG → kept as JPEG (SF3D accepts it).
++- PNG → kept as PNG.
+ 
++After normalisation, `INPUT` in `generate.sh` points at the
++normalised PNG, not the original. The original path is recorded in
++meta.json.input.original_path.
++
++Writes to per-asset meta.json:
++
+ ```json
+-{
++"input": {
++  "original_path": "/Users/.../downloads/dragon.webp",
++  "normalized_path": "/.../assets/concept/dragon_normalized.png",
++  "format_original": "WEBP",
++  "format_normalized": "PNG",
+   "width": 1024,
+   "height": 1024,
+   "aspect_ratio": 1.0,
+-  "format": "PNG",
+-  "mode": "RGBA",
++  "background_uniformity": 0.72,
+   "issues": []
+ }
+ ```
+ 
++Sidecar location: under `$ASSETS_ROOT/concept/`, never next to the
++user-supplied input (codex P1).
++
+ ### Dependencies
+ 
+-None new. Pillow already present.
++Pillow only (already present). No new deps.
+ 
+ ### Hardware tier
+ 
+@@ -581,178 +662,164 @@
+ 
+ ### Manifest schema changes
+ 
+-In `generation` block:
++Under `input` in the per-asset meta.json. Merged via `--meta-json`.
+ 
+-```json
+-"input": {
+-  "path": "...",
+-  "width": 1024,
+-  "height": 1024,
+-  "issues": []
+-}
+-```
+-
+-`update_manifest.py` gains `--input-meta-json PATH`.
+-
+ ### User-facing output
+ 
+ ```
+ [pipeline] Input: 1024×1024 PNG (RGBA, 187 KB)
+ ```
+ 
+-When issues:
++With normalisation:
+ 
+ ```
++[pipeline] Input: 1024×1024 WebP → converted to PNG (one-time, 0.1s)
++```
++
++With issues:
++
++```
+ [pipeline] Input: 320×240 JPEG ⚠
+ [pipeline]   Below recommended minimum (512px). Output quality will suffer.
+-[pipeline]   Consider running texture.sh --mode upscale first, then re-generate.
++[pipeline]   Consider running texture.sh --mode upscale --scale 2 first.
+ ```
+ 
+-Skill change in Flow 2:
++Skill change in Flow 2: relay quality issues. Don't block; let the
++user decide.
+ 
+-> The wrapper now reports input image quality issues as its first
+-> action. If the user's image is below 512 px, suggest they upscale
+-> it via `texture.sh --mode upscale --scale 2` first. Never proceed
+-> silently with a clearly-bad input.
+-
+ ### Failure modes
+ 
+-- **Pillow can't open the image:** wrapper exits 1 with the Pillow
+-  error message (this is a real fault, not a soft warning).
+-- **Image is animated GIF / multi-frame:** take the first frame,
+-  warn that subsequent frames are ignored.
++- Pillow can't open → wrapper exits 1 (real fault).
++- Animated GIF → first-frame extraction with warning.
++- Unsupported format → wrapper exits 1 with the list of supported
++  formats.
+ 
+ ### Test strategy
+ 
+-Pass a 320×240 PNG → expect `issues=["low_resolution"]` and the
+-warning message above.
++- 320×240 PNG → expect `issues=["low_resolution"]`.
++- WebP → expect normalisation + `format_original="WEBP"`.
++- Animated GIF → expect first-frame extraction + warning.
++- Known-good 1024×1024 PNG → expect `issues=[]`.
+ 
+-Pass an animated GIF → expect first-frame extraction and a warning.
+-
+-Pass a known-good 1024×1024 PNG → expect `issues=[]`.
+-
+ ### Effort
+ 
+-**S.** ~80 lines of Python, mostly in a single helper function.
++**S.** ~120 lines now (was ~80 in v1) — normalisation adds the bulk.
+ 
+ ---
+ 
+-## 5. Turntable preview render
++## 5. Turntable preview render (hero PNG default, GIF opt-in on laptop)
+ 
+ ### Problem
+ 
+-After 3D generation completes, the user has a clean GLB but no
+-quick way to see what it looks like. Opening Blender / a model
+-viewer takes them out of Claude Code. The skill currently tells
+-them the path; they then have to context-switch.
++After 3D generation, the user has a clean GLB but no quick preview.
++The skill tells them the path; they then context-switch to a viewer.
+ 
+-Leading commercial tools (Meshy, Luma Genie, Tripo) all surface a
+-turntable or interactive preview in the chat / browser. The 2026
+-best-practice survey calls preview-before-full-job a defining
+-non-technical-UX feature.
++Leading commercial tools all show a preview before the full job
++completes.
+ 
++**MMR-noted issue (codex P1):** v1 made the 12-frame GIF render
++default-on at 3–6 s on laptop. That violates the cross-cutting
++"default-on must be < 1 s and never wrong" rule, increases every
++generation's latency, and is noisy in queue/headless runs.
++
+ ### Approach
+ 
+-New script `scripts/turntable_render.py` — invoked via headless
+-Blender after `clean_asset.py`, before engine staging.
++Three render modes:
+ 
+-```bash
+-$BLENDER --background --python turntable_render.py -- \
+-    INPUT.glb OUTPUT.gif [--frames 12] [--resolution 512] [--samples 32]
+-```
++| Mode | Output | Cost | Default by tier |
++|---|---|---|---|
++| `none` | nothing | 0 s | (never the default) |
++| `png` | single hero render (1024×1024, 32 samples, Eevee) | ~1 s laptop / < 0.5 s studio | **laptop default**, studio default |
++| `gif` | hero PNG + 12-frame 360° turntable GIF (512×512) | ~3–6 s laptop / ~1.5 s studio | **studio default**, laptop opt-in |
+ 
+-Behaviour:
++Hero PNG is cheap and never wrong (a single render is bounded);
++ships default-on across both tiers.
+ 
+-1. Import the GLB
+-2. Add a three-point light setup (key + fill + rim) at a sane
+-   intensity. Use Eevee for speed (not Cycles).
+-3. Position the camera at a 30° elevation, distance auto-fit to
+-   the mesh bounds (1.7× longest axis).
+-4. Render 12 frames rotating around Z axis (or Y, matching the
+-   mesh's up axis).
+-5. Compose into an animated GIF using Pillow
+-   (`PIL.Image.save(..., save_all=True, append_images=...)`).
+-6. Save to `$ASSETS_ROOT/preview/<name>.gif`.
++GIF adds 12× the render cost; default-on only on studio.
+ 
+-Add to `_pipeline_lib.sh::resolve_project_context`:
+-`mkdir -p "$ASSETS_ROOT/preview"`.
++`scripts/turntable_render.py` (Blender headless) implements both
++modes via a `--mode {png,gif}` flag. Writes to:
+ 
+-Wrapper integration: `generate.sh` runs the turntable render after
+-cleanup if `RENDER_PREVIEW=1` (default on). Flag
+-`--no-preview` disables.
++- `$ASSETS_ROOT/preview/<name>.png` (hero)
++- `$ASSETS_ROOT/preview/<name>.gif` (turntable, if requested)
+ 
+-The render is ~3–6 s on a laptop tier M-series, ~1–2 s on studio.
+-Acceptable. If users find it slow, the skill can mention `--no-preview`.
++`generate.sh` flags:
+ 
+-Bonus: also render a single static "hero" PNG (one frame, 1024×1024,
+-higher samples) at the same time and write to
+-`$ASSETS_ROOT/preview/<name>.png`. Useful when the user wants to
+-share a screenshot or include it in docs.
++- `--preview {none,png,gif}` (default depends on `hardware_tier`)
++- `--no-preview` (alias for `--preview none`)
+ 
++Add `mkdir -p "$ASSETS_ROOT/preview"` to
++`_pipeline_lib.sh::resolve_project_context`.
++
++In `--json` queue mode (i.e. `queue_worker.py` invocations), the
++worker overrides preview default to `none` — queue jobs have no
++interactive viewer.
++
+ ### Dependencies
+ 
+-- Blender (already present)
+-- Pillow (already present for the GIF assembly)
+-- No new venv
++- Blender (present)
++- Pillow (present, in `pipeline-tools-env`) for GIF assembly
++- No new venvs
+ 
+ ### Hardware tier
+ 
+-Both. Studio is faster but laptop is fine.
++Both, with different defaults (see table above).
+ 
+ ### Manifest schema changes
+ 
+-In `generation` block:
++Under `preview` in the per-asset meta.json:
+ 
+ ```json
+ "preview": {
+-  "gif_path": "/path/to/assets/preview/dragon.gif",
+-  "hero_png_path": "/path/to/assets/preview/dragon.png",
+-  "frames": 12,
+-  "resolution": 512,
+-  "duration_seconds": 3.4
++  "mode": "png",
++  "hero_png_path": "/path/to/preview/dragon.png",
++  "gif_path": null,
++  "frames": 1,
++  "resolution": 1024,
++  "duration_seconds": 1.1
+ }
+ ```
+ 
+ ### User-facing output
+ 
+ ```
+-[pipeline] Preview: rendered 12 frames in 3.4s
+-[pipeline]   GIF:  /path/to/assets/preview/dragon.gif
+-[pipeline]   PNG:  /path/to/assets/preview/dragon.png
++[pipeline] Preview: hero render → /path/to/preview/dragon.png (1.1s)
+ ```
+ 
+-Skill change (Flow 2 + Flow 5):
++GIF mode:
+ 
+-> The wrapper now produces a 12-frame turntable GIF and a hero PNG
+-> in `<assets>/preview/`. Show the user the absolute path to the
+-> hero PNG so they can view it. If they're chatting in a UI that
+-> renders images, the PNG is what to surface (not the GIF).
++```
++[pipeline] Preview: 12-frame turntable → /path/to/preview/dragon.gif (3.4s)
++[pipeline]   Hero PNG: /path/to/preview/dragon.png
++```
+ 
++Skill change in Flow 2 + Flow 5:
++
++> The wrapper now produces a hero PNG by default. Surface the
++> absolute path to the user. On studio tier, a turntable GIF is
++> also produced. Don't tell the user to run an extra command;
++> let them know it already exists.
++
+ ### Failure modes
+ 
+-- **Blender render fails (driver issue, OOM):** wrapper continues
+-  without the preview. Sidecar JSON writes
+-  `preview.error="<message>"`, the wrapper prints a stderr warning.
+-- **GIF assembly fails (Pillow):** fall back to writing only the
+-  static PNG.
+-- **Time exceeds 30 s:** abort the render (Blender subprocess
+-  timeout). Same fallback as above.
++- Blender render fails → meta records error; wrapper continues
++  without the preview.
++- GIF assembly fails → fall back to PNG-only with a warning.
++- Render time exceeds 30 s → abort the subprocess; same fallback.
+ 
+ ### Test strategy
+ 
+-After a known-good generation, expect both files exist and the GIF
+-opens in `open` on macOS.
++- Known-good generation on laptop → expect hero PNG, no GIF.
++- Same on studio → expect both files.
++- `--preview none` → expect neither.
++- Kill the Blender subprocess mid-render → expect graceful
++  continuation.
+ 
+-Run with `--no-preview`, expect both files absent.
+-
+-Stress test: cancel the render (SIGTERM the Blender subprocess), expect
+-graceful continuation.
+-
+ ### Effort
+ 
+-**M.** The Blender Python script itself is ~150 lines (Eevee setup
+-+ light rig + camera framing + render loop). GIF assembly is
+-~20 lines.
++**M.** Blender Python ~150 lines (Eevee setup + light rig + camera +
++render loop) + the mode-switching logic in the wrapper. Slightly
++more work than v1 because of the mode split.
+ 
+ ---
+ 
+@@ -760,64 +827,50 @@
+ 
+ ### Problem
+ 
+-`clean_asset.py` runs five hygiene passes silently. The user gets a
+-cleaned GLB and the polycount. They have no signal about what was
+-wrong with the raw output — was it already clean, or were 50 holes
+-filled? This is information the user values when judging generator
+-quality and deciding whether to re-generate.
++`clean_asset.py` runs five hygiene passes silently. Users don't
++know what was wrong with the raw output. That information is
++valuable for judging generator quality.
+ 
+ ### Approach
+ 
+ Instrument each pass in `clean_asset.py` to count what changed:
+ 
+-| Pass | Count |
++| Pass | Counted |
+ |---|---|
+-| `remove_doubles(0.0001)` | vertices removed (delta in vert count) |
+-| `delete_loose` | loose vertices/edges/faces deleted (delta) |
+-| `fill_holes(sides=6)` | holes filled (count via Blender's edge-boundary count delta) |
++| `remove_doubles(0.0001)` | vertices removed (vertex-count delta) |
++| `delete_loose` | loose elements deleted (delta) |
++| `fill_holes(sides=6)` | holes filled (boundary-edge-count delta) |
+ | `decimate` | polys before / after / ratio |
+-| `normals_make_consistent` | inconsistent-winding faces (Blender doesn't expose this directly; record only whether the op was applied) |
++| `normals_make_consistent` | applied (no count exposed) |
+ 
+-Write to the same sidecar `<output>.clean_meta.json` introduced in
+-item 2:
++Writes under `cleanup` in the per-asset meta.json **via the merge
++helper** (this is the change from v1 that fixes the codex/gemini
++race-condition P1):
+ 
+ ```json
+-{
+-  "cleanup": {
+-    "duplicate_vertices_removed": 47,
+-    "loose_elements_deleted": 3,
+-    "holes_filled": 2,
+-    "decimate": {
+-      "before": 18432,
+-      "after": 2987,
+-      "ratio": 0.162
+-    },
+-    "duration_seconds": 4.2
+-  },
+-  "manifold": { ... },
+-  "polycount": 2987
++"cleanup": {
++  "duplicate_vertices_removed": 47,
++  "loose_elements_deleted": 3,
++  "holes_filled": 2,
++  "decimate": { "before": 18432, "after": 2987, "ratio": 0.162 },
++  "duration_seconds": 4.2
+ }
+ ```
+ 
+-`generate.sh` surfaces a one-line summary:
++The merge helper guarantees this doesn't clobber `quality.manifold`
++or `quality.scale` from item 2 — both passes write to different
++sections of the same file with file-lock-protected merges.
+ 
++`generate.sh` surfaces a translated one-liner:
++
+ ```
+-[pipeline] Cleanup: removed 47 dup verts, filled 2 holes, decimated 18.4k → 3.0k polys
++[pipeline] Cleanup: removed 47 duplicate points, filled 2 small gaps,
++[pipeline]          simplified mesh: 18,400 → 3,000 polygons
+ ```
+ 
+-Skill change in Flow 2:
+-
+-> The cleanup report tells the user what was wrong with the raw
+-> generator output. If `duplicate_vertices_removed > 1000` or
+-> `holes_filled > 5`, the raw mesh was poor quality — mention this
+-> to the user so they know the generator struggled. If the asset
+-> is destined for printing, recommend re-generation; if it's for
+-> a game with the texture covering the geometry, it usually doesn't
+-> matter.
+-
+ ### Dependencies
+ 
+-None new. Pure Blender API.
++None new (pure Blender Python API).
+ 
+ ### Hardware tier
+ 
+@@ -825,728 +878,847 @@
+ 
+ ### Manifest schema changes
+ 
+-In `generation` block:
++Under `cleanup` in per-asset meta.json. Merged via `--meta-json`.
+ 
+-```json
+-"cleanup": { ... as above ... }
+-```
+-
+-`update_manifest.py` already wires through `--clean-meta-json` from item 2.
+-
+ ### User-facing output
+ 
+-See above. Single line under non-`--json`, full block under `--json`.
++See above. Single line under non-`--json`; full block under `--json`.
+ 
+ ### Failure modes
+ 
+-- **Vertex/poly counts unavailable mid-pass:** record `null` for that
+-  field. Don't fail the cleanup.
+-- **Decimate modifier failed (rare):** mesh exports anyway; record
+-  `decimate.error=<message>`.
++- Mid-pass exception → record `null` for that field, continue.
++- Decimate modifier failed → record `decimate.error=<message>`.
+ 
+ ### Test strategy
+ 
+-Generate a known-dirty input (use SPAR3D, which often produces messier
+-meshes), expect `holes_filled > 0` and `duplicate_vertices_removed > 0`.
++- Run against a known-dirty input (SPAR3D output) → expect
++  `holes_filled > 0` or `duplicate_vertices_removed > 0`.
++- Re-clean an already-clean asset → expect all counts ≈ 0.
+ 
+-Generate a known-clean input (a re-clean of an already-clean asset),
+-expect all counts ≈ 0.
+-
+ ### Effort
+ 
+-**S.** Mostly threading deltas through `clean_asset.py`. Sidecar
+-schema already exists from item 2.
++**S.** Mostly threading deltas through `clean_asset.py`. Schema
++already exists from item 2.
+ 
+ ---
+ 
+-# Tier 2 — medium impact
++## 10. Pipeline doctor + cache manager (NEW — Tier 1)
+ 
+-## 7. Hunyuan3D-Paint license review
+-
+ ### Problem
+ 
+-`texture.sh --mode paint` is a deliberate placeholder that fails
+-with `status=error error=needs_license_review` and exits 2.
+-Hunyuan3D-Paint would significantly improve texture quality on
+-existing GLBs (especially TRELLIS outputs that ship vertex colours
+-only). The code path is ready; the gate is the Tencent Hunyuan
+-Community License, which has revenue thresholds and region
+-exclusions that haven't been reviewed against the user's commercial
+-activities.
++**MMR-noted gap (codex P1, gemini P2):** v1 added rembg (~170 MB),
++CLIP ViT-L/14 (~890 MB), and optionally SDXL + IP-Adapter +
++ControlNet (~10 GB). First-run downloads happen lazily, with no
++preflight disk check, no progress UX, no graceful handling of
++partial downloads, no offline behaviour.
+ 
+-This is not a code task. The deliverable is a written license review
+-that either:
++For non-technical users, this means: a generation request triggers
++a multi-GB download with no indication that anything is happening
++beyond a stalled terminal. Or: disk fills mid-download and the
++asset never finishes generating.
+ 
+-- (a) Approves the use case (with documented thresholds + monitoring)
+-- (b) Approves a constrained use case (e.g. non-commercial research
+-  outputs only)
+-- (c) Declines, and the placeholder gets a clearer "permanently
+-  declined" error pointing at the alternative texturing approaches.
++This item makes installation, caching, and runtime checks first-class.
+ 
+-### Approach (process, not code)
++### Approach
+ 
+-1. Identify all current and likely-future commercial uses of the
+-   pipeline (the user lists Grithkin and GripCraft today).
+-2. Walk through the Tencent Hunyuan Community License clauses:
+-   - Revenue threshold (≥ 100 M MAU triggers commercial license requirement)
+-   - Region exclusions
+-   - Attribution requirements
+-   - Derivative-work requirements
+-3. Document the conclusion in `docs/license-review-hunyuan3d-paint.md`
+-   with the decision date, signatory, and conditions.
+-4. Update `_pipeline_lib.sh::license_bucket_for_model` and the
+-   `texture.sh paint` stub:
+-   - If approved: change bucket to `commercial_threshold`, remove
+-     the stub, wire in the actual paint call, ship in v0.3.
+-   - If declined: change stub error message, point at the review doc.
+-   - If conditional: bucket `commercial_threshold` with a wrapper
+-     check (e.g. block if `manifest.commercial=true` and user MAU > X).
++New CLI `scripts/pipeline_doctor.py` invoked as:
+ 
++```bash
++pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}] [--fix] [--json]
++```
++
++Behaviours per check:
++
++- **disk**: scan model cache dirs, report total used and free space
++  remaining on the relevant volumes; warn if free < 5 GB.
++- **models**: enumerate models the pipeline expects, check each is
++  fully downloaded (not a partial), check the sha256 against a known
++  manifest in `scripts/model_manifest.json`. List "missing" /
++  "partial" / "ok" per model.
++- **venvs**: confirm `mflux-env`, `pipeline-tools-env`, optional
++  `comfyui-env` exist with the expected packages installed and at
++  acceptable versions.
++- **wrappers**: spot-check each wrapper's `--help` works (catches
++  recent edits that broke arg parsing).
++- **all**: runs every check.
++
++`--fix` mode:
++
++- Creates missing venvs (calls the relevant setup commands from
++  the setup guides).
++- Downloads missing models with progress bars (uses `tqdm` via the
++  underlying lib's hooks where possible; else a wrapper).
++- Removes partial downloads.
++- Cannot fix disk pressure — only reports it.
++
++New CLI `scripts/pipeline_warmcache.py` (or `pipeline_doctor.py --warm-cache`):
++
++- Pre-downloads every model the pipeline might need.
++- Progress bar per model.
++- Total ~2 GB for Tier 1 (rembg u2net + open_clip ViT-L/14).
++- Recommend running once after install before first asset job.
++
++Cache locations (all under `~/3d-pipeline/models/`):
++
++```
++~/3d-pipeline/models/rembg/        # u2net.onnx, isnet-general-use.onnx
++~/3d-pipeline/models/clip/         # ViT-L-14 weights
++~/3d-pipeline/models/sf3d/         # already there
++~/3d-pipeline/models/spar3d/       # already there
++~/3d-pipeline/models/trellis/      # already there
++```
++
++Each lib gets its env var set in the wrappers so caches stay in
++the pipeline-managed locations:
++
++```
++export U2NET_HOME="$HOME/3d-pipeline/models/rembg"
++export OPEN_CLIP_CACHE_DIR="$HOME/3d-pipeline/models/clip"
++```
++
+ ### Dependencies
+ 
+-License review document only. No code dependencies.
++- `tqdm` (PyPI) — MIT — `commercial_safe` (in `pipeline-tools-env`)
++- `requests` (PyPI) — Apache 2.0 — `commercial_safe` (in
++  `pipeline-tools-env`)
+ 
+ ### Hardware tier
+ 
+-Decision-time: neither. Implementation-time (if approved):
+-both, with model size pushing studio-tier as the more comfortable
+-target.
++Both. Identical implementation.
+ 
+ ### Manifest schema changes
+ 
+-If approved: existing fields are sufficient. The model already has
+-its bucket label.
++None. This tool operates outside the per-asset meta.json.
+ 
+ ### User-facing output
+ 
+-The skill currently says:
++`pipeline_doctor.py --check all`:
+ 
+-> If the user asks about Hunyuan3D-Paint, do not try to enable it.
+-> Explain the gate, point at the structured error message, and offer
+-> to help with the licence review (which is human work, not pipeline
+-> work).
++```
++Pipeline status check
++─────────────────────
+ 
+-Post-review, this changes to either "use it freely, license bucket
+-commercial_threshold" or "permanently declined; suggest alternatives."
++Disk:           ✓ 47 GB free on / (model caches use 4.2 GB)
++Venvs:          ✓ mflux-env, pipeline-tools-env
++                ⚠ comfyui-env missing (only needed for consistency mode)
++Models:         ✓ sf3d, u2net, ViT-L-14, real-esrgan
++                ⚠ isnet-general-use missing (optional alternative bg-removal model)
++Wrappers:       ✓ concept.sh, generate.sh, print.sh, texture.sh, benchmark.sh
+ 
++Run with --fix to install missing optional components.
++```
++
++`pipeline_warmcache.py`:
++
++```
++Pre-downloading pipeline models…
++  u2net.onnx        [████████████████████]  170 MB / 170 MB  done
++  ViT-L-14.pt       [████████████████████]  890 MB / 890 MB  done
++
++Done. 1.06 GB downloaded. Subsequent runs will be fast.
++```
++
++Skill change — new section near the top of `SKILL.md`:
++
++> Before any asset work in a fresh install, run
++> `pipeline_doctor.py --check all` to confirm everything is set up
++> and `pipeline_warmcache.py` to pre-fetch model weights. The first
++> generation after install can otherwise stall on a multi-GB download
++> the user can't see. Mention this to the user proactively when you
++> notice generators failing with "model not found" or downloads
++> taking visibly long.
++
+ ### Failure modes
+ 
+-(N/A — this is a decision, not a runtime behaviour.)
++- Network unavailable during warm-cache → tool reports failed
++  downloads; can be re-run later.
++- Disk full mid-download → cleanup partial file; report disk pressure.
++- Sha256 mismatch on a model → flag as `partial/corrupt`; suggest
++  `--fix` to redownload.
+ 
+ ### Test strategy
+ 
+-If approved: smoke-test `texture.sh --mode paint -i <glb> --json`
+-end-to-end against a sample asset.
++- Run on a clean install → expect all checks to identify what's
++  needed.
++- Delete a partial download → run again → expect `partial` flag.
++- Run `--warm-cache` on a clean install, time it, check the
++  cache directories.
+ 
+ ### Effort
+ 
+-**M (decision)**. Code work after approval is **S–M**.
++**M.** ~250 lines of Python + the manifest data file + setup-guide
++mentions. Highest UX leverage of any Tier 1 item — likely
++implement first.
+ 
+ ---
+ 
+-## 8. CLIP similarity scoring after `concept.sh`
++## 13. UV + game-engine validation (NEW — Tier 1)
+ 
+ ### Problem
+ 
+-`concept.sh` produces an image from a prompt, but the pipeline has
+-no signal that the output actually matches the prompt. The user
+-visually inspects, decides whether to re-roll, and moves on. For
+-non-technical users this means they might 3D-generate from a poor
+-2D match without realising.
++**MMR-noted gap (gemini P1, codex P1):** AI-generated meshes
++frequently have spaghetti UVs (hundreds of micro-islands),
++non-standard normal-map handedness, missing tangents, wrong color-
++space encoding, or non-power-of-two texture sizes. Watertight
++geometry plus visually-plausible textures can still produce engine-
++import failures or visibly wrong materials in Unity/Unreal.
+ 
+-2026 research uses CLIP ViT-L/14 cosine similarity as the standard
+-prompt-adherence metric. Scores ≥ 0.82 indicate strong consistency;
+-< 0.75 indicates poor adherence.
++The existing pipeline never checks any of this.
+ 
+ ### Approach
+ 
+-New script `scripts/clip_score.py` — takes `--prompt TEXT --image
+-PATH` and emits sidecar JSON:
++Extend `scripts/texture_quality_check.py` (item 3) to cover the
++geometry-side too. Alternatively, split into
++`scripts/game_asset_check.py` to keep the texture and geometry
++checks decoupled. Recommendation: split.
+ 
+-```json
+-{
+-  "clip_similarity": 0.84,
+-  "model": "ViT-L-14",
+-  "model_source": "open_clip:openai",
+-  "duration_seconds": 1.2
+-}
+-```
++`scripts/game_asset_check.py` runs after `clean_asset.py`, in
++`pipeline-tools-env`. Uses trimesh + Pillow.
+ 
+-`concept.sh` runs this after generation (under a default-on
+-`CLIP_CHECK=1`, configurable). Wires the score into the existing
+-`--json` result:
++Checks:
++
++| Subject | Check | Threshold / value |
++|---|---|---|
++| UV unwrap presence | Has primary UV channel? | bool |
++| UV island count | Number of disjoint UV charts | warn if > 50, error if > 500 |
++| UV occupancy | Fraction of UV space covered by islands | warn if < 0.40 |
++| UV overlap | Any islands overlap? | warn if true (causes texture bleeding) |
++| UV bounds | All UVs in [0,1]? | warn if false |
++| Tangents | Mesh has tangent data? | warn if missing (engine will compute, may differ) |
++| Normal map handedness | Y-axis convention (+Y up / -Y up) | check against expected (Unity = -Y, Unreal = +Y) |
++| Texture sizes | All textures power-of-two? | informational (mobile/older engines care) |
++| Color-space hints | sRGB/linear flag on each map? | warn if albedo not sRGB or normal not linear |
++| Embedded image format | All embedded as PNG/JPEG? (not BMP/TIFF) | error if exotic |
++| Texture count | Total embedded textures | informational |
++
++Writes under `quality.uv` and `quality.engine` in per-asset meta.json:
+ 
+ ```json
+ "quality": {
+-  "clip_similarity": 0.84,
+-  "clip_passed": true
++  "uv": {
++    "has_uv": true,
++    "island_count": 14,
++    "occupancy_ratio": 0.78,
++    "has_overlap": false,
++    "in_bounds": true
++  },
++  "engine": {
++    "tangents_present": true,
++    "normal_handedness": "y_minus",   // Unity convention
++    "texture_sizes": [2048, 2048, 2048, 2048],
++    "all_power_of_two": true,
++    "embedded_formats": ["png", "png", "png", "png"],
++    "color_space_hints": {"albedo": "sRGB", "normal": "linear"}
++  }
+ }
+ ```
+ 
+-Threshold logic in the skill, not in the script — the script reports
+-the raw score; the skill decides what to do with it.
++The skill uses this to surface issues specific to the user's target
++engine. E.g. when the project is detected as Unity, warn if
++`normal_handedness != "y_minus"`.
+ 
+ ### Dependencies
+ 
+-- `open_clip_torch` (PyPI, MIT) — `commercial_safe` for code
+-- `ViT-L-14` weights — OpenAI checkpoint, MIT — `commercial_safe`
+-- Lives in a dedicated `clip-env/` venv (open_clip drags in a
+-  PyTorch dep tree that we don't want fighting with mflux's deps).
+-- Model cache: `~/3d-pipeline/models/clip/` (~890 MB for ViT-L/14).
++`trimesh`, `Pillow`, `numpy` — all in `pipeline-tools-env`. No new
++deps.
+ 
+-License-bucket addition: no new bucket; `clip-vit-l-14` →
+-`commercial_safe`.
+-
+ ### Hardware tier
+ 
+-Both. ViT-L/14 inference is ~1 s on a laptop M-series. The 890 MB
+-model download is one-time.
++Both.
+ 
+-Open question: should we offer a smaller ViT-B/32 default for the
+-laptop tier and ViT-L/14 only on studio? **Recommendation: no** —
+-ViT-B/32 scores are noisier and inconsistent with the published
+-threshold (0.82 is for ViT-L/14). Use ViT-L/14 across both tiers.
+-
+ ### Manifest schema changes
+ 
+-In `generation` block of `concept.sh` entries:
++Under `quality.uv` and `quality.engine` in per-asset meta.json.
+ 
+-```json
+-"quality": {
+-  "clip_similarity": 0.84,
+-  "clip_model": "ViT-L-14"
+-}
+-```
+-
+ ### User-facing output
+ 
+ ```
+-[concept] CLIP similarity: 0.84  ✓
++[pipeline] UVs: 14 texture patches covering 78% of the UV space (good)
++[pipeline] Engine: ready for Unity (Y-down normals, sRGB albedo, all PoT textures)
+ ```
+ 
+-Or:
++When issues:
+ 
+ ```
+-[concept] CLIP similarity: 0.71  ⚠ below threshold (0.75)
+-[concept]   The image may not strongly match the prompt. Consider:
+-[concept]     • re-running with a different seed
+-[concept]     • simplifying the prompt
+-[concept]     • switching to flux-schnell (better prompt adherence)
++[pipeline] UVs: ⚠ 312 micro-patches — texture detail will be very fragmented
++[pipeline]   Consider re-generating; this generator often produces poor UVs.
+ ```
+ 
+-Skill change in Flow 1 and Flow 3:
++```
++[pipeline] Engine: ⚠ normals expect +Y up but your project is Unity (-Y up)
++[pipeline]   Unity may import this with inverted bumps. Try a different generator.
++```
+ 
+-> The wrapper now reports a CLIP similarity score. Scores ≥ 0.82
+-> are strong; 0.75–0.82 are acceptable; < 0.75 should prompt a
+-> re-generation suggestion. When chaining into Flow 2 (text → 2D →
+-> 3D), pause at the 2D step if the score is < 0.75 and confirm
+-> with the user before proceeding to 3D — bad 2D → wasted 3D time.
++Skill change in Flow 2: after generation, check `quality.uv` and
++`quality.engine`. If the project is Unity or Unreal, surface engine-
++specific warnings using the translation map.
+ 
+ ### Failure modes
+ 
+-- **open_clip not installed:** skip the check, log to stderr,
+-  wrapper continues. JSON result omits `quality.clip_similarity`.
+-- **CUDA-only build:** open_clip on Apple Silicon uses MPS; if MPS
+-  isn't available, fall back to CPU (~3 s for ViT-L/14). Acceptable.
+-- **Model not downloaded:** on first run, open_clip auto-downloads.
+-  Surface this as a stderr message ("First run: downloading ViT-L/14
+-  (~890 MB)…") so the user understands the wait.
++- No UV channel (rare for SF3D / TRELLIS) → record `has_uv=false`,
++  warn that this asset can't take textures in-engine without a UV
++  unwrap pass.
++- Overlap detection slow on dense UVs → bounded by polycount; not
++  a real risk for assets in this pipeline.
+ 
+ ### Test strategy
+ 
+-Run `concept.sh "a treasure chest"` and compare the score to a
+-manual baseline (expect ≥ 0.85 for a clear, well-specified prompt).
++- Known-good SF3D output → expect `island_count < 50`,
++  `occupancy_ratio > 0.4`, no overlap.
++- Hand-broken mesh (delete UV channel in Blender) → expect
++  `has_uv=false`.
++- TRELLIS Mac output (vertex colours, no textures) → expect
++  `texture_sizes=[]`, `has_uv=false` or low confidence.
+ 
+-Run `concept.sh "a thing"` (deliberately vague) and expect a lower
+-score (< 0.75).
+-
+ ### Effort
+ 
+-**M.** Venv + model download + Python wrapper is ~120 lines.
++**M.** UV island count + overlap require non-trivial trimesh code (or
++shelling to `xatlas`). Normal-handedness detection is a heuristic
++(sample normal map XY, compare to vertex normals on a few faces).
+ 
+ ---
+ 
+-## 9. Generator auto-selection hints in `SKILL.md`
++## 14. Print structural gates (NEW — Tier 1)
+ 
+ ### Problem
+ 
+-The skill instructs Claude to default to SF3D unless the user asks
+-otherwise. SF3D is the right choice ~70% of the time (fast,
+-commercial-safe, good for most props). But it visibly underperforms
+-on:
++**MMR-noted gap (codex P1):** Watertight is necessary but not
++sufficient for printability. A watertight STL can still:
+ 
+-- **Characters with fine geometry** — TRELLIS produces better
+-  topology when commercial-license is acceptable
+-- **Mechanical / hard-surface assets** — SPAR3D handles sharp edges
+-  better than SF3D
+-- **Quick prototypes / many iterations** — SPAR3D is ~2× faster
+-- **Assets with prominent back-face geometry** — TRELLIS is more
+-  reliable
++- Have walls thinner than the nozzle can produce (< 0.4 mm on FDM,
++  < 0.1 mm on resin) — print will fail mid-layer
++- Have small disconnected islands (printer skips, supports needed)
++- Have severe overhangs (need support material)
++- Have fragile spikes / filaments (snap during printing)
++- Have a near-zero base contact area (won't stick to the bed)
++- Be top-heavy (tips during printing)
+ 
+-The user doesn't know this. The skill should classify the user's
+-intent and recommend the right generator before invoking
+-`generate.sh`. Today it suggests SF3D unconditionally unless asked.
++The v1 spec promised watertight; v2 needs the structural check too.
+ 
+ ### Approach
+ 
+-Pure skill-text change. No script change.
++New script `scripts/print_structural_check.py` (in
++`pipeline-tools-env`). Runs at the end of `prepare_for_print.py`,
++between watertight check and meta-write.
+ 
+-Add a "Generator recommendation matrix" section to `skill/SKILL.md`,
+-right before Flow 2:
++Uses trimesh + numpy. Checks:
+ 
+-```markdown
+-## Generator recommendation matrix
+-
+-Before invoking generate.sh, classify the asset by reading the user's
+-request. Match the closest row and recommend that generator (mentioning
+-the license bucket as already required).
+-
+-| Intent signals (in prompt or context) | Recommend | Why |
++| Subject | Method | Threshold |
+ |---|---|---|
+-| "character", "figure", "creature", "person" with detail | TRELLIS | Better topology; tolerate non_commercial bucket |
+-| "mech", "robot", "weapon", "gun", "tool", "hard surface" | SPAR3D | Sharper edges; faster |
+-| "quick", "draft", "iterate", "prototype", "test" | SPAR3D | ~2× speed at acceptable quality |
+-| "prop", "chest", "barrel", "rock", default | SF3D | Default; commercial-safe; reliable |
+-| Asset needs visible back face | TRELLIS or generate.sh with multi-view (when item 12 lands) | SF3D hallucinates back; TRELLIS is steadier |
+-| Final asset for commercial release | SF3D or SPAR3D only | Both commercial_threshold; never recommend TRELLIS here |
++| Min wall thickness | trimesh sample + nearest-neighbour distance heuristic | warn < 1.0 mm; error < 0.4 mm |
++| Disconnected islands | `mesh.split()` count | informational |
++| Self-intersections | trimesh `repair.broken_faces` count | warn > 0 |
++| Overhang area | faces whose normal has Z < -cos(45°) | informational; total area in mm² |
++| Base contact area | bottom-N% of mesh, project to Z=0, polygon area | warn < 100 mm² for small assets |
++| Center of mass vs base | XY of COM vs XY centroid of base | warn if COM > 0.5× base radius offset (tipping risk) |
++| Fragile features | small isolated branches (heuristic: mesh.body_count > 1) | informational |
+ 
+-When you deviate from SF3D, **state the bucket and the reason**:
++Writes under `print.structural` in per-asset meta.json:
+ 
+-> "I'll use TRELLIS for this — it produces better topology for
+-> characters. License bucket `non_commercial`. Do you accept the
+-> restriction for this asset?"
++```json
++"print": {
++  "structural": {
++    "min_wall_thickness_mm": 0.8,
++    "wall_thickness_safe": false,
++    "disconnected_islands": 1,
++    "self_intersections": 0,
++    "overhang_area_mm2": 142.0,
++    "base_contact_area_mm2": 287.5,
++    "base_contact_safe": true,
++    "com_offset_normalized": 0.18,
++    "stable_on_bed": true
++  }
++}
+ ```
+ 
+-Also update Flow 2's "Polycount guidance" section to mention that
+-character recommendations chain to TRELLIS by default for
+-non-commercial work.
++The min-wall-thickness check is approximate (true convex distance
++field is expensive); document the heuristic in the script. False
++positives possible. Frame the message as advisory.
+ 
+ ### Dependencies
+ 
+-None.
++`trimesh`, `numpy`, `scipy` (for KDTree) — add `scipy` to
++`pipeline-tools-env` (~30 MB, BSD, `commercial_safe`).
+ 
+ ### Hardware tier
+ 
+-Both. The matrix is the same; only the recommendations are
+-generator-specific, not tier-specific.
++Both. Sub-2-second for assets in this pipeline.
+ 
+ ### Manifest schema changes
+ 
+-None. Existing `model_role` field already supports `default` /
+-`override` distinction.
++Under `print.structural` in the per-asset meta.json (printable
++flow only).
+ 
+ ### User-facing output
+ 
+-The user hears the recommendation before the wrapper runs:
++```
++[pipeline] Print structure: looks printable
++[pipeline]   Walls ≥ 0.8mm (good), base ≥ 287mm² (good), stable on bed
++```
+ 
+-> "This is a character with fine detail — I'd recommend TRELLIS for
+-> better topology. License bucket `non_commercial`, which means this
+-> asset can't ship in Grithkin or GripCraft commercially. Want me
+-> to proceed with TRELLIS, or use SF3D (commercial-safe but
+-> noisier topology)?"
++When issues:
+ 
++```
++[pipeline] Print structure: ⚠ thin walls detected
++[pipeline]   Thinnest section is 0.3mm — likely too thin for FDM (need ≥ 0.4mm)
++[pipeline]   Options:
++[pipeline]     • Scale the model up (re-run with a larger -s value)
++[pipeline]     • Re-print on the resin printer if you have one
++```
++
++Skill change in Flow 4 + Flow 5: surface structural warnings before
++handing off to Orca. Don't say "non-manifold internal shell"; say
++"hidden geometry inside the mesh". For thin walls, suggest scaling
++or different printer.
++
+ ### Failure modes
+ 
+-(N/A — skill text.)
++- KDTree fails on extremely sparse meshes → mark `min_wall_thickness_mm=null`,
++  continue.
++- Self-intersection detection times out (rare) → skip with warning.
+ 
+ ### Test strategy
+ 
+-Manual review: write 10 representative user prompts, walk through the
+-matrix, confirm each one routes to the expected generator. Update the
+-matrix if any prompt's intent isn't covered.
++- Known-printable asset (e.g. a 50 mm chest) → expect
++  `wall_thickness_safe=true, stable_on_bed=true`.
++- Generate a small (5 mm) figurine → expect thin-wall warning.
++- Generate a tall top-heavy asset → expect tipping-risk warning.
+ 
+ ### Effort
+ 
+-**S.** ~50 lines of `SKILL.md`.
++**M.** Wall-thickness heuristic is the trickiest part. The other
++checks are straightforward.
+ 
+ ---
+ 
+-# Tier 3 — larger lift
++# Tier 2 — medium impact
+ 
+-## 11. LoRA + IP-Adapter for character consistency
++## 7. Hunyuan3D-Paint license review
+ 
+ ### Problem
+ 
+-Game asset pipelines exist to produce **many** related assets:
+-multiple poses of the same character, variations on a weapon family,
+-a coherent prop set with a shared style. The current 2D path
+-generates one-off images; consecutive runs with the same prompt
+-produce visually different images (different facial features,
+-different texture treatments, different lighting).
++`texture.sh --mode paint` is a deliberate placeholder that fails
++with `status=error error=needs_license_review`. Hunyuan3D-Paint
++would significantly improve texture quality, especially for
++TRELLIS outputs that ship vertex colours only. The gate is the
++Tencent Hunyuan Community License (revenue thresholds + region
++exclusions) which hasn't been reviewed.
+ 
+-mflux supports LoRA via `--lora-paths`. The pipeline exposes
+-`defaults.lora` in `.asset-pipeline.json` and the `-l/--lora` flag
+-in `concept.sh`. But LoRA alone (without IP-Adapter or ControlNet)
+-locks **style** loosely; **identity** drifts across generations.
++### Approach (process, not code)
+ 
+-The 2026 research stack for identity-locked outputs is:
++Same as v1:
+ 
+-1. **LoRA** (trained on 15–20 references) for style
+-2. **IP-Adapter (FaceID variant)** for identity transfer from a
+-   reference image
+-3. **ControlNet (OpenPose or Canny)** for pose / silhouette
+-4. **Prompt DNA** (identical descriptor tokens each run)
++1. Identify all current and likely-future commercial uses of the
++   pipeline.
++2. Walk through the Tencent Hunyuan Community License clauses
++   against those uses.
++3. Document the conclusion in `docs/license-review-hunyuan3d-paint.md`
++   with the decision date, signatory, and conditions.
++4. Either: (a) approve with bucket `commercial_threshold` and wire
++   up the call, (b) approve constrained (commercial_threshold +
++   wrapper check), or (c) decline with a clearer error message.
+ 
+-mflux is MLX-native and Apple-Silicon-optimised, but **does not
+-support IP-Adapter or ControlNet today**. Implementing this on the
+-laptop tier likely means adding a second 2D backend — ComfyUI is
+-the standard choice — and routing requests that need consistency
+-through ComfyUI while routing everything else through mflux.
++### Dependencies, hardware tier, manifest, UX, failure modes, tests
+ 
+-This is a structural change, not a feature add.
+-
+-### Approach
+-
+-Two options:
+-
+-**Option A: ComfyUI as a second backend.**
+-- Install ComfyUI in `~/3d-pipeline/comfyui/`
+-- Build a "consistency workflow" (.json file) that wires SDXL +
+-  LoRA + IP-Adapter + ControlNet
+-- Add `concept.sh --backend comfyui --consistency-pack PATH` flag
+-- The pack contains: ref images, LoRA path, IP-Adapter FaceID model
+-- Output ends up in the same `assets/concept/` as before
++Identical to v1. See v1 spec or the diff.
+ 
+-**Option B: Defer until mflux gains IP-Adapter support.**
+-- mflux is actively developed; IP-Adapter is feasible on MLX
+-- Monitor the project; revisit when the feature lands
+-- Document this option in the spec and add a `# TODO mflux/IP-Adapter`
+-  marker in the codebase
++### Effort
+ 
+-### Recommendation (deferred to user / MMR review)
++**M (decision)**. Code work after approval is **S–M**.
+ 
+-Option A is the right call **if** consistency is a current blocker
+-for in-flight work. Option B is right if the user is generating
+-one-off assets today and would only need consistency for a future
+-larger project.
++---
+ 
+-The user should weigh:
++## 8. CLIP variant ranking + soft signal (calibrated)
+ 
+-- ComfyUI venv is large (~10 GB with SDXL + IP-Adapter + ControlNet
+-  models); workspace impact is real on the laptop tier
+-- ComfyUI's UX is workflow-graph based; the wrapper has to hide
+-  this from the user. Significant integration work.
+-- Multi-backend pipeline adds testing burden (two paths to keep
+-  green per release)
++### Problem
+ 
+-### Dependencies (Option A)
++**MMR-noted issue (codex P2):** v1 treated a single absolute CLIP
++ViT-L/14 threshold (0.75 / 0.82) as a hard pass/fail. But CLIP
++scores aren't calibrated across:
+ 
+-- ComfyUI — GPL 3.0 — `source_available_restricted` (a new bucket
+-  use; previously reserved). Confirm license acceptability.
+-- SDXL base — CreativeML Open RAIL-M — `commercial_threshold`
+-  (the RAIL-M has use-case restrictions for harmful content but is
+-  commercially usable for game assets)
+-- IP-Adapter FaceID — Apache 2.0 — `commercial_safe`
+-- ControlNet (OpenPose, Canny) — Apache 2.0 — `commercial_safe`
+-- New venv: `comfyui-env/`
++- Prompt length (longer prompts score lower for identical content)
++- Prompt style (concrete > abstract)
++- Generator (mflux Z-Image Turbo scores differently from FLUX-schnell)
++- Image distribution (in-distribution vs. out-of-distribution)
+ 
++A single threshold creates false warnings for prompts that are
++fine, and misses real failures for prompts that always score high
++regardless of fidelity.
++
++### Approach
++
++CLIP score becomes:
++
++1. **A variant-ranking tool**, not an absolute gate. When the user
++   asks for multiple variants (`-n N`), the wrapper ranks them by
++   CLIP score and surfaces the best one as the "primary" output,
++   demoting others as alternates. This is where CLIP scores are
++   most trustworthy — comparing variants of the same prompt with the
++   same model.
++
++2. **A soft signal** with per-model calibration. The wrapper ships
++   with reference percentile bands computed once per model at
++   install time (via a small calibration script — items 7 in
++   `pipeline_doctor.py --calibrate`):
++   - Z-Image Turbo: 95% of well-formed prompts score ≥ X
++   - FLUX-schnell: 95% score ≥ Y
++   - FLUX-dev: 95% score ≥ Z
++   The "below threshold" message references the per-model band,
++   not a global number.
++
++3. **Never block.** Always emit the score; the skill decides if
++   it's worth telling the user.
++
++`scripts/clip_score.py` interface unchanged from v1 but now also
++takes `--rank` mode that takes multiple image paths and returns
++them sorted by score in JSON. `concept.sh` uses `--rank` when
++`COUNT > 1`.
++
++Per-model bands live in `scripts/clip_calibration.json` (checked
++into the repo, refreshed quarterly):
++
++```json
++{
++  "z-image-turbo": {"p50": 0.81, "p25": 0.76, "p10": 0.71},
++  "flux-schnell": {"p50": 0.78, "p25": 0.73, "p10": 0.68},
++  "flux-dev": {"p50": 0.83, "p25": 0.78, "p10": 0.73}
++}
++```
++
++Skill flags a score "low" when it's below the model's p25
++(weak quartile), not against a global cutoff.
++
++### Dependencies
++
++`open_clip_torch` (in `pipeline-tools-env`) — MIT — `commercial_safe`.
++ViT-L-14 weights — OpenAI checkpoint, MIT — `commercial_safe`.
++Model cache: `~/3d-pipeline/models/clip/` (~890 MB; managed by
++item 10).
++
++License-bucket: `clip-vit-l-14` → `commercial_safe`.
++
+ ### Hardware tier
+ 
+-**Studio only** for v1. SDXL + IP-Adapter + ControlNet on the
+-laptop tier is feasible but slow (15–30 s/image vs 5–10 s for mflux);
+-quality of life suffers. Re-evaluate after a studio rollout.
++Both. ViT-L/14 inference is ~1 s on laptop M-series.
+ 
+ ### Manifest schema changes
+ 
+-In `generation` block (concept entries):
++Under `clip` in per-asset meta.json:
+ 
+ ```json
+-"backend": "mflux" | "comfyui",
+-"consistency": {
+-  "lora": "path/to.safetensors",
+-  "ip_adapter": {
+-    "model": "ip-adapter-faceid_sdxl",
+-    "reference_image": "path/to/ref.png",
+-    "scale": 0.8
+-  },
+-  "controlnet": {
+-    "model": "openpose",
+-    "reference_image": "path/to/pose.png"
+-  }
++"clip": {
++  "similarity": 0.84,
++  "model": "ViT-L-14",
++  "model_band": "p50",
++  "percentile_for_this_model": 0.62
+ }
+ ```
+ 
++When ranking variants, the JSON adds a `rank` field per variant.
++
+ ### User-facing output
+ 
++Single image:
++
+ ```
+-[concept] Backend: ComfyUI (consistency mode)
+-[concept] LoRA:    /path/to/dragon_v2.safetensors
+-[concept] IP-Adapter: ip-adapter-faceid_sdxl (scale 0.8)
+-[concept] Reference: /path/to/dragon_ref.png
++[concept] CLIP similarity: 0.84 (typical for Z-Image Turbo — good)
+ ```
+ 
+-Skill change in Flow 1:
++Below model band:
+ 
+-> For consistency work (multiple related assets sharing identity),
+-> route to ComfyUI via `--backend comfyui --consistency-pack PATH`.
+-> A consistency pack is a directory containing `pack.json`,
+-> reference images, and the trained LoRA. Default backend remains
+-> mflux for one-off generations.
++```
++[concept] CLIP similarity: 0.69 (lower than 75% of Z-Image Turbo outputs)
++[concept]   The image may not strongly match the prompt. Options:
++[concept]     • re-run with a different seed
++[concept]     • simplify the prompt
++[concept]     • try -n 4 to see four variants and pick the best
++```
+ 
++Variant ranking (`-n 4`):
++
++```
++[concept] CLIP scores (best first): 0.86, 0.82, 0.78, 0.71
++[concept]   Primary: dragon.png (CLIP 0.86)
++[concept]   Alternates: dragon_v2.png (0.82), dragon_v3.png (0.78), dragon_v4.png (0.71)
++```
++
++Skill change in Flow 1 + Flow 3:
++
++> The CLIP score is calibrated per-model. Trust the model_band
++> field — "p10" or "below_p10" warrants a re-generation suggestion;
++> "p50" or above is fine. Don't compare absolute scores across
++> different 2D models.
++
+ ### Failure modes
+ 
+-- **ComfyUI not installed:** wrapper fails clearly with install
+-  guidance; no fallback to mflux for consistency mode (the output
+-  would be unconstrained).
+-- **Reference image unreadable:** error out before invoking
+-  ComfyUI.
+-- **LoRA / IP-Adapter model missing:** error out with explicit
+-  paths.
++- open_clip not installed → skip; JSON omits `clip` section.
++- Model not downloaded → item 10 handles this; user sees a clear
++  download progress message.
++- Calibration file missing → fall back to global threshold
++  (0.75) with a stderr warning.
+ 
+ ### Test strategy
+ 
+-Train (or download) a small LoRA from 15–20 reference images of a
+-test character. Generate 10 variations with the consistency pack
+-and verify pairwise CLIP similarity (from item 8) is ≥ 0.85.
+-Without the pack, same prompt baseline should be ≤ 0.75 pairwise.
++- Run `concept.sh "a treasure chest" -n 4` → expect ranking with
++  primary = highest score.
++- Run with a vague prompt → expect lower band classification.
++- Compare scores across models for the same prompt — verify the
++  per-model bands behave differently.
+ 
+ ### Effort
+ 
+-**L.** ComfyUI integration is the bulk; the wrapper plumbing is
+-straightforward. Realistic estimate: 1–2 weeks of focused work
+-including the consistency pack workflow design.
++**M.** Same as v1 (~120 lines) + the calibration script and the
++ranking mode.
+ 
+ ---
+ 
+-## 12. Multi-view reconstruction pipeline lane
++## 9. Generator auto-selection hints in `SKILL.md`
+ 
+ ### Problem
+ 
+-The pipeline today is single-image-to-3D throughout. For assets with:
++The skill defaults to SF3D unconditionally. SF3D is wrong sometimes:
++characters (TRELLIS is better), mech assets (SPAR3D), quick
++iteration (SPAR3D), assets with prominent back-face geometry
++(TRELLIS).
+ 
+-- Complex back-face geometry (asymmetric characters, props with detail
+-  on multiple sides)
+-- Fine silhouettes that single-image generators consistently misread
+-- Real-world objects (photogrammetry use case)
++### Approach
+ 
+-…multi-view input would yield substantially better geometry. 2026
+-research indicates that unified pipelines reconstructing geometry +
+-PBR + lighting from sparse multi-view (3–8 calibrated images) now
+-run in under one second and produce noticeably more accurate meshes
+-than the best single-image methods.
++Pure skill-text change. Add a recommendation matrix in `SKILL.md`:
+ 
+-### Approach
++| Intent signals | Recommend | Why |
++|---|---|---|
++| "character", "figure", "creature" with detail | TRELLIS | Better topology; tolerate non_commercial bucket |
++| "mech", "robot", "weapon", "hard surface" | SPAR3D | Sharper edges; faster |
++| "quick", "draft", "iterate", "prototype" | SPAR3D | ~2× speed at acceptable quality |
++| "prop", "chest", "barrel", default | SF3D | Default; commercial-safe; reliable |
++| Visible back face needed | TRELLIS or multi-view (item 12) | SF3D hallucinates the back |
++| Final asset for commercial release | SF3D or SPAR3D only | Both commercial_threshold; never TRELLIS |
+ 
+-New flow (Flow 9) in the skill, new wrapper `scripts/multiview.sh`.
++When deviating from SF3D, state the bucket and reason in
++conversation. Skill text identical to v1 here.
+ 
+-Inputs: 3–8 images of the same subject, ideally with
+-roughly-known orientation (e.g. 0°, 45°, 90°, 135° around the
+-subject's vertical axis).
++### Dependencies, tier, manifest, UX, failure modes, tests, effort
+ 
+-Backend options to evaluate:
++Identical to v1. **S.**
+ 
+-| Option | License | Notes |
+-|---|---|---|
+-| **TRELLIS multi-view mode** | CC BY-NC (`non_commercial`) | Already in scope; gain multi-view input rather than synth |
+-| **InstantMesh** (Tencent) | Tencent — `unclear_risky` | Sparse-view; needs license review |
+-| **OpenLRM / similar open** | Apache 2.0 — `commercial_safe` | Less performant; promising as a fully-open path |
++---
+ 
+-Wrapper interface:
++# Tier 3 — larger lift
+ 
+-```bash
+-multiview.sh -i img1.png,img2.png,img3.png,img4.png -o asset_name --json
+-multiview.sh -d /path/to/image/dir -o asset_name --json
+-```
++## 11. LoRA + IP-Adapter for character consistency
+ 
+-Output is a GLB into `assets/raw/` followed by the same
+-`clean_asset.py` cleanup pass. From cleanup onward, the flow is
+-identical to single-image generation — same quality checks, same
+-preview, same engine staging.
++### Problem
+ 
+-### Dependencies
++Game asset pipelines exist to produce **many** related assets:
++multiple poses of a character, variations on a weapon family. The
++current 2D path produces one-offs that drift in identity across
++runs. LoRA alone locks style; IP-Adapter + ControlNet are needed
++to lock identity.
+ 
+-Backend choice TBD post-spec-review. Document as a research item.
++mflux doesn't support IP-Adapter today. Implementing this likely
++means adding a ComfyUI backend for consistency mode.
+ 
+-### Hardware tier
++**MMR-noted clarification (gemini P3):** ComfyUI's GPL classification
++applies to redistribution of ComfyUI itself. Image **outputs** from
++ComfyUI are not GPL-encumbered; they inherit the bucket of their
++generating model (SDXL = `commercial_threshold`, etc.). Updated
++section below.
+ 
+-**Studio for v1** — multi-view models tend to be larger and slower
+-than single-image.
++### Approach
+ 
+-### Manifest schema changes
++Two options unchanged from v1:
+ 
+-In `generation` block:
++**Option A**: ComfyUI as a second backend behind a `--backend comfyui` flag.
++**Option B**: Defer until mflux gains IP-Adapter support.
+ 
+-```json
+-"generator": "multiview-trellis",  // or whichever backend
+-"inputs": [
+-  {"path": "img1.png", "view_angle_degrees": 0},
+-  {"path": "img2.png", "view_angle_degrees": 90},
+-  ...
+-]
+-```
++### Recommendation
+ 
+-### User-facing output
++(Unchanged from v1; user / MMR decision pending.)
+ 
+-```
+-[multiview] Inputs: 4 images
+-[multiview] Backend: TRELLIS multi-view (license: non_commercial)
+-[multiview] Generation finished in 12.4s → assets/raw/dragon_raw.glb
+-```
++### Dependencies (Option A)
+ 
+-Skill change — new Flow 9:
++- **ComfyUI** — GPL-3.0 (the **tool**, not the outputs). Bucket:
++  `source_available_restricted` for redistribution of ComfyUI
++  itself. Image outputs are not GPL-encumbered and inherit the
++  generating-model's bucket.
++- **SDXL base** — CreativeML Open RAIL-M — `commercial_threshold`
++- **IP-Adapter FaceID** — Apache 2.0 — `commercial_safe`
++- **ControlNet (OpenPose, Canny)** — Apache 2.0 — `commercial_safe`
++- New venv `comfyui-env/` (cannot share `pipeline-tools-env` —
++  different PyTorch build expectations)
+ 
+-> Multi-view 3D reconstruction. Trigger phrases: "I have multiple
+-> photos of this", "use these reference images", "reconstruct from
+-> these views". Backend defaults to TRELLIS multi-view (license
+-> bucket `non_commercial`); for commercial work, ask the user
+-> whether they'll accept the bucket and offer to retry with a
+-> commercial-safe backend (TBD post-research).
++### Hardware tier, manifest schema, UX, failure modes, tests, effort
+ 
+-### Failure modes
++Identical to v1. **L** (1–2 weeks).
+ 
+-- **Insufficient images (< 3):** wrapper exits 1 with a clear
+-  message.
+-- **Inconsistent image dimensions:** wrapper auto-resizes to a
+-  common size and warns.
+-- **Backend not installed:** wrapper fails with install guidance.
++---
+ 
+-### Test strategy
++## 12. Multi-view reconstruction pipeline lane
+ 
+-Capture 4 photos of a small physical object (figurine), run through
+-the wrapper, compare the resulting mesh to a single-image generation
+-of the same subject. Expect better silhouette accuracy.
++### Problem
+ 
+-### Effort
++The pipeline today is single-image-to-3D throughout. For assets
++with complex back-face geometry, fine silhouettes, or real-world
++objects (photogrammetry), multi-view input yields better geometry.
+ 
+-**L.** Backend selection and integration is the bulk; the wrapper
+-itself is small. Realistic estimate: 1–2 weeks plus the time to
+-evaluate backends.
++### Approach
+ 
++New flow (Flow 9) in the skill, new wrapper `scripts/multiview.sh`.
++
++Backend options to evaluate post-spec:
++
++| Option | License bucket | Notes |
++|---|---|---|
++| TRELLIS multi-view mode | `non_commercial` | Already in scope |
++| InstantMesh | `unclear_risky` | Needs license review |
++| OpenLRM / open alternative | `commercial_safe` | Less performant |
++
++(Identical to v1.)
++
++### Dependencies, tier, manifest, UX, failure modes, tests, effort
++
++Identical to v1. **L** (1–2 weeks + backend research).
++
+ ---
+ 
+ # Cross-cutting concerns
+ 
+-## New `mesh-tools-env` venv
++## `pipeline-tools-env` venv (consolidated)
+ 
+-Items 2 (watertight check), 3 (texture quality), and 6 (cleanup
+-report) all want `trimesh`, `numpy`, and `Pillow`. Rather than
+-adding to the Blender environment (which has its own bundled
+-Python), create a dedicated `~/3d-pipeline/mesh-tools-env/`.
++Items 1, 2, 3, 6, 8, 13, 14 share a single venv at
++`~/3d-pipeline/pipeline-tools-env/`:
+ 
+-Setup-guide additions (both laptop + studio guides):
+-
+-```bash
+-python3 -m venv ~/3d-pipeline/mesh-tools-env
+-source ~/3d-pipeline/mesh-tools-env/bin/activate
+-pip install trimesh numpy Pillow
+-deactivate
+ ```
++trimesh
++numpy
++scipy
++Pillow
++rembg[cpu]
++open_clip_torch
++torch                # shared dep brought in by open_clip
++tqdm                 # for item 10 progress bars
++requests             # for item 10 downloads
++```
+ 
+-`clean_asset.py` and the new quality scripts shell out to this venv
+-rather than importing trimesh in Blender's Python (which is risky
+-across Blender version upgrades).
++Disk impact: ~6 GB total (vs ~15 GB across separate envs).
+ 
+-## Sidecar JSON convention (formalised)
++ComfyUI keeps its own venv if/when item 11 ships.
+ 
+-Per-output sidecars become the standard pattern for quality data:
++## Per-asset `<output>.meta.json` (consolidated)
+ 
+-| Sidecar | Created by | Read by |
+-|---|---|---|
+-| `<image>.input_meta.json` | item 4 | `generate.sh` |
+-| `<image>.rembg.json` | item 1 | `generate.sh` |
+-| `<image>.clip.json` | item 8 | `concept.sh` |
+-| `<clean.glb>.clean_meta.json` | items 2, 3, 6 | `generate.sh` |
+-| `<clean.glb>.texture_meta.json` | item 3 | `generate.sh` |
+-| `<output.stl>.print_meta.json` | existing | `print.sh` |
+-| `<output.glb>.preview_meta.json` | item 5 | `generate.sh` |
++Single file per generated asset; merged into via
++`scripts/meta_helper.py merge <meta-json-path> --section <name>
++--data <inline-json>`. File-locked. Each pass owns one section.
+ 
+-`update_manifest.py` gains flags to forward any of these into the
+-manifest entry. Naming convention: `--<thing>-meta-json PATH`.
++Sections used:
+ 
+-## `~/3d-pipeline/.config` additions
++```
++input/             # item 4
++preprocessing/     # item 1
++cleanup/           # items 2 (cleanup-specific) + 6
++quality/manifold/  # item 2
++quality/scale/     # item 2
++quality/textures/  # item 3
++quality/uv/        # item 13
++quality/engine/    # item 13
++preview/           # item 5
++clip/              # item 8
++print/structural/  # item 14
++print/dimensions/  # existing prepare_for_print.py meta
++```
+ 
+-New per-machine toggles:
++`update_manifest.py` gains a single `--meta-json PATH` arg that
++merges the entire file into the manifest entry's `quality` block.
++Old per-section flags (from v1) are deleted.
+ 
++## `~/3d-pipeline/.config` additions
++
+ ```
+-bg_removal_default = true
++bg_removal_mode = auto        # auto | on | off
+ clip_check_default = true
+-preview_default = true
+-clip_min_score = 0.75
++preview_default_laptop = png
++preview_default_studio = gif
++preview_default_queue = none
+ ```
+ 
+-Defaults match the per-script flag defaults. Allows a user to
+-globally disable any of the new checks without per-run flags.
++Per-machine toggles. Per-project overrides via `.asset-pipeline.json
++defaults.<field>`.
+ 
+ ## Skill version bump
+ 
+-`skill/SKILL.md` gains a "v0.3 changes" section (or the existing
+-v0.2 section grows). Document:
++`skill/SKILL.md` v0.3 changes:
+ 
+-- New quality fields in JSON output (`preprocessing`, `quality`,
+-  `cleanup`, `preview`)
+-- New flags: `--no-bg-removal`, `--no-preview`, `--no-clip-check`
+-- Generator recommendation matrix (item 9)
+-- LoRA + IP-Adapter consistency mode (item 11, if shipped)
+-- Multi-view flow (item 12, if shipped)
++- Item 9's generator recommendation matrix
++- Translation map (cross-cutting principle 8)
++- Reference to `pipeline_doctor.py` from setup section
++- CLIP per-model band interpretation
++- Failure-mode language: warn-friendly translations of every new
++  quality-gate failure
+ 
+ ## Documentation work per item
+ 
+ Each Tier 1 item touches:
+ 
+-1. `/scripts/*.sh` or `/scripts/*.py` (the canonical script)
+-2. `/skill/SKILL.md` (the user-facing routing)
+-3. `/docs/asset-pipeline-guide.html` (laptop install steps if a new
+-   dep) — via `make regenerate`
+-4. `/docs/asset-pipeline-guide-studio.html` (studio mirror) — same
+-5. `/context/asset-pipeline-ai-context{,-studio}.{md,html}` (AI
+-   reference docs) — same parity rules
+-6. `/docs/UPGRADES-{laptop,studio}.md` (per-tier changelog)
+-7. `CHANGELOG.md` (top-level dated entry)
+-8. `tools/_embed_lib.py::EMBEDS` (if a new script file)
++1. `/scripts/*.sh` or `/scripts/*.py` (canonical script)
++2. `/skill/SKILL.md`
++3. `/docs/asset-pipeline-guide.html` (laptop) — via `make regenerate`
++4. `/docs/asset-pipeline-guide-studio.html` (studio mirror)
++5. `/context/asset-pipeline-ai-context{,-studio}.{md,html}`
++6. `/docs/UPGRADES-{laptop,studio}.md`
++7. `CHANGELOG.md`
++8. `tools/_embed_lib.py::EMBEDS` (new script files)
+ 
+ The pre-commit hook + `make verify` catch most missing-link cases.
+ 
+ ---
+ 
+-# Effort summary
++# Effort summary (v2)
+ 
+ | # | Item | Effort | Tier |
+ |---|---|---|---|
+-| 1 | Background removal pre-3D | M | 1 |
+-| 2 | Watertight check | S | 1 |
++| 1 | Conditional background removal | M | 1 |
++| 2 | Watertight + scale sanity | S | 1 |
+ | 3 | Texture quality validation | S | 1 |
+-| 4 | Input image quality check | S | 1 |
+-| 5 | Turntable preview render | M | 1 |
++| 4 | Input quality + format normalisation | S | 1 |
++| 5 | Hero PNG + optional turntable GIF | M | 1 |
+ | 6 | Cleanup report | S | 1 |
++| 10 | Pipeline doctor + cache manager (NEW) | M | 1 |
++| 13 | UV + engine validation (NEW) | M | 1 |
++| 14 | Print structural gates (NEW) | M | 1 |
+ | 7 | Hunyuan3D-Paint license review | M (decision) | 2 |
+-| 8 | CLIP similarity scoring | M | 2 |
++| 8 | CLIP variant ranking + soft signal | M | 2 |
+ | 9 | Generator auto-selection hints | S | 2 |
+ | 11 | LoRA + IP-Adapter consistency | L | 3 |
+ | 12 | Multi-view reconstruction | L | 3 |
+ 
+-Tier 1 total: 3 × S + 2 × M ≈ 7–10 days of focused work.
++Tier 1 total (v2): 4 × S + 5 × M ≈ 10–14 days of focused work.
+ Tier 2 total: 1 × S + 1 × M decision + 1 × M code ≈ 4–6 days.
+-Tier 3: 2 × L ≈ 3–4 weeks (and depends on backend decisions).
++Tier 3: 2 × L ≈ 3–4 weeks (depends on backend decisions).
+ 
+ ---
+ 
+ # Open questions for review
+ 
+-1. **Mesh-tools venv vs. Blender python:** Recommending a separate
+-   venv. Confirm this matches the project's existing one-venv-per-tool
+-   pattern.
+-2. **Sidecar JSON proliferation:** Seven sidecar files per asset
+-   feels heavy. Should they consolidate into a single
+-   `<output>.meta.json` written incrementally by each pass? (Trade-
+-   off: race conditions if any pass runs in parallel, vs. easier
+-   discovery.)
+-3. **CLIP threshold cohabitation:** Item 8's threshold (0.75) is
+-   used by the skill to suggest re-runs. Should the threshold be
+-   per-model (Z-Image Turbo vs. FLUX scores at different absolute
+-   levels) rather than global?
+-4. **Turntable rendering on the laptop tier:** 3–6 s overhead per
+-   generation. Acceptable, or should it be opt-in on laptop and
+-   default-on only on studio?
+-5. **Hunyuan3D-Paint review timing:** Block v0.3 on the decision,
+-   or ship v0.3 without it and pick it up in v0.3.1?
+-6. **Multi-view backend research:** Should this happen now (block
+-   the spec until backend chosen) or after Tier 1 ships (defer
+-   research until Tier 1 is in production and the team has data)?
+-7. **Default-on quality checks at install time:** New users get all
+-   checks on by default. Existing v0.2 users get nothing until they
+-   re-run the setup guide. Recommend a `bin/upgrade-to-v0.3` script
+-   that creates the new venvs and updates `.config` defaults.
++1. **Wall-thickness heuristic accuracy**: item 14's approximate
++   wall-thickness check will have false positives. Acceptable for
++   v1 of v0.3, or block until a more rigorous algorithm?
++2. **Meta.json schema versioning**: how do we evolve the per-asset
++   schema after v0.3 ships? Recommend a `schema_version` field
++   (already in the example) + a migration helper if a section's
++   shape ever changes.
++3. **Calibration cadence for item 8**: how often do per-model CLIP
++   bands need refreshing? Quarterly is the current proposal;
++   confirm against actual drift if any.
++4. **Engine staging during preview render**: should the hero PNG
++   also get staged into the project's `Assets/Models/AI/` folder
++   alongside the GLB? Useful for in-editor previews; adds another
++   file the user has to manage.
++5. **Hunyuan3D-Paint review timing** (unchanged from v1): block
++   v0.3 on the decision, or ship v0.3 without it?
++6. **Multi-view backend research** (unchanged from v1).
++7. **Pipeline-doctor in CI?** Run on PRs that touch script files?
++   Catches stale model_manifest entries early.
+ 
+ ---
+ 
+-*End of spec v1 (pre-MMR review).*
++*End of spec v2 (post-MMR).*
