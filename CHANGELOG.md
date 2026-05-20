@@ -2,6 +2,15 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P2.1: generator auto-selection (skill text only)
+
+- `skill/SKILL.md` Flow 2 — adds a six-row recommendation matrix
+  (character → TRELLIS, mech/weapon → SPAR3D, quick/draft → SPAR3D,
+  prop default → SF3D, visible back face → TRELLIS or multi-view,
+  commercial release → SF3D/SPAR3D only). Reinforces the
+  "state the bucket inline" convention for non-default choices.
+- HTML embed regenerated. No code changes.
+
 ## 2026-05-20 — P1.9: print structural gates (Tier 1, ends Tier 1)
 
 - `scripts/print_structural_check.py` — heuristic structural checks

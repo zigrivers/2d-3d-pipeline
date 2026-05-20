@@ -243,6 +243,33 @@ Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
 
+### Generator recommendation matrix (v0.3+)
+
+Before invoking `generate.sh`, classify the asset by reading the user's
+request. Match the closest row and recommend that generator (stating
+the license bucket inline, as already required for non-default choices).
+
+| Intent signals (in prompt or context) | Recommend | Why |
+|---|---|---|
+| "character", "figure", "creature", "person" with detail | TRELLIS | Better topology for organic forms; user must accept `non_commercial` |
+| "mech", "robot", "weapon", "gun", "tool", "hard surface" | SPAR3D | Sharper edges; ~2× faster |
+| "quick", "draft", "iterate", "prototype", "test" | SPAR3D | ~2× speed at acceptable quality for iteration |
+| "prop", "chest", "barrel", "rock", "crate", default | SF3D | Default; `commercial_safe` ‡; reliable |
+| Asset needs visible back face (e.g. character figurine) | TRELLIS, or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
+| Final asset for **commercial** release | SF3D **or** SPAR3D only | Both `commercial_threshold`; **never** TRELLIS here |
+
+‡ Note SF3D is technically `commercial_threshold`, the same as SPAR3D — but it's the documented default so the threshold disclosure is implicit. Be explicit when picking ANYTHING else.
+
+When you deviate from SF3D, state the bucket and the reason in
+conversation. Example:
+
+> "This is a character with fine detail — I'd recommend TRELLIS for
+> better topology. License bucket `non_commercial`, which means this
+> asset can't ship in Grithkin or GripCraft commercially. Want me to
+> proceed with TRELLIS, or use SF3D (commercial-safe but noisier topology)?"
+
+If unclear, ask one short question to disambiguate intent.
+
 ### Translation map (v0.3+ user-friendly language)
 
 The wrappers and Claude both speak engine-jargon natively, but the

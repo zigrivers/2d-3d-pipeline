@@ -8083,6 +8083,33 @@ Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
 
+### Generator recommendation matrix (v0.3+)
+
+Before invoking `generate.sh`, classify the asset by reading the user&#x27;s
+request. Match the closest row and recommend that generator (stating
+the license bucket inline, as already required for non-default choices).
+
+| Intent signals (in prompt or context) | Recommend | Why |
+|---|---|---|
+| &quot;character&quot;, &quot;figure&quot;, &quot;creature&quot;, &quot;person&quot; with detail | TRELLIS | Better topology for organic forms; user must accept `non_commercial` |
+| &quot;mech&quot;, &quot;robot&quot;, &quot;weapon&quot;, &quot;gun&quot;, &quot;tool&quot;, &quot;hard surface&quot; | SPAR3D | Sharper edges; ~2× faster |
+| &quot;quick&quot;, &quot;draft&quot;, &quot;iterate&quot;, &quot;prototype&quot;, &quot;test&quot; | SPAR3D | ~2× speed at acceptable quality for iteration |
+| &quot;prop&quot;, &quot;chest&quot;, &quot;barrel&quot;, &quot;rock&quot;, &quot;crate&quot;, default | SF3D | Default; `commercial_safe` ‡; reliable |
+| Asset needs visible back face (e.g. character figurine) | TRELLIS, or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
+| Final asset for **commercial** release | SF3D **or** SPAR3D only | Both `commercial_threshold`; **never** TRELLIS here |
+
+‡ Note SF3D is technically `commercial_threshold`, the same as SPAR3D — but it&#x27;s the documented default so the threshold disclosure is implicit. Be explicit when picking ANYTHING else.
+
+When you deviate from SF3D, state the bucket and the reason in
+conversation. Example:
+
+&gt; &quot;This is a character with fine detail — I&#x27;d recommend TRELLIS for
+&gt; better topology. License bucket `non_commercial`, which means this
+&gt; asset can&#x27;t ship in Grithkin or GripCraft commercially. Want me to
+&gt; proceed with TRELLIS, or use SF3D (commercial-safe but noisier topology)?&quot;
+
+If unclear, ask one short question to disambiguate intent.
+
 ### Translation map (v0.3+ user-friendly language)
 
 The wrappers and Claude both speak engine-jargon natively, but the
