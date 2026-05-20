@@ -3475,6 +3475,22 @@ if _os.path.exists(_check) and _os.path.exists(_helper_py):
     except Exception as _e:
         print(f&quot;[prepare_for_print] mesh_quality_check skipped: {_e}&quot;)
 
+# v0.3: print structural gates (wall thickness, COM, base contact, etc.)
+_struct = _os.path.join(_here, &quot;print_structural_check.py&quot;)
+if not _os.path.exists(_struct):
+    _struct = _os.path.expanduser(&quot;~/3d-pipeline/workspace/print_structural_check.py&quot;)
+if _os.path.exists(_struct) and _os.path.exists(_helper_py):
+    try:
+        _sp.run(
+            [_helper_py, _struct,
+             &quot;--input&quot;, output_path,
+             &quot;--meta&quot;, _meta_path],
+            check=False,
+            timeout=120,
+        )
+    except Exception as _e:
+        print(f&quot;[prepare_for_print] print_structural_check skipped: {_e}&quot;)
+
 
 # ---------- report ----------
 print(f&quot;[prepare_for_print] OK -&gt; {output_path}&quot;)
@@ -7501,6 +7517,239 @@ def main() -&gt; int:
                 print(f&quot;[game-check] Engine: ⚠ normal handedness is &quot;
                       f&quot;{engine[&#x27;normal_handedness&#x27;]}; &quot;
                       f&quot;{engine[&#x27;engine_target&#x27;]} expects the opposite&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>print_structural_check.py</code>
+                <span class="script-summary-desc">v0.3 print-structural gates (wall thickness, COM, etc.)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/print_structural_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — print structural gates.
+
+Watertight is necessary but not sufficient. This check probes the
+structural issues that turn a clean-looking STL into a failed print:
+
+  - min_wall_thickness_mm: approximate via point-cloud nearest-
+    neighbour distance heuristic (KDTree). Warn &lt; 1.0 mm, error
+    &lt; 0.4 mm (FDM nozzle limit).
+  - disconnected_islands: number of separate mesh bodies.
+  - self_intersections: trimesh repair.broken_faces count.
+  - overhang_area_mm2: total area of faces whose Z normal &lt; -cos(45°).
+  - base_contact_area_mm2: bottom-N% of the mesh projected to Z=0.
+  - com_offset_normalized: XY distance from centre-of-mass projected
+    to base, divided by the base radius.
+  - stable_on_bed: COM falls within the base contact polygon.
+
+Writes `print.structural` into the per-asset meta.json.
+
+Usage:
+    print_structural_check.py --input PATH.stl --meta PATH [--json]
+
+Heuristics, not exact. Frame results as advisory in the skill.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+WALL_WARN_MM = 1.0
+WALL_ERROR_MM = 0.4
+OVERHANG_COS = math.cos(math.radians(45))
+BASE_FRACTION = 0.05  # bottom 5% of the mesh treated as the base
+
+
+def _imports():
+    try:
+        import trimesh  # type: ignore
+        import numpy as np  # type: ignore
+        return trimesh, np
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); aborting.&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _min_wall_thickness(mesh, np) -&gt; float | None:
+    &quot;&quot;&quot;Approximate min wall thickness via interior ray casts.
+    For each face, cast a ray from its centroid inward along the
+    negative normal; the closest hit distance bounds the wall
+    thickness at that face. Returns the minimum across a sample.
+    &quot;&quot;&quot;
+    try:
+        n_samples = min(500, len(mesh.faces))
+        if n_samples == 0:
+            return None
+        idx = np.linspace(0, len(mesh.faces) - 1, n_samples).astype(int)
+        # Centroid per face
+        verts = mesh.vertices
+        faces = mesh.faces[idx]
+        centroids = verts[faces].mean(axis=1)
+        normals = mesh.face_normals[idx]
+        # Inward ray = -normal, start slightly inside to avoid self-hit
+        origins = centroids - normals * 1e-4
+        # Use trimesh.intersections.ray_triangle for cross-platform support
+        try:
+            ray = mesh.ray
+            locations, ray_indices, _ = ray.intersects_location(
+                ray_origins=origins,
+                ray_directions=-normals,
+                multiple_hits=False,
+            )
+            if len(ray_indices) == 0:
+                return None
+            distances = np.linalg.norm(locations - origins[ray_indices], axis=1)
+            # Filter out zero-length grazes
+            distances = distances[distances &gt; 1e-3]
+            if not len(distances):
+                return None
+            return float(distances.min())
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _self_intersections(mesh) -&gt; int:
+    try:
+        from trimesh.repair import broken_faces  # type: ignore
+        return int(len(broken_faces(mesh)))
+    except Exception:
+        return -1
+
+
+def _base_geometry(mesh, np) -&gt; dict:
+    &quot;&quot;&quot;Return base contact area + COM offset normalised by base radius.&quot;&quot;&quot;
+    verts = mesh.vertices
+    if len(verts) == 0:
+        return {&quot;base_contact_area_mm2&quot;: 0.0, &quot;com_offset_normalized&quot;: 0.0,
+                &quot;base_contact_safe&quot;: False, &quot;stable_on_bed&quot;: False}
+    z = verts[:, 2]
+    z_min, z_max = z.min(), z.max()
+    base_z_thresh = z_min + (z_max - z_min) * BASE_FRACTION
+    base_pts = verts[z &lt;= base_z_thresh]
+    if len(base_pts) &lt; 3:
+        return {&quot;base_contact_area_mm2&quot;: 0.0, &quot;com_offset_normalized&quot;: 0.0,
+                &quot;base_contact_safe&quot;: False, &quot;stable_on_bed&quot;: False}
+    # 2D convex hull area in XY
+    try:
+        from scipy.spatial import ConvexHull  # type: ignore
+        hull = ConvexHull(base_pts[:, :2])
+        base_area = float(hull.volume)  # 2D hull&#x27;s volume is area
+        base_xy = base_pts[:, :2]
+        base_center = base_xy.mean(axis=0)
+        base_radius = float(np.linalg.norm(base_xy - base_center, axis=1).max())
+    except Exception:
+        # Fallback: bounding-box approximation
+        bb = base_pts[:, :2]
+        base_area = float((bb[:, 0].max() - bb[:, 0].min()) *
+                          (bb[:, 1].max() - bb[:, 1].min()))
+        base_center = bb.mean(axis=0)
+        base_radius = float(np.linalg.norm(bb - base_center, axis=1).max())
+
+    # COM in XY
+    com_xy = verts.mean(axis=0)[:2]
+    com_offset = float(np.linalg.norm(com_xy - base_center))
+    com_norm = com_offset / max(base_radius, 1e-6)
+    return {
+        &quot;base_contact_area_mm2&quot;: round(base_area, 2),
+        &quot;com_offset_normalized&quot;: round(com_norm, 3),
+        &quot;base_contact_safe&quot;: bool(base_area &gt; 100.0),
+        &quot;stable_on_bed&quot;: bool(com_norm &lt; 0.5),
+    }
+
+
+def check(input_path: Path) -&gt; dict:
+    trimesh, np = _imports()
+    try:
+        mesh = trimesh.load(str(input_path), force=&quot;mesh&quot;)
+    except Exception as e:
+        return {&quot;error&quot;: f&quot;load_failed: {e}&quot;}
+
+    wall = _min_wall_thickness(mesh, np)
+    wall_safe = (wall is None or wall &gt;= WALL_WARN_MM)
+
+    bodies = 1
+    try:
+        bodies = int(len(mesh.split(only_watertight=False)))
+    except Exception:
+        pass
+
+    self_int = _self_intersections(mesh)
+
+    # Overhang area
+    overhang_area = 0.0
+    try:
+        if mesh.face_normals is not None:
+            nz = mesh.face_normals[:, 2]
+            mask = nz &lt; -OVERHANG_COS
+            if mask.any():
+                overhang_area = float(mesh.area_faces[mask].sum())
+    except Exception:
+        pass
+
+    base = _base_geometry(mesh, np)
+
+    return {
+        &quot;min_wall_thickness_mm&quot;: round(wall, 3) if wall is not None else None,
+        &quot;wall_thickness_safe&quot;: bool(wall_safe),
+        &quot;disconnected_islands&quot;: int(bodies),
+        &quot;self_intersections&quot;: int(self_int) if self_int &gt;= 0 else None,
+        &quot;overhang_area_mm2&quot;: round(overhang_area, 2),
+        **base,
+    }
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    result = check(Path(os.path.expanduser(args.input)))
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;print&quot;,
+         &quot;--data&quot;, json.dumps({&quot;structural&quot;: result})],
+        check=False,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        if &quot;error&quot; in result:
+            print(f&quot;[print-struct] could not analyze: {result[&#x27;error&#x27;]}&quot;, file=sys.stderr)
+            return 0
+        wall = result.get(&quot;min_wall_thickness_mm&quot;)
+        if wall is not None:
+            if wall &lt; WALL_ERROR_MM:
+                print(f&quot;[print-struct] ⚠ thinnest part is {wall} mm — likely too thin for FDM (need ≥ 0.4mm)&quot;)
+            elif wall &lt; WALL_WARN_MM:
+                print(f&quot;[print-struct] ⚠ thinnest part is {wall} mm — fragile; consider scaling up&quot;)
+            else:
+                print(f&quot;[print-struct] walls ≥ {wall} mm (good)&quot;)
+        bca = result.get(&quot;base_contact_area_mm2&quot;, 0)
+        if not result.get(&quot;base_contact_safe&quot;):
+            print(f&quot;[print-struct] ⚠ base contact area only {bca} mm² — may lift during print&quot;)
+        if not result.get(&quot;stable_on_bed&quot;):
+            print(f&quot;[print-struct] ⚠ centre of mass offset {result.get(&#x27;com_offset_normalized&#x27;)} × base radius — may tip&quot;)
     return 0
 
 

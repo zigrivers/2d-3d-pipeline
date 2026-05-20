@@ -247,6 +247,22 @@ if _os.path.exists(_check) and _os.path.exists(_helper_py):
     except Exception as _e:
         print(f"[prepare_for_print] mesh_quality_check skipped: {_e}")
 
+# v0.3: print structural gates (wall thickness, COM, base contact, etc.)
+_struct = _os.path.join(_here, "print_structural_check.py")
+if not _os.path.exists(_struct):
+    _struct = _os.path.expanduser("~/3d-pipeline/workspace/print_structural_check.py")
+if _os.path.exists(_struct) and _os.path.exists(_helper_py):
+    try:
+        _sp.run(
+            [_helper_py, _struct,
+             "--input", output_path,
+             "--meta", _meta_path],
+            check=False,
+            timeout=120,
+        )
+    except Exception as _e:
+        print(f"[prepare_for_print] print_structural_check skipped: {_e}")
+
 
 # ---------- report ----------
 print(f"[prepare_for_print] OK -> {output_path}")

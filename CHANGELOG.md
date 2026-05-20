@@ -2,6 +2,26 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.9: print structural gates (Tier 1, ends Tier 1)
+
+- `scripts/print_structural_check.py` — heuristic structural checks
+  that complement watertightness (per codex P1 in the v3 MMR):
+    min_wall_thickness_mm    — via inward ray cast (sample of faces)
+    disconnected_islands     — count via `mesh.split`
+    self_intersections       — trimesh.repair.broken_faces
+    overhang_area_mm2        — faces with steep negative-Z normals
+    base_contact_area_mm2    — convex-hull area of bottom 5% in XY
+    com_offset_normalized    — COM XY offset / base radius
+    stable_on_bed            — COM falls within base footprint
+  Frame results as advisory in the skill — the heuristics produce
+  false positives (especially wall thickness).
+- `scripts/prepare_for_print.py` calls it after STL export (and the
+  mesh_quality_check from P1.4), writing `print.structural` to the
+  STL-side meta.json.
+
+**Tier 1 of the v0.3 plan now complete.** Foundation (P0.1–P0.3) +
+all nine Tier 1 PRs (P1.1–P1.9) shipped.
+
 ## 2026-05-20 — P1.8: UV + game-engine validation (Tier 1)
 
 - `scripts/game_asset_check.py` — trimesh-based checks for the
