@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paid 3D backends · Asset Pipeline</title>
+<meta name="description" content="Research and analysis of paid 3D model-generation services as opt-in backends for the asset pipeline. Pricing, quality, licensing, architecture fit, and cost projections.">
+<style>
+  :root {
+    /* Catppuccin Mocha */
+    --bg:#1e1e2e; --mantle:#181825; --crust:#11111b;
+    --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
+    --overlay0:#6c7086; --overlay1:#7f849c; --overlay2:#9399b2;
+    --subtext0:#a6adc8; --subtext1:#bac2de; --text:#cdd6f4;
+    --peach:#fab387; --green:#a6e3a1; --yellow:#f9e2af;
+    --red:#f38ba8;   --mauve:#cba6f7; --blue:#89b4fa;
+    --teal:#94e2d5;  --sapphire:#74c7ec; --lavender:#b4befe; --pink:#f5c2e7;
+    --rule:rgba(205,214,244,.07);
+    --rule-strong:rgba(205,214,244,.14);
+  }
+  *{box-sizing:border-box}
+  html,body{
+    margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:'JetBrains Mono','SF Mono','Menlo',monospace;
+    font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;
+  }
+  main{max-width:1180px;margin:0 auto;padding:48px 28px 160px}
+  a{color:var(--lavender);text-decoration:none;border-bottom:1px dotted var(--overlay0)}
+  a:hover{color:var(--peach);border-bottom-color:var(--peach)}
+  code{
+    background:var(--surface0);color:var(--peach);
+    padding:1px 6px;border-radius:3px;font-size:.92em;
+    border:1px solid var(--rule-strong);
+  }
+  pre{
+    background:var(--mantle);color:var(--subtext1);
+    padding:14px 18px;border-radius:6px;
+    border:1px solid var(--rule-strong);
+    font-size:12.5px;line-height:1.55;margin:14px 0;overflow-x:auto;
+  }
+  /* --- Headings --- */
+  h1{font-size:34px;margin:0 0 6px;letter-spacing:-0.015em;font-weight:700}
+  .subtitle{color:var(--overlay1);font-size:14px;font-style:italic;margin-bottom:36px}
+  h2{
+    font-size:22px;color:var(--peach);font-weight:700;
+    margin:64px 0 14px;padding-bottom:8px;
+    border-bottom:1px solid var(--rule-strong);letter-spacing:-0.005em;
+  }
+  h3{font-size:15px;color:var(--mauve);font-weight:700;margin:28px 0 10px}
+  h4{font-size:12px;color:var(--blue);text-transform:uppercase;letter-spacing:.08em;margin:18px 0 6px}
+  p{margin:10px 0;color:var(--subtext1)}
+  ul,ol{margin:12px 0;padding-left:22px}
+  li{margin:5px 0;color:var(--subtext1)}
+  li strong{color:var(--text)}
+
+  /* --- Hero --- */
+  .hero{
+    background:linear-gradient(135deg,rgba(250,179,135,.08),rgba(180,190,254,.06));
+    border:1px solid var(--rule-strong);border-left:3px solid var(--peach);
+    border-radius:8px;padding:28px 32px;margin-bottom:48px;
+    display:grid;grid-template-columns:1fr 280px;gap:32px;align-items:center;
+  }
+  @media (max-width:780px){.hero{grid-template-columns:1fr}}
+  .hero-eyebrow{
+    font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--peach);font-weight:600;margin-bottom:8px;
+  }
+  .hero h1{margin-bottom:8px}
+  .hero .lead{color:var(--subtext1);font-size:14px;margin:0}
+
+  /* Animated rotating wireframe in the hero */
+  .hero-figure{
+    display:flex;align-items:center;justify-content:center;
+    height:200px;
+  }
+  .hero-figure svg{width:200px;height:200px}
+  .hero-figure .wire{
+    fill:none;stroke:var(--mauve);stroke-width:1.3;
+    transform-origin:100px 100px;
+    animation:spin 18s linear infinite;
+  }
+  .hero-figure .wire-2{
+    stroke:var(--sapphire);stroke-width:1;
+    transform-origin:100px 100px;
+    animation:spin 18s linear infinite reverse;
+    opacity:.6;
+  }
+  .hero-figure .ring{
+    fill:none;stroke:var(--rule-strong);stroke-width:1;
+  }
+  @keyframes spin{
+    from{transform:rotateY(0) rotate(0)}
+    to{transform:rotateY(360deg) rotate(360deg)}
+  }
+
+  /* --- Key takeaway band --- */
+  .takeaway{
+    background:var(--mantle);border:1px solid var(--rule-strong);
+    border-left:3px solid var(--green);border-radius:6px;
+    padding:16px 20px;margin:24px 0;
+  }
+  .takeaway-label{
+    font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--green);font-weight:600;margin-bottom:6px;
+  }
+
+  /* --- Service cards --- */
+  .cards{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin:22px 0}
+  .card{
+    background:var(--mantle);border:1px solid var(--surface0);
+    border-radius:8px;padding:18px 20px;
+    transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;
+    position:relative;overflow:hidden;
+  }
+  .card::before{
+    content:"";position:absolute;left:0;top:0;width:3px;height:100%;
+    background:var(--service-color,var(--overlay0));
+    transition:width .18s ease;
+  }
+  .card:hover{
+    transform:translateY(-2px);
+    border-color:var(--service-color,var(--mauve));
+    box-shadow:0 4px 20px rgba(0,0,0,.25);
+  }
+  .card:hover::before{width:5px}
+  .card-name{
+    font-size:14px;font-weight:700;color:var(--text);
+    display:flex;align-items:center;justify-content:space-between;
+  }
+  .card-tag{
+    font-size:9px;letter-spacing:.1em;text-transform:uppercase;
+    padding:2px 8px;border-radius:10px;font-weight:600;
+  }
+  .tag-commercial{background:rgba(166,227,161,.12);color:var(--green)}
+  .tag-threshold{background:rgba(249,226,175,.12);color:var(--yellow)}
+  .tag-risky{background:rgba(243,139,168,.14);color:var(--red)}
+  .card-pitch{color:var(--subtext0);font-size:12px;margin:6px 0 14px;line-height:1.5}
+  .card dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px}
+  .card dt{color:var(--overlay1);text-transform:uppercase;letter-spacing:.06em;font-size:10px;padding-top:3px}
+  .card dd{margin:0;color:var(--subtext1)}
+  .card dd strong{color:var(--text)}
+
+  /* --- Tables --- */
+  .table-wrap{overflow-x:auto;margin:18px 0;border:1px solid var(--rule);border-radius:6px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{color:var(--peach);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;background:var(--mantle)}
+  tr:last-child td{border-bottom:none}
+  td code{font-size:.9em}
+
+  /* --- Quadrant chart --- */
+  .chart-wrap{
+    background:var(--mantle);border:1px solid var(--rule-strong);border-radius:8px;
+    padding:22px 22px 12px;margin:20px 0;
+  }
+  .chart-wrap svg{display:block;width:100%;height:auto;max-height:520px}
+  .chart-legend{
+    display:flex;flex-wrap:wrap;gap:14px;justify-content:center;
+    font-size:11.5px;color:var(--subtext0);margin-top:10px;
+  }
+  .chart-legend span{display:inline-flex;align-items:center;gap:6px}
+  .chart-legend i{
+    width:10px;height:10px;border-radius:50%;display:inline-block;flex-shrink:0;
+  }
+
+  /* SVG dot pulse */
+  .dot-pulse{animation:pulse 2.6s ease-in-out infinite}
+  @keyframes pulse{
+    0%,100%{opacity:.95;r:7}
+    50%{opacity:.55;r:10}
+  }
+  .dot-rec{animation:pulse-rec 2.6s ease-in-out infinite}
+  @keyframes pulse-rec{
+    0%,100%{opacity:1;r:10}
+    50%{opacity:.6;r:14}
+  }
+
+  /* SVG path draw on load */
+  .draw-path{
+    stroke-dasharray:600;stroke-dashoffset:600;
+    animation:draw 2.2s ease-out forwards;
+  }
+  @keyframes draw{to{stroke-dashoffset:0}}
+
+  /* --- Architecture flowchart --- */
+  .arch-wrap{
+    background:var(--mantle);border:1px solid var(--rule-strong);border-radius:8px;
+    padding:24px;margin:20px 0;
+  }
+
+  /* --- Cost projections --- */
+  .scenarios{
+    display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));margin:22px 0;
+  }
+  .scenario{
+    background:var(--mantle);border:1px solid var(--rule);border-radius:6px;padding:18px 20px;
+    border-left:3px solid var(--blue);
+  }
+  .scenario h3{margin-top:0;color:var(--blue)}
+  .bar-chart{margin:14px 0 6px;font-size:11px}
+  .bar-row{display:grid;grid-template-columns:120px 1fr 70px;gap:8px;align-items:center;margin:6px 0}
+  .bar-label{color:var(--subtext0);font-size:11px}
+  .bar-track{background:var(--surface0);border-radius:3px;height:14px;overflow:hidden;position:relative}
+  .bar-fill{
+    height:100%;border-radius:3px;
+    background:linear-gradient(90deg,var(--blue),var(--mauve));
+    transform-origin:left;transform:scaleX(0);
+    animation:fill 1.2s ease-out forwards;
+  }
+  @keyframes fill{to{transform:scaleX(1)}}
+  .bar-value{color:var(--text);text-align:right;font-weight:600}
+
+  /* --- Recommendation cards --- */
+  .recos{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin:18px 0}
+  .reco{
+    background:var(--mantle);border:1px solid var(--rule);border-radius:6px;
+    padding:16px 18px;border-top:3px solid var(--service-color,var(--peach));
+  }
+  .reco h4{margin-top:0}
+  .reco .verdict{color:var(--text);font-weight:600;margin:6px 0 8px;font-size:13px}
+  .reco .why{color:var(--subtext1);font-size:12px}
+
+  /* --- Decision tree --- */
+  .tree{
+    background:var(--mantle);border:1px solid var(--rule-strong);border-radius:8px;
+    padding:24px;margin:20px 0;
+  }
+  .tree-node{
+    display:inline-block;background:var(--surface0);border:1px solid var(--rule-strong);
+    color:var(--text);padding:8px 14px;border-radius:20px;font-size:12px;
+    transition:background .18s ease,transform .18s ease;
+  }
+  .tree-node:hover{background:var(--surface1);transform:scale(1.04)}
+  .tree-node.terminal{background:rgba(166,227,161,.12);border-color:var(--green);color:var(--green)}
+  .tree-node.warn{background:rgba(249,226,175,.10);border-color:var(--yellow);color:var(--yellow)}
+  .tree-node.risk{background:rgba(243,139,168,.10);border-color:var(--red);color:var(--red)}
+
+  /* --- Callouts --- */
+  .callout{
+    border-left:3px solid var(--overlay0);background:var(--mantle);
+    border-radius:0 4px 4px 0;padding:14px 18px;margin:18px 0;font-size:13px;
+  }
+  .callout-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--overlay1);margin-bottom:6px;font-weight:600}
+  .callout-rationale{border-left-color:var(--mauve)} .callout-rationale .callout-label{color:var(--mauve)}
+  .callout-context{border-left-color:var(--sapphire);background:rgba(116,199,236,.04)} .callout-context .callout-label{color:var(--sapphire)}
+  .callout-decision{border-left-color:var(--green);background:rgba(166,227,161,.04)} .callout-decision .callout-label{color:var(--green)}
+  .callout-gotcha{border-left-color:var(--red);background:rgba(243,139,168,.04)} .callout-gotcha .callout-label{color:var(--red)}
+  .callout-warn{border-left-color:var(--yellow);background:rgba(249,226,175,.04)} .callout-warn .callout-label{color:var(--yellow)}
+
+  /* --- Section numbering --- */
+  .sec-num{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--overlay0);margin-bottom:4px}
+
+  /* --- Sources --- */
+  footer{
+    margin-top:64px;padding-top:24px;border-top:1px solid var(--rule);
+    color:var(--subtext0);font-size:11.5px;
+  }
+  footer ul{padding-left:18px}
+  footer li{margin:4px 0;font-size:11.5px}
+
+  /* --- Animated number counters --- */
+  .counter{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<main>
+
+<!-- =========================== HERO =========================== -->
+<header class="hero">
+  <div>
+    <div class="hero-eyebrow">Asset pipeline · Research note · 2026-05-19</div>
+    <h1>Paid 3D backends</h1>
+    <p class="lead">
+      What it would take to add commercial 3D-generation services to the
+      existing pipeline as opt-in backends, with quality, licensing, and
+      cost analysis grounded in current (May 2026) pricing.
+    </p>
+  </div>
+  <div class="hero-figure" aria-hidden="true">
+    <svg viewBox="0 0 200 200">
+      <!-- Background rings -->
+      <circle class="ring" cx="100" cy="100" r="92"/>
+      <circle class="ring" cx="100" cy="100" r="64"/>
+      <circle class="ring" cx="100" cy="100" r="36"/>
+      <!-- Outer wireframe shape (animated) -->
+      <g class="wire">
+        <polygon points="100,18 168,60 168,140 100,182 32,140 32,60"/>
+        <line x1="100" y1="18" x2="100" y2="182"/>
+        <line x1="32"  y1="60" x2="168" y2="140"/>
+        <line x1="168" y1="60" x2="32"  y2="140"/>
+      </g>
+      <!-- Inner counter-rotating wireframe -->
+      <g class="wire wire-2">
+        <polygon points="100,50 142,75 142,125 100,150 58,125 58,75"/>
+        <line x1="100" y1="50" x2="100" y2="150"/>
+        <line x1="58"  y1="75" x2="142" y2="125"/>
+      </g>
+      <!-- Center dot -->
+      <circle cx="100" cy="100" r="3" fill="var(--peach)"/>
+    </svg>
+  </div>
+</header>
+
+<div class="takeaway">
+  <div class="takeaway-label">Key takeaway</div>
+  <p style="margin:0">
+    Paid services largely solve two problems the local Apple-Silicon pipeline
+    has — the missing CUDA rasterizers that gate Hunyuan/Rodin PBR, and the
+    licence ambiguity around community-licensed models. At realistic usage
+    (~20–200 generations per month) a pay-per-call account on
+    <strong>fal.ai</strong> or a single <strong>Tripo Pro</strong> subscription
+    runs <strong class="counter">$1–35/month</strong> total. Add them as opt-in
+    generator strings to <code>generate.sh</code> the same way SF3D and SPAR3D
+    work today; the default stays <strong>Z-Image Turbo → SF3D → Blender →
+    Snapmaker U1</strong>.
+  </p>
+</div>
+
+<!-- =========================== 1: WHY PAID =========================== -->
+<section>
+  <div class="sec-num">01 · Context</div>
+  <h2>Why consider paid backends at all</h2>
+
+  <p>The local pipeline is great for the default path. Three forces push toward paid as soon as you want maximum quality:</p>
+
+  <ol>
+    <li><strong>The Apple-Silicon CUDA gap.</strong> The shape side of every modern model runs fine on MPS. The <em>texture</em> side — PBR map synthesis, differentiable rasterizers — is almost universally CUDA-only today. On a Mac you either get untextured shape (and lose half the quality story) or you wait for community forks that lag months behind upstream. Paid cloud services run on CUDA GPUs and don't have this problem.</li>
+    <li><strong>The licence gap.</strong> Hunyuan3D-2 and Hunyuan3D-Paint ship under the Tencent Hunyuan Community License (revenue thresholds, region exclusions). TRELLIS is non-commercial. Paid services with explicit "you own all assets, full rights to distribute and sell" terms are the clean path to commercial usability for Grithkin / GripCraft / 3D-print products.</li>
+    <li><strong>Time vs money.</strong> Two Mac Studios at ~$10,000+ in hardware. Cloud-quality output at ~$0.05–0.50 per generation. The hardware doesn't beat the cloud until you're running ~20,000 generations a year — past which Tripo or fal.ai pay-per-call still wins by 5–20×.</li>
+  </ol>
+
+  <div class="callout callout-context">
+    <div class="callout-label">Context — the architecture already supports this</div>
+    <p style="margin:0">A paid backend is just another value for <code>generate.sh -g GENERATOR</code>. The wrapper would POST to an HTTP API, poll until done, download the GLB, then drop into the same Blender cleanup as SF3D. Licence-bucket map gets a new entry per backend. Manifest + benchmark output records the backend choice. No core change.</p>
+  </div>
+</section>
+
+<!-- =========================== 2: CONTENDERS =========================== -->
+<section>
+  <div class="sec-num">02 · Stack</div>
+  <h2>The contenders</h2>
+
+  <p>One card per service. Subscription pricing is the <em>cheapest commercial-safe</em> tier (annual where it changes the headline). Pay-per-call is via <strong>fal.ai</strong> where available — the same models hosted with a per-generation price tag and no monthly commitment.</p>
+
+  <div class="cards">
+    <article class="card" style="--service-color: var(--pink)">
+      <div class="card-name">
+        Hyper3D Rodin
+        <span class="card-tag tag-commercial">commercial</span>
+      </div>
+      <div class="card-pitch">Best photorealism, 4K PBR textures, the highest-end output any service produces today. The "hero asset" pick.</div>
+      <dl>
+        <dt>Pro sub</dt><dd><strong>$99/mo</strong> direct · $29/mo via 3DAI Studio aggregator</dd>
+        <dt>Per call</dt><dd><strong>$0.40/gen</strong> on fal.ai</dd>
+        <dt>Speed</dt><dd>~30–60s</dd>
+        <dt>Use for</dt><dd>Display pieces, marketing renders, statement assets</dd>
+      </dl>
+    </article>
+
+    <article class="card" style="--service-color: var(--sapphire)">
+      <div class="card-name">
+        Tripo Studio
+        <span class="card-tag tag-commercial">commercial</span>
+      </div>
+      <div class="card-pitch">Clean quad topology purpose-built for game engines. Fastest top-quality option (~10s) and the most credit-efficient on subscription.</div>
+      <dl>
+        <dt>Pro sub</dt><dd><strong>$19.90/mo</strong> · 3,000 credits (~150 gens)</dd>
+        <dt>Per call</dt><dd><strong>$0.05/gen</strong> on fal.ai</dd>
+        <dt>Speed</dt><dd>~10s</dd>
+        <dt>Use for</dt><dd>Grithkin / GripCraft game assets</dd>
+      </dl>
+    </article>
+
+    <article class="card" style="--service-color: var(--red)">
+      <div class="card-name">
+        Hunyuan3D 2.1
+        <span class="card-tag tag-risky">unclear_risky</span>
+      </div>
+      <div class="card-pitch">Top geometry detail and full PBR via the official cloud-hosted path. Most license-sensitive choice — same Tencent Community licence as the <code>--mode paint</code> placeholder we already gated.</div>
+      <dl>
+        <dt>Per call</dt><dd><strong>$0.16</strong> mesh · <strong>$0.48</strong> textured</dd>
+        <dt>Self-host</dt><dd>~24.5 GB VRAM (CUDA)</dd>
+        <dt>Mac local</dt><dd>Shape-only via community fork; 2–5 min/gen</dd>
+        <dt>Use for</dt><dd>3D-print hero pieces, post-licence-review</dd>
+      </dl>
+    </article>
+
+    <article class="card" style="--service-color: var(--mauve)">
+      <div class="card-name">
+        Meshy AI
+        <span class="card-tag tag-commercial">commercial</span>
+      </div>
+      <div class="card-pitch">Best 3D-printing slicer pass rate (97%) with one-click Bambu Studio + 3MF. Doesn't help the Snapmaker U1 workflow much, but excellent fallback if you ever add a Bambu.</div>
+      <dl>
+        <dt>Pro sub</dt><dd><strong>$20/mo</strong> · 1,000 credits (~50 gens)</dd>
+        <dt>Studio sub</dt><dd>$60/mo · 4,000 credits</dd>
+        <dt>Speed</dt><dd>~15–30s</dd>
+        <dt>Use for</dt><dd>Print iteration if Snapmaker workflow shifts</dd>
+      </dl>
+    </article>
+
+    <article class="card" style="--service-color: var(--green)">
+      <div class="card-name">
+        TripoSR
+        <span class="card-tag tag-commercial">commercial</span>
+      </div>
+      <div class="card-pitch">Older, lower-quality, very cheap. Useful as a "draft" backend or for high-volume prototyping where any 3D is better than no 3D.</div>
+      <dl>
+        <dt>Per call</dt><dd><strong>$0.07/gen</strong> on fal.ai</dd>
+        <dt>Quality</dt><dd>Below SF3D</dd>
+        <dt>Use for</dt><dd>Throwaway proxy geometry</dd>
+      </dl>
+    </article>
+
+    <article class="card" style="--service-color: var(--yellow)">
+      <div class="card-name">
+        Rent-a-GPU (RunPod / Lambda)
+        <span class="card-tag tag-threshold">hybrid</span>
+      </div>
+      <div class="card-pitch">Spin up an A100/H100 on demand, run Hunyuan3D-2 yourself. You accept the Tencent licence directly; no per-call markup; full control over the model version.</div>
+      <dl>
+        <dt>GPU cost</dt><dd><strong>$1–2/hr</strong></dd>
+        <dt>Per gen</dt><dd>~$0.05–0.10 amortised</dd>
+        <dt>Setup</dt><dd>Real engineering effort</dd>
+        <dt>Use for</dt><dd>High-volume Hunyuan once licence is settled</dd>
+      </dl>
+    </article>
+  </div>
+</section>
+
+<!-- =========================== 3: QUALITY VS PRICE QUADRANT =========================== -->
+<section>
+  <div class="sec-num">03 · Stack</div>
+  <h2>Quality vs price · the landscape</h2>
+
+  <p>Each dot is a backend at its <em>cheapest commercial-safe</em> per-generation price (pay-per-call where available). Y-axis is qualitative geometry+texture quality per recent benchmarks. Existing local lanes (SF3D, SPAR3D, TRELLIS) are shown for context.</p>
+
+  <div class="chart-wrap">
+    <svg viewBox="0 0 760 460" role="img" aria-label="Quality vs price quadrant chart">
+      <!-- Axes -->
+      <line x1="80" y1="40"  x2="80"  y2="400" stroke="var(--rule-strong)" stroke-width="1.2"/>
+      <line x1="80" y1="400" x2="720" y2="400" stroke="var(--rule-strong)" stroke-width="1.2"/>
+
+      <!-- Grid -->
+      <g stroke="var(--rule)" stroke-width="1">
+        <line x1="80" y1="100" x2="720" y2="100"/>
+        <line x1="80" y1="200" x2="720" y2="200"/>
+        <line x1="80" y1="300" x2="720" y2="300"/>
+        <line x1="240" y1="40" x2="240" y2="400"/>
+        <line x1="400" y1="40" x2="400" y2="400"/>
+        <line x1="560" y1="40" x2="560" y2="400"/>
+      </g>
+
+      <!-- Axis labels -->
+      <text x="40" y="44"  fill="var(--overlay1)" font-size="10" font-family="monospace">QUALITY</text>
+      <text x="40" y="100" fill="var(--overlay0)" font-size="10" font-family="monospace">HIGH</text>
+      <text x="40" y="250" fill="var(--overlay0)" font-size="10" font-family="monospace">MID</text>
+      <text x="40" y="395" fill="var(--overlay0)" font-size="10" font-family="monospace">LOW</text>
+      <text x="80"  y="430" fill="var(--overlay0)" font-size="10" font-family="monospace">FREE</text>
+      <text x="232" y="430" fill="var(--overlay0)" font-size="10" font-family="monospace">$0.05</text>
+      <text x="392" y="430" fill="var(--overlay0)" font-size="10" font-family="monospace">$0.16</text>
+      <text x="552" y="430" fill="var(--overlay0)" font-size="10" font-family="monospace">$0.40</text>
+      <text x="690" y="430" fill="var(--overlay0)" font-size="10" font-family="monospace">$0.50+</text>
+      <text x="380" y="452" fill="var(--overlay1)" font-size="11" font-family="monospace" text-anchor="middle">PRICE PER GENERATION (commercial-safe tier)</text>
+
+      <!-- Quadrant shading -->
+      <rect x="80"  y="40"  width="320" height="180" fill="rgba(166,227,161,.04)"/>
+      <text x="240" y="60" fill="var(--green)" font-size="9" font-family="monospace" text-anchor="middle" opacity=".7">CHEAP + GOOD</text>
+
+      <!-- Local backends (existing) -->
+      <g>
+        <circle cx="80"  cy="280" r="7" fill="var(--blue)" opacity=".55"/>
+        <text  x="92"  y="284" fill="var(--subtext0)" font-size="11" font-family="monospace">SF3D (local)</text>
+
+        <circle cx="80"  cy="320" r="7" fill="var(--blue)" opacity=".55"/>
+        <text  x="92"  y="324" fill="var(--subtext0)" font-size="11" font-family="monospace">SPAR3D (local)</text>
+
+        <circle cx="80"  cy="160" r="7" fill="var(--blue)" opacity=".35"/>
+        <text  x="92"  y="164" fill="var(--overlay1)" font-size="11" font-family="monospace">TRELLIS (local, non-commercial)</text>
+      </g>
+
+      <!-- Paid backends -->
+      <g>
+        <!-- TripoSR ~ $0.07, mid quality -->
+        <circle cx="260" cy="260" r="7" fill="var(--green)"/>
+        <text  x="272" y="264" fill="var(--text)" font-size="11" font-family="monospace">TripoSR</text>
+
+        <!-- Tripo Studio $0.05, high quality, our recommendation -->
+        <circle cx="240" cy="130" r="10" fill="var(--sapphire)" class="dot-rec"/>
+        <text  x="256" y="134" fill="var(--text)" font-size="12" font-family="monospace" font-weight="700">Tripo Studio  ★</text>
+
+        <!-- Hunyuan3D mesh $0.16, very high quality, but licence -->
+        <circle cx="400" cy="90" r="9" fill="var(--red)" class="dot-pulse"/>
+        <text  x="416" y="94" fill="var(--text)" font-size="11" font-family="monospace">Hunyuan3D 2.x (textured)</text>
+
+        <!-- Hunyuan3D mesh-only -->
+        <circle cx="400" cy="180" r="7" fill="var(--red)" opacity=".7"/>
+        <text  x="416" y="184" fill="var(--subtext1)" font-size="11" font-family="monospace">Hunyuan3D 2.x (mesh-only)</text>
+
+        <!-- Rodin $0.40 highest quality -->
+        <circle cx="560" cy="60" r="9" fill="var(--pink)" class="dot-pulse"/>
+        <text  x="576" y="64" fill="var(--text)" font-size="11" font-family="monospace">Hyper3D Rodin  ★</text>
+
+        <!-- Meshy $0.40-ish via subscription/credit, mid-high -->
+        <circle cx="540" cy="170" r="7" fill="var(--mauve)" opacity=".85"/>
+        <text  x="552" y="174" fill="var(--subtext1)" font-size="11" font-family="monospace">Meshy AI</text>
+      </g>
+    </svg>
+    <div class="chart-legend">
+      <span><i style="background:var(--blue)"></i>Local backends (existing)</span>
+      <span><i style="background:var(--sapphire)"></i>Tripo (recommended primary)</span>
+      <span><i style="background:var(--pink)"></i>Rodin (recommended hero)</span>
+      <span><i style="background:var(--red)"></i>Hunyuan (licence-gated)</span>
+      <span><i style="background:var(--green)"></i>Budget</span>
+      <span><i style="background:var(--mauve)"></i>Print-focused</span>
+    </div>
+  </div>
+
+  <p style="font-size:12px;color:var(--overlay1);text-align:center;margin-top:-4px">
+    ★ pulse-animated dots are the recommended primary + hero choices for Ken's current projects.
+  </p>
+</section>
+
+<!-- =========================== 4: PRICING DETAIL TABLE =========================== -->
+<section>
+  <div class="sec-num">04 · Stack</div>
+  <h2>Pricing detail</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Subscription (cheapest commercial)</th>
+          <th>Pay-per-call</th>
+          <th>Commercial licence</th>
+          <th>Bucket on paid plan</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Tripo Studio</strong></td>
+          <td>$19.90/mo Pro · 3,000 credits</td>
+          <td>$0.05/gen (fal.ai)</td>
+          <td>Paid: full commercial use</td>
+          <td><code>commercial_safe</code></td>
+        </tr>
+        <tr>
+          <td><strong>Meshy AI</strong></td>
+          <td>$20/mo Pro · 1,000 credits</td>
+          <td>(via Meshy direct API only)</td>
+          <td>"You own all assets, full rights to distribute and sell"</td>
+          <td><code>commercial_safe</code></td>
+        </tr>
+        <tr>
+          <td><strong>Hyper3D Rodin</strong></td>
+          <td>$99/mo direct · $29/mo via 3DAI Studio</td>
+          <td>$0.40/gen (fal.ai)</td>
+          <td>Paid tiers grant commercial use</td>
+          <td><code>commercial_safe</code></td>
+        </tr>
+        <tr>
+          <td><strong>Hunyuan3D 2.x</strong></td>
+          <td>(no first-party subscription)</td>
+          <td>$0.16 mesh · $0.48 textured</td>
+          <td>Tencent Community License (revenue thresholds, region exclusions)</td>
+          <td><code>unclear_risky</code></td>
+        </tr>
+        <tr>
+          <td><strong>TripoSR</strong></td>
+          <td>—</td>
+          <td>$0.07/gen (fal.ai)</td>
+          <td>Open licence; commercial OK</td>
+          <td><code>commercial_safe</code></td>
+        </tr>
+        <tr>
+          <td><strong>Self-host on RunPod/Lambda</strong></td>
+          <td>—</td>
+          <td>$1–2/hr GPU; ~$0.05–0.10/gen amortised</td>
+          <td>Inherits underlying model's licence</td>
+          <td>(varies by model)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-rationale">
+    <div class="callout-label">Rationale — why fal.ai keeps coming up</div>
+    <p style="margin:0">It's the cleanest pay-per-call host for multiple model families at once: same API shape across Tripo, Rodin, Hunyuan, TripoSR. A single <code>FAL_API_KEY</code> in <code>~/3d-pipeline/.config</code> unlocks every backend the pipeline ever wants to add, vs. signing up for and managing four separate subscriptions. The markup over running on a rented GPU is modest and pays for the integration work you'd otherwise do yourself.</p>
+  </div>
+</section>
+
+<!-- =========================== 5: COST PROJECTIONS =========================== -->
+<section>
+  <div class="sec-num">05 · Stack</div>
+  <h2>Cost projections · three usage patterns</h2>
+
+  <p>Bars are scaled relative to the highest spend ($50/mo) so you can eyeball the curve. Estimates assume cleanup and print prep stay local on the Studios — only the heavy generation step goes to the cloud.</p>
+
+  <div class="scenarios">
+
+    <div class="scenario" style="border-left-color:var(--green)">
+      <h3 style="color:var(--green)">Active prototyping</h3>
+      <p style="font-size:12px;margin:0 0 10px">~20 game assets/month, iterating quickly. Grithkin asset polish.</p>
+      <div class="bar-chart">
+        <div class="bar-row">
+          <span class="bar-label">Local SF3D</span>
+          <span class="bar-track"><span class="bar-fill" style="width:2%;background:var(--overlay0)"></span></span>
+          <span class="bar-value">$0</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">fal.ai Tripo</span>
+          <span class="bar-track"><span class="bar-fill" style="width:2%;background:var(--sapphire)"></span></span>
+          <span class="bar-value">$1</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">fal.ai Hunyuan</span>
+          <span class="bar-track"><span class="bar-fill" style="width:19%"></span></span>
+          <span class="bar-value">$9.60</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Tripo Pro sub</span>
+          <span class="bar-track"><span class="bar-fill" style="width:40%"></span></span>
+          <span class="bar-value">$19.90</span>
+        </div>
+      </div>
+      <p style="font-size:11.5px;color:var(--overlay1);margin:8px 0 0">Cheapest credible spend: <strong style="color:var(--text)">$1/mo</strong> via Tripo pay-per-call.</p>
+    </div>
+
+    <div class="scenario" style="border-left-color:var(--blue)">
+      <h3>Active dev + occasional hero</h3>
+      <p style="font-size:12px;margin:0 0 10px">~50 game assets + 5 print + 2 hero. Realistic month for GripCraft + Grithkin together.</p>
+      <div class="bar-chart">
+        <div class="bar-row">
+          <span class="bar-label">Tripo Pro sub</span>
+          <span class="bar-track"><span class="bar-fill" style="width:40%"></span></span>
+          <span class="bar-value">$19.90</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">+ Hunyuan (5)</span>
+          <span class="bar-track"><span class="bar-fill" style="width:5%;background:var(--red)"></span></span>
+          <span class="bar-value">$2.40</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">+ Rodin (2)</span>
+          <span class="bar-track"><span class="bar-fill" style="width:2%;background:var(--pink)"></span></span>
+          <span class="bar-value">$0.80</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label"><strong>Total</strong></span>
+          <span class="bar-track"><span class="bar-fill" style="width:46%;background:linear-gradient(90deg,var(--sapphire),var(--mauve))"></span></span>
+          <span class="bar-value"><strong>$23</strong></span>
+        </div>
+      </div>
+      <p style="font-size:11.5px;color:var(--overlay1);margin:8px 0 0">Comfortable monthly: <strong style="color:var(--text)">~$23/mo</strong> all-in.</p>
+    </div>
+
+    <div class="scenario" style="border-left-color:var(--peach)">
+      <h3 style="color:var(--peach)">Production batch</h3>
+      <p style="font-size:12px;margin:0 0 10px">~200 game + 20 print + 10 hero. Full asset run for a GripCraft milestone.</p>
+      <div class="bar-chart">
+        <div class="bar-row">
+          <span class="bar-label">Tripo Pro sub</span>
+          <span class="bar-track"><span class="bar-fill" style="width:40%"></span></span>
+          <span class="bar-value">$19.90</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">+ Hunyuan (20)</span>
+          <span class="bar-track"><span class="bar-fill" style="width:19%;background:var(--red)"></span></span>
+          <span class="bar-value">$9.60</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">+ Rodin (10)</span>
+          <span class="bar-track"><span class="bar-fill" style="width:8%;background:var(--pink)"></span></span>
+          <span class="bar-value">$4.00</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label"><strong>Total</strong></span>
+          <span class="bar-track"><span class="bar-fill" style="width:68%;background:linear-gradient(90deg,var(--peach),var(--red))"></span></span>
+          <span class="bar-value"><strong>$33.50</strong></span>
+        </div>
+      </div>
+      <p style="font-size:11.5px;color:var(--overlay1);margin:8px 0 0">Peak monthly: <strong style="color:var(--text)">&lt;$35/mo</strong> even at production load.</p>
+    </div>
+
+  </div>
+
+  <div class="callout callout-decision">
+    <div class="callout-label">Decision — paid services pay for themselves quickly</div>
+    <p style="margin:0">If you would otherwise re-generate an asset 5 times on Apple Silicon trying to get an acceptable result, one paid generation is cheaper than your time. The cheap-vs-fast tradeoff inverts the first time your time-cost crosses ~$5/hour.</p>
+  </div>
+</section>
+
+<!-- =========================== 6: ARCHITECTURE FIT =========================== -->
+<section>
+  <div class="sec-num">06 · Architecture</div>
+  <h2>How a paid backend fits the v0.2 pipeline</h2>
+
+  <p>Structurally identical to how <code>sf3d</code>, <code>spar3d</code>, and <code>trellis</code> work today. The only new shape is "HTTP API call" replacing "local venv invocation." Blender cleanup, manifest update, engine staging, the queue, and the benchmark harness all keep working because they only care about the GLB on disk.</p>
+
+  <div class="arch-wrap">
+    <svg viewBox="0 0 880 360" role="img" aria-label="Architecture diagram showing how paid backends slot into generate.sh">
+
+      <!-- Input -->
+      <g>
+        <rect x="20" y="150" width="120" height="60" rx="6" fill="var(--mantle)" stroke="var(--rule-strong)"/>
+        <text x="80" y="178" text-anchor="middle" fill="var(--text)" font-size="11" font-family="monospace">concept.png</text>
+        <text x="80" y="196" text-anchor="middle" fill="var(--overlay1)" font-size="9" font-family="monospace">(from concept.sh)</text>
+      </g>
+
+      <!-- generate.sh hub -->
+      <g>
+        <rect x="180" y="130" width="180" height="100" rx="8" fill="var(--surface0)" stroke="var(--mauve)" stroke-width="1.5"/>
+        <text x="270" y="160" text-anchor="middle" fill="var(--text)" font-size="12" font-family="monospace" font-weight="700">generate.sh</text>
+        <text x="270" y="180" text-anchor="middle" fill="var(--subtext0)" font-size="10" font-family="monospace">-g GENERATOR</text>
+        <text x="270" y="200" text-anchor="middle" fill="var(--overlay1)" font-size="9" font-family="monospace">resolve_project_context</text>
+        <text x="270" y="214" text-anchor="middle" fill="var(--overlay1)" font-size="9" font-family="monospace">license_bucket_for_model</text>
+      </g>
+
+      <line class="draw-path" x1="140" y1="180" x2="180" y2="180" stroke="var(--mauve)" stroke-width="1.5"/>
+
+      <!-- Branch labels -->
+      <text x="400" y="44" fill="var(--overlay0)" font-size="9" font-family="monospace" letter-spacing="0.12em">CHOOSE BACKEND</text>
+
+      <!-- Local branches -->
+      <g>
+        <rect x="400" y="50" width="200" height="40" rx="6" fill="var(--mantle)" stroke="var(--blue)" stroke-width="1.2"/>
+        <text x="500" y="74" text-anchor="middle" fill="var(--blue)" font-size="11" font-family="monospace">sf3d · spar3d · trellis (local)</text>
+
+        <line class="draw-path" x1="360" y1="170" x2="400" y2="80" stroke="var(--blue)" stroke-width="1" stroke-dasharray="4 3"/>
+
+        <rect x="640" y="50" width="220" height="40" rx="6" fill="var(--crust)" stroke="var(--blue)" stroke-width="1.2"/>
+        <text x="750" y="74" text-anchor="middle" fill="var(--subtext1)" font-size="10" font-family="monospace">venv → run.py → raw.glb</text>
+        <line x1="600" y1="70" x2="640" y2="70" stroke="var(--blue)" stroke-width="1"/>
+      </g>
+
+      <!-- New paid branch -->
+      <g>
+        <rect x="400" y="160" width="200" height="40" rx="6" fill="var(--mantle)" stroke="var(--sapphire)" stroke-width="1.5"/>
+        <text x="500" y="184" text-anchor="middle" fill="var(--sapphire)" font-size="11" font-family="monospace">tripo-fal · rodin-fal (paid)</text>
+
+        <line class="draw-path" x1="360" y1="180" x2="400" y2="180" stroke="var(--sapphire)" stroke-width="1.5"/>
+
+        <rect x="640" y="160" width="220" height="40" rx="6" fill="var(--crust)" stroke="var(--sapphire)" stroke-width="1.5"/>
+        <text x="750" y="184" text-anchor="middle" fill="var(--subtext1)" font-size="10" font-family="monospace">paid_backend.py → API → raw.glb</text>
+        <line x1="600" y1="180" x2="640" y2="180" stroke="var(--sapphire)" stroke-width="1.5"/>
+      </g>
+
+      <!-- Hunyuan gated -->
+      <g>
+        <rect x="400" y="220" width="200" height="40" rx="6" fill="var(--mantle)" stroke="var(--red)" stroke-width="1.2" stroke-dasharray="4 4"/>
+        <text x="500" y="244" text-anchor="middle" fill="var(--red)" font-size="11" font-family="monospace">hunyuan3d-2-fal (gated)</text>
+
+        <line class="draw-path" x1="360" y1="200" x2="400" y2="240" stroke="var(--red)" stroke-width="1" stroke-dasharray="4 3"/>
+
+        <rect x="640" y="220" width="220" height="40" rx="6" fill="var(--crust)" stroke="var(--red)" stroke-width="1" stroke-dasharray="4 4"/>
+        <text x="750" y="240" text-anchor="middle" fill="var(--subtext0)" font-size="10" font-family="monospace">needs_license_review</text>
+        <text x="750" y="254" text-anchor="middle" fill="var(--overlay1)" font-size="9" font-family="monospace">(same gate as --mode paint)</text>
+        <line x1="600" y1="240" x2="640" y2="240" stroke="var(--red)" stroke-width="1" stroke-dasharray="4 4"/>
+      </g>
+
+      <!-- Convergence -->
+      <g>
+        <path d="M 750 100 Q 800 100 800 200 Q 800 280 750 290 L 600 290"
+              fill="none" stroke="var(--rule-strong)" stroke-width="1"/>
+        <path d="M 750 200 L 800 200" fill="none" stroke="var(--rule-strong)" stroke-width="1"/>
+        <path d="M 750 260 Q 800 260 800 200" fill="none" stroke="var(--rule-strong)" stroke-width="1"/>
+      </g>
+
+      <!-- Shared downstream -->
+      <g>
+        <rect x="380" y="280" width="220" height="50" rx="6" fill="var(--surface0)" stroke="var(--green)" stroke-width="1.5"/>
+        <text x="490" y="304" text-anchor="middle" fill="var(--green)" font-size="11" font-family="monospace" font-weight="700">clean_asset.py (Blender)</text>
+        <text x="490" y="320" text-anchor="middle" fill="var(--subtext0)" font-size="9" font-family="monospace">decimate · normalize · GLB</text>
+
+        <rect x="180" y="280" width="180" height="50" rx="6" fill="var(--mantle)" stroke="var(--peach)" stroke-width="1.2"/>
+        <text x="270" y="300" text-anchor="middle" fill="var(--peach)" font-size="10" font-family="monospace">--json output</text>
+        <text x="270" y="316" text-anchor="middle" fill="var(--subtext0)" font-size="9" font-family="monospace">manifest · engine staging</text>
+
+        <line x1="380" y1="305" x2="360" y2="305" stroke="var(--rule-strong)"/>
+      </g>
+
+    </svg>
+  </div>
+
+  <h3>The work per backend</h3>
+
+  <ol>
+    <li><strong>Add to <code>license_bucket_for_model</code></strong> in <code>scripts/_pipeline_lib.sh</code> — one new case per backend.</li>
+    <li><strong>Add an <code>elif</code> branch</strong> to <code>scripts/generate.sh</code> that calls the new <code>paid_backend.py</code> helper with the right API endpoint and parameters.</li>
+    <li><strong>Add the API key</strong> to <code>~/3d-pipeline/.config</code> (e.g. <code>fal_api_key = ...</code>), read via the existing <code>read_pipeline_config</code> helper. Wrappers fail with clear install guidance if the key is missing — same pattern as SPAR3D's directory check.</li>
+    <li><strong>Add SKILL.md routing</strong> so Claude Code can suggest the right backend per task class.</li>
+    <li><strong>Embeds + parity + tests</strong> via the existing <code>make regenerate</code> / <code>make verify</code> pipeline. No new tooling.</li>
+  </ol>
+
+  <p>Estimated effort: ~2–4 hours per backend for the first one, ~1–2 hours each thereafter (shared HTTP plumbing).</p>
+</section>
+
+<!-- =========================== 7: RECOMMENDATIONS BY USE CASE =========================== -->
+<section>
+  <div class="sec-num">07 · Decisions</div>
+  <h2>Recommendations · by use case</h2>
+
+  <div class="recos">
+    <div class="reco" style="--service-color: var(--sapphire)">
+      <h4>Grithkin / GripCraft game assets</h4>
+      <p class="verdict">→ Tripo Studio</p>
+      <p class="why">Clean quad topology, ~10s/gen, <code>commercial_safe</code> on paid plan. $0.05/gen pay-per-call or $19.90/mo subscription for 3,000 credits.</p>
+    </div>
+    <div class="reco" style="--service-color: var(--red)">
+      <h4>3D-printable hero pieces</h4>
+      <p class="verdict">→ Hunyuan3D 2.x (post-review)</p>
+      <p class="why">Top geometry detail and full PBR via cloud. <strong>Same Tencent licence as <code>--mode paint</code></strong> — gate until reviewed. $0.48/gen textured.</p>
+    </div>
+    <div class="reco" style="--service-color: var(--pink)">
+      <h4>Display / portfolio / hero renders</h4>
+      <p class="verdict">→ Hyper3D Rodin</p>
+      <p class="why">4K PBR, photorealistic, highest-end output. $0.40/gen via fal.ai — perfect for rare assets that have to look perfect.</p>
+    </div>
+    <div class="reco" style="--service-color: var(--green)">
+      <h4>Throwaway proxy / draft geometry</h4>
+      <p class="verdict">→ Local SF3D (no change)</p>
+      <p class="why">Free, fast enough, already installed. Don't pay for drafts that you'll regenerate.</p>
+    </div>
+  </div>
+
+  <div class="callout callout-decision">
+    <div class="callout-label">Decision — the default stays the default</div>
+    <p style="margin:0">No proposal here changes the default lane (Z-Image Turbo → SF3D → Blender → Snapmaker U1). Paid backends are <em>opt-in</em> generators selected with <code>-g tripo-fal</code> or <code>-g rodin-fal</code>. The Claude Code skill picks the right backend based on the task class and your <code>hardware_tier</code>, but defaults to the local commercial-safe path when in doubt.</p>
+  </div>
+</section>
+
+<!-- =========================== 8: DECISION TREE =========================== -->
+<section>
+  <div class="sec-num">08 · Decisions</div>
+  <h2>Decision tree · which backend for this asset?</h2>
+
+  <p>Walk left-to-right. Hover the nodes for emphasis.</p>
+
+  <div class="tree">
+    <svg viewBox="0 0 880 380" role="img" aria-label="Decision tree for choosing a backend by use case">
+      <!-- Connections (drawn first so dots overlay) -->
+      <g stroke="var(--rule-strong)" stroke-width="1.2" fill="none">
+        <path class="draw-path" d="M 130 190 L 250 90"/>
+        <path class="draw-path" d="M 130 190 L 250 190"/>
+        <path class="draw-path" d="M 130 190 L 250 290"/>
+        <path class="draw-path" d="M 330 90  L 450 60"/>
+        <path class="draw-path" d="M 330 90  L 450 140"/>
+        <path class="draw-path" d="M 330 190 L 450 190"/>
+        <path class="draw-path" d="M 330 290 L 450 260"/>
+        <path class="draw-path" d="M 330 290 L 450 330"/>
+        <path class="draw-path" d="M 530 60  L 700 60"/>
+        <path class="draw-path" d="M 530 140 L 700 140"/>
+        <path class="draw-path" d="M 530 190 L 700 190"/>
+        <path class="draw-path" d="M 530 260 L 700 260"/>
+        <path class="draw-path" d="M 530 330 L 700 330"/>
+      </g>
+
+      <!-- Column 1 root -->
+      <foreignObject x="20" y="170" width="110" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%">
+          New asset request
+        </div>
+      </foreignObject>
+
+      <!-- Column 2: what kind -->
+      <foreignObject x="250" y="68" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Game asset?
+        </div>
+      </foreignObject>
+      <foreignObject x="250" y="168" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          For print?
+        </div>
+      </foreignObject>
+      <foreignObject x="250" y="268" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Hero / display?
+        </div>
+      </foreignObject>
+
+      <!-- Column 3: refinement -->
+      <foreignObject x="450" y="38" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Final?
+        </div>
+      </foreignObject>
+      <foreignObject x="450" y="118" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Draft?
+        </div>
+      </foreignObject>
+      <foreignObject x="450" y="168" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node warn" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Detail-critical?
+        </div>
+      </foreignObject>
+      <foreignObject x="450" y="238" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Photoreal?
+        </div>
+      </foreignObject>
+      <foreignObject x="450" y="308" width="80" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          Stylized?
+        </div>
+      </foreignObject>
+
+      <!-- Column 4: terminals -->
+      <foreignObject x="700" y="38" width="160" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node terminal" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          tripo-fal · $0.05
+        </div>
+      </foreignObject>
+      <foreignObject x="700" y="118" width="160" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node terminal" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          local SF3D · free
+        </div>
+      </foreignObject>
+      <foreignObject x="700" y="168" width="160" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node risk" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          hunyuan3d-2-fal · $0.48 (gated)
+        </div>
+      </foreignObject>
+      <foreignObject x="700" y="238" width="160" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node terminal" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          rodin-fal · $0.40
+        </div>
+      </foreignObject>
+      <foreignObject x="700" y="308" width="160" height="44">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="tree-node terminal" style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px">
+          tripo-fal · $0.05
+        </div>
+      </foreignObject>
+    </svg>
+  </div>
+
+  <p style="font-size:12px;color:var(--overlay1)">
+    The "hunyuan3d-2-fal" terminal is the only red node — meaning it routes through the same licence-gate as <code>texture.sh --mode paint</code>. If the gate hasn't been lifted, the wrapper refuses to run and you fall back to <code>rodin-fal</code> (cleanest commercial licence) for any detail-critical print piece.
+  </p>
+</section>
+
+<!-- =========================== 9: LICENCE SUMMARY =========================== -->
+<section>
+  <div class="sec-num">09 · Stack</div>
+  <h2>Licence summary</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Backend</th><th>Licence text</th><th>Bucket on paid tier</th></tr></thead>
+      <tbody>
+        <tr><td>Tripo Pro / Tripo via fal.ai</td><td>Paid plans grant full commercial rights to generated assets</td><td><code>commercial_safe</code></td></tr>
+        <tr><td>Meshy Pro / Studio</td><td>"You own all assets, full rights to distribute and sell"</td><td><code>commercial_safe</code></td></tr>
+        <tr><td>Hyper3D Rodin (paid)</td><td>Paid tiers grant commercial use</td><td><code>commercial_safe</code></td></tr>
+        <tr><td>Hunyuan3D 2.x (any host)</td><td>Tencent Hunyuan Community License: revenue threshold + region exclusions; output still subject to community terms even via fal.ai</td><td><code>unclear_risky</code> (same gate as <code>--mode paint</code>)</td></tr>
+        <tr><td>TripoSR (via fal.ai)</td><td>Open licence; commercial OK</td><td><code>commercial_safe</code></td></tr>
+        <tr><td>Free tier of any service</td><td>Typically CC BY 4.0 or non-commercial</td><td><code>non_commercial</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-warn">
+    <div class="callout-label">Warn — never use a free tier for Grithkin or GripCraft commercially</div>
+    <p style="margin:0">Even when the model itself is good, every free tier this report researched ships its outputs under CC BY 4.0 or stricter. The wrappers should refuse to tag those outputs as <code>commercial_safe</code> in the manifest — they go in as <code>non_commercial</code> until a paid plan is active.</p>
+  </div>
+</section>
+
+<!-- =========================== 10: IMPLEMENTATION PLAN =========================== -->
+<section>
+  <div class="sec-num">10 · Decisions</div>
+  <h2>Implementation plan · proposed sequence</h2>
+
+  <p>Three small PRs, mirroring the per-phase cadence of the v0.2 work. Each one ships independently behind the wrapper's existing <code>-g GENERATOR</code> switch — no default change at any step.</p>
+
+  <ol>
+    <li>
+      <strong>PR 1 — <code>tripo-fal</code> as the primary game-asset backend.</strong>
+      Adds <code>scripts/paid_backend.py</code> (shared HTTP helper for fal.ai calls), one new branch in <code>generate.sh</code>, license-bucket entry, SKILL.md routing, and a smoke test through the existing <code>--json</code> + benchmark plumbing. Largest first because the shared HTTP helper lands here.
+    </li>
+    <li>
+      <strong>PR 2 — <code>rodin-fal</code> as the hero backend.</strong>
+      ~30 minutes once PR 1 is in. Reuses the HTTP helper; adds the licence-bucket entry, the generate.sh branch, and a SKILL.md note that it's the hero-asset choice.
+    </li>
+    <li>
+      <strong>PR 3 — <code>hunyuan3d-2-fal</code> as a licence-gated lane.</strong>
+      Mirrors the existing <code>--mode paint</code> placeholder pattern: accept the option but refuse to run with <code>error=needs_license_review</code> until the Tencent licence has been reviewed against commercial use. Removes the gate by deleting one block once review is complete.
+    </li>
+  </ol>
+
+  <p>Optional: <strong>PR 4 — Meshy or TripoSR</strong> as additional opt-in backends if usage data from the first three PRs suggests value. Skip for now.</p>
+
+  <div class="callout callout-rationale">
+    <div class="callout-label">Rationale — start small, prove the shared plumbing</div>
+    <p style="margin:0">PR 1 is the one with risk: it introduces <code>paid_backend.py</code> and decides on the <code>~/3d-pipeline/.config</code> key convention for API keys. PRs 2 and 3 are mechanical once PR 1 lands. If something feels wrong about the shared helper, we want to learn that before the second backend doubles down on the same design.</p>
+  </div>
+</section>
+
+<!-- =========================== 11: OPEN QUESTIONS =========================== -->
+<section>
+  <div class="sec-num">11 · Working with this</div>
+  <h2>Open questions for Ken</h2>
+
+  <ol>
+    <li><strong>fal.ai account?</strong> The cheapest credible path to actually using any of these. ~$10 starter credit covers months of prototyping. Single API key in <code>~/3d-pipeline/.config</code> unlocks every backend the pipeline ever wants to add.</li>
+    <li><strong>Subscription vs pay-per-call for Tripo?</strong> The breakeven is ~400 generations/month. Below that, fal.ai pay-per-call wins; above, the $19.90 Tripo Pro subscription wins. You'll need real usage data to choose — start with pay-per-call.</li>
+    <li><strong>Hunyuan3D licence review timing?</strong> Same blocker as the existing <code>--mode paint</code> placeholder. PR 3 ships the gate; only PR-4-equivalent (lift the gate) needs the review.</li>
+    <li><strong>Single PR or three?</strong> Three small PRs are reviewable and roll back independently. One big PR is faster to land. Same cadence question as v0.2.</li>
+  </ol>
+</section>
+
+<footer>
+  <p>Generated 2026-05-19 for the asset-pipeline repo. Pricing snapshots reflect publicly listed rates at time of research; verify on each service's official pricing page before adopting. This document is reference material, not part of the canonical install — no parity check applies.</p>
+  <h4 style="margin-top:24px">Sources</h4>
+  <ul>
+    <li><a href="https://trellis2.app/blog/best-ai-3d-model-generator">Best AI 3D Model Generators in 2026 (TRELLIS / Meshy / Tripo / Hitem3D) · trellis2.app</a></li>
+    <li><a href="https://www.sloyd.ai/blog/3d-ai-price-comparison">3D AI Pricing &amp; Credits Comparison · Sloyd</a></li>
+    <li><a href="https://www.3daistudio.com/blog/best-3d-model-generation-apis-2026">Best 3D Model Generation APIs in 2026 · 3DAI Studio</a></li>
+    <li><a href="https://www.meshy.ai/pricing">Meshy AI · official pricing</a></li>
+    <li><a href="https://docs.meshy.ai/en/api/pricing">Meshy API · pricing docs</a></li>
+    <li><a href="https://www.tripo3d.ai/pricing">Tripo Studio · official pricing</a></li>
+    <li><a href="https://platform.tripo3d.ai/docs/billing">Tripo platform · billing docs</a></li>
+    <li><a href="https://hyper3d.ai/subscribe">Hyper3D Rodin · subscribe</a></li>
+    <li><a href="https://developer.hyper3d.ai/api-specification/rodin-generation">Hyper3D Rodin · API documentation</a></li>
+    <li><a href="https://fal.ai/models/fal-ai/hyper3d/rodin">Hyper3D Rodin on fal.ai</a></li>
+    <li><a href="https://fal.ai/models/fal-ai/hunyuan3d/v2">Hunyuan3D v2 on fal.ai</a></li>
+    <li><a href="https://gist.github.com/azer/6e8ffa228cb5d6f5807cd4d895b191a4">fal.ai · all models and prices · gist</a></li>
+    <li><a href="https://fal.ai/learn/devs/sam-3d-vs-hunyuan3d-2">SAM 3D vs. Hunyuan3D-2 · fal</a></li>
+    <li><a href="https://www.indiehackers.com/post/best-ai-3d-model-generator-in-2026-i-tested-9-of-the-best-and-here-is-what-i-found-70ecab1a0a">Best AI 3D Model Generator · Indie Hackers (tested 9)</a></li>
+  </ul>
+</footer>
+
+</main>
+</body>
+</html>
