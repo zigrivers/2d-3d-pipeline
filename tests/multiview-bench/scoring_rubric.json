@@ -1,0 +1,73 @@
+{
+  "_schema_note": "Multi-view backend benchmark scoring rubric. v3 spec, item 12 Phase 1. Each dimension is scored 0-10 per (backend, subject, run); weighted total >= 6.5 required to qualify a backend.",
+  "dimensions": {
+    "geometric_accuracy": {
+      "weight": 0.35,
+      "method": "Hausdorff distance to ground-truth scan when available; manual visual score otherwise. Lower distance = higher score.",
+      "min_acceptable": 3.0
+    },
+    "texture_fidelity": {
+      "weight": 0.20,
+      "method": "SSIM + visual review of UV-mapped textures vs reference photos.",
+      "min_acceptable": 3.0
+    },
+    "speed_studio": {
+      "weight": 0.15,
+      "method": "Wall-clock seconds on studio tier (M3 Ultra Mac Studio). 0-10 mapping: under 30s = 10, over 300s = 0, linear in between.",
+      "min_acceptable": 3.0
+    },
+    "speed_laptop": {
+      "weight": 0.10,
+      "method": "Wall-clock seconds on laptop tier (M-series Mac laptop). Same mapping as studio.",
+      "min_acceptable": 0.0
+    },
+    "install_footprint": {
+      "weight": 0.10,
+      "method": "Total disk: venv + model weights. 0-10 mapping: under 4 GB = 10, over 30 GB = 0, linear in between.",
+      "min_acceptable": 3.0
+    },
+    "license_clarity": {
+      "weight": 0.10,
+      "method": "Pre-computed: commercial_safe=10, commercial_threshold=7, non_commercial=4, unclear_risky=0 (DISQUALIFY unless a separate review completes).",
+      "min_acceptable": 4.0
+    }
+  },
+  "pass_thresholds": {
+    "weighted_total_min": 6.5,
+    "no_dimension_below": 3.0,
+    "license_score_min": 4
+  },
+  "candidates": [
+    {
+      "name": "trellis",
+      "license_bucket": "non_commercial",
+      "license_score": 4,
+      "notes": "Already partially integrated for single-image use. Multi-view mode is built in."
+    },
+    {
+      "name": "instantmesh",
+      "license_bucket": "unclear_risky",
+      "license_score": 0,
+      "notes": "Tencent license; needs separate review (mirror of P2.3) before this candidate can pass. Auto-DQ until review completes."
+    },
+    {
+      "name": "openlrm",
+      "license_bucket": "commercial_safe",
+      "license_score": 10,
+      "notes": "Apache 2.0. Lower quality than the closed alternatives; the only fully commercial-safe path."
+    }
+  ],
+  "reproducibility": {
+    "runs_per_subject": 3,
+    "subjects": [
+      "subject-1-character",
+      "subject-2-hardsurface",
+      "subject-3-organic"
+    ],
+    "views_per_subject": ["front", "right", "back", "left"],
+    "image_size": "1024x1024",
+    "lighting": "Uniform white-background studio lighting; no harsh shadows.",
+    "checked_in_at": "tests/multiview-bench/subjects/",
+    "raw_outputs_at": "tests/multiview-bench/results/<backend>/<subject>/runNN.glb"
+  }
+}

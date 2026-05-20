@@ -8050,6 +8050,243 @@ PIPELINE_EOF</pre></div>
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>multiview_benchmark.py</code>
+                <span class="script-summary-desc">v0.4 multi-view backend benchmark harness (item 12 P3.1a)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/multiview_benchmark.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.4 — multi-view backend benchmark harness.
+
+Runs the same N candidate backends against the same dataset and
+emits structured scoring + per-output GLBs for visual review.
+
+Per item 12 Phase 1 in improvement-spec.md, the dataset is fixed:
+3 subjects (character / hard-surface / organic), 4 calibrated views
+each (0°, 90°, 180°, 270°), all 1024×1024 PNGs. Scoring rubric:
+
+  Geometric accuracy   weight 0.35  (Hausdorff vs GT, or visual)
+  Texture / colour     weight 0.20
+  Speed (studio)       weight 0.15
+  Speed (laptop)       weight 0.10
+  Install footprint    weight 0.10
+  License clarity      weight 0.10
+
+Pass/fail: weighted total &gt;= 6.5 / 10. No single dimension &lt; 3.0.
+License score &gt;= 4 (`non_commercial` floor; anything `unclear_risky`
+without a separate review is disqualified).
+
+Usage:
+    multiview_benchmark.py --dataset DIR --rubric PATH
+                           [--backends trellis,instantmesh,openlrm]
+                           [--runs-per-subject 3]
+                           [--output-dir tests/multiview-bench/results]
+                           [--score-only]
+
+The harness is a SCAFFOLD: it dispatches each backend via a backend
+adapter you supply (`scripts/multiview_backends/&lt;name&gt;.py`),
+collects per-run GLBs into the results directory, and writes
+`benchmark_results.json` ready for manual scoring + recommendation
+write-up at `docs/multiview-backend-research.md`.
+
+Initial commit (P3.1a) ships:
+  - this harness
+  - the rubric JSON
+  - the dataset directory layout (placeholder READMEs only)
+  - a stub backend adapter showing the interface
+
+P3.1b will fill in real adapters + run the benchmark; the user
+chooses a backend based on the recommendation that lands in the
+research doc.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+ADAPTERS_DIR = SCRIPT_DIR / &quot;multiview_backends&quot;
+DEFAULT_DATASET = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;subjects&quot;
+DEFAULT_RUBRIC = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;scoring_rubric.json&quot;
+DEFAULT_OUTPUT = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;results&quot;
+
+
+def discover_subjects(dataset_dir: Path) -&gt; list[dict]:
+    subjects: list[dict] = []
+    if not dataset_dir.exists():
+        return subjects
+    for sub in sorted(dataset_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        images = sorted(sub.glob(&quot;*.png&quot;))
+        # Expected: front, right, back, left
+        expected_views = [&quot;front&quot;, &quot;right&quot;, &quot;back&quot;, &quot;left&quot;]
+        view_map = {}
+        for img in images:
+            for v in expected_views:
+                if v in img.name.lower():
+                    view_map[v] = str(img)
+                    break
+        subjects.append({
+            &quot;name&quot;: sub.name,
+            &quot;path&quot;: str(sub),
+            &quot;views&quot;: view_map,
+            &quot;complete&quot;: all(v in view_map for v in expected_views),
+        })
+    return subjects
+
+
+def run_backend(backend: str, subject: dict, output_dir: Path,
+                runs_per_subject: int) -&gt; list[dict]:
+    &quot;&quot;&quot;Invoke a backend adapter (scripts/multiview_backends/&lt;backend&gt;.py).
+    Each adapter is expected to expose:
+        adapter.py --views v0,v1,v2,v3 --output-glb PATH --json
+    and report its own duration + license bucket.
+    &quot;&quot;&quot;
+    adapter = ADAPTERS_DIR / f&quot;{backend}.py&quot;
+    runs: list[dict] = []
+    if not adapter.exists():
+        runs.append({
+            &quot;backend&quot;: backend,
+            &quot;subject&quot;: subject[&quot;name&quot;],
+            &quot;run&quot;: 0,
+            &quot;status&quot;: &quot;adapter_missing&quot;,
+            &quot;reason&quot;: f&quot;no adapter at {adapter}&quot;,
+        })
+        return runs
+
+    views = [subject[&quot;views&quot;][v] for v in (&quot;front&quot;, &quot;right&quot;, &quot;back&quot;, &quot;left&quot;)
+             if v in subject[&quot;views&quot;]]
+    if len(views) &lt; 3:
+        runs.append({
+            &quot;backend&quot;: backend,
+            &quot;subject&quot;: subject[&quot;name&quot;],
+            &quot;run&quot;: 0,
+            &quot;status&quot;: &quot;skipped&quot;,
+            &quot;reason&quot;: &quot;insufficient views&quot;,
+        })
+        return runs
+
+    for i in range(runs_per_subject):
+        target_glb = output_dir / backend / subject[&quot;name&quot;] / f&quot;run{i:02d}.glb&quot;
+        target_glb.parent.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        try:
+            cp = subprocess.run(
+                [sys.executable, str(adapter),
+                 &quot;--views&quot;, &quot;,&quot;.join(views),
+                 &quot;--output-glb&quot;, str(target_glb),
+                 &quot;--json&quot;],
+                capture_output=True, text=True, timeout=600,
+            )
+            duration = round(time.time() - t0, 2)
+            parsed = {}
+            if cp.stdout.strip():
+                try:
+                    parsed = json.loads(cp.stdout.strip().splitlines()[-1])
+                except Exception:
+                    pass
+            runs.append({
+                &quot;backend&quot;: backend,
+                &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;run&quot;: i,
+                &quot;exit_code&quot;: cp.returncode,
+                &quot;duration_seconds&quot;: duration,
+                &quot;output_glb&quot;: str(target_glb) if target_glb.exists() else None,
+                &quot;adapter_result&quot;: parsed,
+                &quot;status&quot;: &quot;ok&quot; if cp.returncode == 0 else &quot;failed&quot;,
+            })
+        except subprocess.TimeoutExpired:
+            runs.append({
+                &quot;backend&quot;: backend,
+                &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;run&quot;: i,
+                &quot;status&quot;: &quot;timeout&quot;,
+                &quot;duration_seconds&quot;: round(time.time() - t0, 2),
+            })
+        except Exception as e:
+            runs.append({
+                &quot;backend&quot;: backend,
+                &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;run&quot;: i,
+                &quot;status&quot;: &quot;error&quot;,
+                &quot;error&quot;: str(e),
+            })
+    return runs
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--dataset&quot;, default=str(DEFAULT_DATASET))
+    p.add_argument(&quot;--rubric&quot;, default=str(DEFAULT_RUBRIC))
+    p.add_argument(&quot;--backends&quot;, default=&quot;trellis,instantmesh,openlrm&quot;,
+                   help=&quot;Comma-separated backend names; expects adapters at &quot;
+                        &quot;scripts/multiview_backends/&lt;name&gt;.py&quot;)
+    p.add_argument(&quot;--runs-per-subject&quot;, type=int, default=3)
+    p.add_argument(&quot;--output-dir&quot;, default=str(DEFAULT_OUTPUT))
+    p.add_argument(&quot;--score-only&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Skip running backends; recompute summary from existing runs&quot;)
+    args = p.parse_args()
+
+    dataset_dir = Path(args.dataset)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rubric_path = Path(args.rubric)
+
+    subjects = discover_subjects(dataset_dir)
+    if not any(s[&quot;complete&quot;] for s in subjects):
+        print(&quot;ERROR: no complete subject (need front/right/back/left views).&quot;,
+              file=sys.stderr)
+        print(f&quot;Dataset: {dataset_dir}&quot;, file=sys.stderr)
+        return 2
+
+    rubric = json.loads(rubric_path.read_text()) if rubric_path.exists() else {}
+
+    all_runs: list[dict] = []
+    if not args.score_only:
+        backends = [b.strip() for b in args.backends.split(&quot;,&quot;) if b.strip()]
+        for subject in subjects:
+            if not subject[&quot;complete&quot;]:
+                continue
+            for backend in backends:
+                runs = run_backend(backend, subject, output_dir, args.runs_per_subject)
+                all_runs.extend(runs)
+
+    summary = {
+        &quot;dataset&quot;: str(dataset_dir),
+        &quot;rubric&quot;: rubric,
+        &quot;subjects&quot;: [{&quot;name&quot;: s[&quot;name&quot;], &quot;complete&quot;: s[&quot;complete&quot;]} for s in subjects],
+        &quot;runs&quot;: all_runs,
+        &quot;note&quot;: (
+            &quot;Per-dimension scores are entered manually after visual review. &quot;
+            &quot;Run with `--score-only` after editing this file to recompute &quot;
+            &quot;weighted totals.&quot;
+        ),
+    }
+    results_path = output_dir / &quot;benchmark_results.json&quot;
+    with open(results_path, &quot;w&quot;) as fh:
+        json.dump(summary, fh, indent=2, sort_keys=True)
+        fh.write(&quot;\n&quot;)
+
+    print(f&quot;[multiview-bench] wrote {results_path}&quot;)
+    print(f&quot;[multiview-bench] subjects: {len(subjects)} &quot;
+          f&quot;(complete: {sum(1 for s in subjects if s[&#x27;complete&#x27;])})&quot;)
+    print(f&quot;[multiview-bench] total runs: {len(all_runs)}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>

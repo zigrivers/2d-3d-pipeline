@@ -2,6 +2,37 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.1a: multi-view backend benchmark scaffolding
+
+First sub-PR of item 12. Ships the methodology + harness so the
+actual benchmark run (P3.1b) has a fixed, reproducible target.
+
+- `scripts/multiview_benchmark.py` — benchmark harness. Discovers
+  subjects in `tests/multiview-bench/subjects/`, dispatches each
+  candidate backend's adapter, captures runtime + output GLB,
+  writes a `benchmark_results.json` ready for visual scoring.
+  Supports `--score-only` for rubric-recompute passes after manual
+  scoring.
+- `tests/multiview-bench/scoring_rubric.json` — six-dimension
+  rubric (geometric accuracy 0.35, texture 0.20, speed 0.15+0.10,
+  install 0.10, license 0.10) with weighted thresholds (>= 6.5
+  total; no dim < 3.0; license >= 4). Auto-DQ for unclear_risky
+  licenses without a separate review.
+- `tests/multiview-bench/subjects/{1,2,3}-{character,hardsurface,organic}/README.md`
+  — per-subject specs (4 calibrated PNG views, optional GT scan
+  for Hausdorff scoring).
+
+What this PR does NOT ship:
+
+- The reference images (require physical photo capture or a curated
+  dataset, both outside this session's scope)
+- Backend adapters (P3.1b — ships alongside the actual installs)
+- Populated `benchmark_results.json` (deliverable of P3.1b)
+
+After this PR, the remaining v0.3+ work is decision-gated and
+hands-on (P3.1b backend benchmark run + recommendation,
+P3.1c-e multi-view wrapper implementation, P3.2 ComfyUI).
+
 ## 2026-05-20 — P2.3: Hunyuan3D-Paint un-stub (license approved)
 
 License review completed 2026-05-20
