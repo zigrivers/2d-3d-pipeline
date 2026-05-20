@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Per-asset meta.json (v0.3+ asset-pipeline)",
+  "description": "Single file written by all quality passes. Sections are namespaced; each pass owns exactly one section. See improvement-spec.md cross-cutting principle 2.",
+  "type": "object",
+  "required": ["schema_version", "asset_name"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "asset_name": { "type": "string", "minLength": 1 },
+
+    "input": {
+      "type": "object",
+      "description": "Item 4 — input image quality check + format normalisation",
+      "additionalProperties": true,
+      "properties": {
+        "original_path": { "type": "string" },
+        "normalized_path": { "type": ["string", "null"] },
+        "format_original": { "type": "string" },
+        "format_normalized": { "type": ["string", "null"] },
+        "width": { "type": "integer" },
+        "height": { "type": "integer" },
+        "aspect_ratio": { "type": "number" },
+        "background_uniformity": { "type": ["number", "null"] },
+        "issues": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "preprocessing": {
+      "type": "object",
+      "description": "Item 1 — bg removal, etc.",
+      "additionalProperties": true,
+      "properties": {
+        "bg_removal": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "applied": { "type": "boolean" },
+            "mode": { "type": "string", "enum": ["auto", "on", "off"] },
+            "trigger": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] },
+            "alpha_mean": { "type": ["number", "null"] },
+            "fallback": { "type": ["string", "null"] },
+            "duration_seconds": { "type": ["number", "null"] },
+            "reason": { "type": ["string", "null"] }
+          }
+        },
+        "input_normalization": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "generation": {
+      "type": "object",
+      "description": "Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview)",
+      "additionalProperties": true,
+      "properties": {
+        "backend": { "type": "string" },
+        "model_role": { "type": "string" },
+        "license_bucket": { "type": "string" },
+        "texture_backend": { "type": ["string", "null"] },
+        "inputs": { "type": "array", "items": { "type": "object" } },
+        "polycount_target": { "type": "integer" },
+        "texture_resolution": { "type": "integer" },
+        "duration_seconds": { "type": "number" }
+      }
+    },
+
+    "cleanup": {
+      "type": "object",
+      "description": "Item 6 — clean_asset.py instrumentation",
+      "additionalProperties": true,
+      "properties": {
+        "duplicate_vertices_removed": { "type": ["integer", "null"] },
+        "loose_elements_deleted": { "type": ["integer", "null"] },
+        "holes_filled": { "type": ["integer", "null"] },
+        "decimate": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "before": { "type": ["integer", "null"] },
+            "after": { "type": ["integer", "null"] },
+            "ratio": { "type": ["number", "null"] },
+            "error": { "type": ["string", "null"] }
+          }
+        },
+        "duration_seconds": { "type": ["number", "null"] }
+      }
+    },
+
+    "quality": {
+      "type": "object",
+      "description": "Items 2, 3, 13 — mesh / texture / UV / engine quality checks",
+      "additionalProperties": true,
+      "properties": {
+        "manifold": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "is_watertight": { "type": "boolean" },
+            "is_winding_consistent": { "type": "boolean" },
+            "boundary_edges": { "type": "integer" },
+            "hole_count": { "type": "integer" },
+            "error": { "type": ["string", "null"] }
+          }
+        },
+        "scale": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "longest_dim_normalized": { "type": ["number", "null"] },
+            "longest_dim_mm": { "type": ["number", "null"] },
+            "in_sane_range": { "type": "boolean" }
+          }
+        },
+        "textures": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "textures_present": { "type": "array", "items": { "type": "string" } },
+            "issues": { "type": "array", "items": { "type": "string" } },
+            "stats": { "type": "object" }
+          }
+        },
+        "uv": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "has_uv": { "type": "boolean" },
+            "island_count": { "type": "integer" },
+            "occupancy_ratio": { "type": "number" },
+            "has_overlap": { "type": "boolean" },
+            "in_bounds": { "type": "boolean" }
+          }
+        },
+        "engine": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "print": {
+      "type": "object",
+      "description": "Existing print.sh data + item 14 structural gates",
+      "additionalProperties": true,
+      "properties": {
+        "final_dimensions_mm": { "type": "object" },
+        "fits_snapmaker_u1": { "type": "boolean" },
+        "oversized_axes": { "type": "array", "items": { "type": "string" } },
+        "structural": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "min_wall_thickness_mm": { "type": ["number", "null"] },
+            "wall_thickness_safe": { "type": "boolean" },
+            "disconnected_islands": { "type": "integer" },
+            "self_intersections": { "type": "integer" },
+            "overhang_area_mm2": { "type": "number" },
+            "base_contact_area_mm2": { "type": "number" },
+            "base_contact_safe": { "type": "boolean" },
+            "com_offset_normalized": { "type": "number" },
+            "stable_on_bed": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
+    "preview": {
+      "type": "object",
+      "description": "Item 5 — turntable render outputs",
+      "additionalProperties": true,
+      "properties": {
+        "mode": { "type": "string", "enum": ["none", "png", "gif"] },
+        "hero_png_path": { "type": ["string", "null"] },
+        "gif_path": { "type": ["string", "null"] },
+        "frames": { "type": "integer" },
+        "resolution": { "type": "integer" },
+        "duration_seconds": { "type": "number" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+
+    "clip": {
+      "type": "object",
+      "description": "Item 8 — CLIP similarity scoring",
+      "additionalProperties": true,
+      "properties": {
+        "similarity": { "type": "number" },
+        "model": { "type": "string" },
+        "model_band": { "type": "string" },
+        "percentile_for_this_model": { "type": "number" },
+        "rank": { "type": "integer" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

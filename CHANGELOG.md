@@ -2,6 +2,32 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P0.2: meta_helper.py + meta_schema.json (foundation)
+
+Second foundation PR. Establishes the single-meta.json discipline that
+all v0.3+ quality passes will use.
+
+- `scripts/meta_helper.py` — CLI with `merge`, `get`, `validate` subcommands.
+  File-locked (fcntl.flock) read-modify-write so concurrent passes can't
+  corrupt the meta.json. Eight known top-level sections enforced by default;
+  `--allow-unknown-section` is the escape hatch for future-but-not-yet-
+  shipped passes.
+- `scripts/meta_schema.json` — JSON schema for the per-asset meta.json
+  structure. Used by `meta_helper.py validate` when `jsonschema` is
+  installed (gracefully skipped otherwise — structural checks still run).
+- `tools/add_embed.py` — maintainer helper: inserts a new `<details>`
+  heredoc block into both setup guides, anchored before the "What each
+  script does" callout, and appends to `tools/_embed_lib.py::EMBEDS`.
+  Used by every subsequent v0.3 PR that adds a /scripts file. Lives in
+  /tools/ so it isn't itself subject to the canonical-vs-embedded rule.
+- `tools/test_meta_helper.sh` — bash-based smoke test suite for
+  `meta_helper.py` (9 cases including concurrent-merge lock test).
+
+HTML embeds for `meta_helper.py` and `meta_schema.json` added to both
+setup guides. `make verify` clean (18 blocks; was 16). No skill changes
+yet — wrappers will start using `meta_helper.py` starting with P0.3 +
+the Tier 1 PRs.
+
 ## 2026-05-20 — P0.1: pipeline-tools-env install step
 
 First foundation PR for the v0.3 quality-improvement work

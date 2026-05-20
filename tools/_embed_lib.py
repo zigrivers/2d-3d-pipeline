@@ -45,6 +45,8 @@ EMBEDS: dict[str, str] = {
     "scripts/queue_worker.py":           "~/3d-pipeline/workspace/queue_worker.py",
     "skill/SKILL.md":                    "~/.claude/skills/asset-pipeline/SKILL.md",
     "skill/scripts/update_manifest.py":  "~/.claude/skills/asset-pipeline/scripts/update_manifest.py",
+    "scripts/meta_helper.py":           "~/3d-pipeline/workspace/meta_helper.py",
+    "scripts/meta_schema.json":         "~/3d-pipeline/workspace/meta_schema.json",
 }
 
 # Block pattern: opener line, body, closing PIPELINE_EOF on its own line.

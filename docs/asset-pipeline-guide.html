@@ -4828,6 +4828,483 @@ chmod +x ~/3d-pipeline/workspace/queue_worker.py</pre></div>
             </details>
 
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>meta_helper.py</code>
+                <span class="script-summary-desc">Per-asset meta.json merge/get/validate helper (v0.3+)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/meta_helper.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Per-asset meta.json read / merge / validate helper.
+
+Every quality pass in v0.3+ writes its results into a single
+`&lt;output&gt;.meta.json` next to the generated asset. Replaces v2&#x27;s
+proliferation of per-pass sidecar files.
+
+Usage:
+    meta_helper.py merge   &lt;path&gt; --section &lt;name&gt; --data &lt;json-string&gt;
+    meta_helper.py merge   &lt;path&gt; --section &lt;name&gt; --data-file &lt;path&gt;
+    meta_helper.py get     &lt;path&gt; [--section &lt;name&gt;]
+    meta_helper.py validate &lt;path&gt; [--schema &lt;path&gt;]
+
+Merge semantics:
+  - Each pass owns exactly one top-level section. No cross-pass writes.
+  - Within a section, fields are merged (dict-update at the top level
+    of the section), so partial writes don&#x27;t clobber prior fields.
+  - The file is created if missing, with `schema_version` and an
+    `asset_name` derived from the meta.json basename.
+  - An advisory `fcntl.flock` is held during read-modify-write so
+    concurrent merges from parallel passes don&#x27;t corrupt the file.
+
+Top-level sections (per the spec, cross-cutting principle 2):
+
+    input            preprocessing    generation
+    cleanup          quality          print
+    preview          clip
+
+Any pass writing to a section not on this list is rejected unless
+`--allow-unknown-section` is passed (escape hatch for future passes
+that ship before this helper is updated).
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+
+KNOWN_SECTIONS = {
+    &quot;input&quot;,
+    &quot;preprocessing&quot;,
+    &quot;generation&quot;,
+    &quot;cleanup&quot;,
+    &quot;quality&quot;,
+    &quot;print&quot;,
+    &quot;preview&quot;,
+    &quot;clip&quot;,
+}
+
+
+@contextmanager
+def _locked(path: Path, mode: str):
+    &quot;&quot;&quot;Open `path` and hold an advisory flock for the duration.&quot;&quot;&quot;
+    # Open with &#x27;a+&#x27; for create-if-missing semantics; reset offset for read.
+    fh = open(path, mode)
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        fh.seek(0)
+        yield fh
+    finally:
+        fh.flush()
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def _load(fh) -&gt; dict:
+    &quot;&quot;&quot;Read JSON from an open handle. Empty file → empty dict.&quot;&quot;&quot;
+    raw = fh.read()
+    if not raw.strip():
+        return {}
+    return json.loads(raw)
+
+
+def _dump(fh, data: dict) -&gt; None:
+    fh.seek(0)
+    fh.truncate()
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write(&quot;\n&quot;)
+
+
+def _seed_skeleton(asset_name: str) -&gt; dict:
+    return {
+        &quot;schema_version&quot;: SCHEMA_VERSION,
+        &quot;asset_name&quot;: asset_name,
+    }
+
+
+def cmd_merge(args: argparse.Namespace) -&gt; int:
+    section = args.section
+    if section not in KNOWN_SECTIONS and not args.allow_unknown_section:
+        print(
+            f&quot;ERROR: unknown section &#x27;{section}&#x27;. &quot;
+            f&quot;Known: {sorted(KNOWN_SECTIONS)}. Pass --allow-unknown-section to override.&quot;,
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.data_file:
+        new_data = json.loads(Path(args.data_file).read_text())
+    elif args.data is not None:
+        new_data = json.loads(args.data)
+    else:
+        print(&quot;ERROR: --data or --data-file is required&quot;, file=sys.stderr)
+        return 2
+
+    if not isinstance(new_data, dict):
+        print(
+            &quot;ERROR: section data must be a JSON object; got &quot;
+            f&quot;{type(new_data).__name__}&quot;,
+            file=sys.stderr,
+        )
+        return 2
+
+    path = Path(args.path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+
+    asset_name = path.name
+    if asset_name.endswith(&quot;.meta.json&quot;):
+        asset_name = asset_name[: -len(&quot;.meta.json&quot;)]
+
+    with _locked(path, &quot;r+&quot;) as fh:
+        existing = _load(fh)
+        if not existing:
+            existing = _seed_skeleton(asset_name)
+        existing.setdefault(section, {})
+        if not isinstance(existing[section], dict):
+            print(
+                f&quot;ERROR: existing section &#x27;{section}&#x27; is not an object &quot;
+                f&quot;(found {type(existing[section]).__name__}); refusing to merge&quot;,
+                file=sys.stderr,
+            )
+            return 2
+        existing[section].update(new_data)
+        _dump(fh, existing)
+
+    if args.json:
+        print(json.dumps({&quot;status&quot;: &quot;ok&quot;, &quot;section&quot;: section, &quot;path&quot;: str(path)}))
+    else:
+        print(f&quot;[meta_helper] merged {section} into {path}&quot;)
+    return 0
+
+
+def cmd_get(args: argparse.Namespace) -&gt; int:
+    path = Path(args.path)
+    if not path.exists():
+        print(f&quot;ERROR: meta file not found: {path}&quot;, file=sys.stderr)
+        return 2
+    with _locked(path, &quot;r&quot;) as fh:
+        data = _load(fh)
+    if args.section:
+        data = data.get(args.section, {})
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -&gt; int:
+    &quot;&quot;&quot;Light validation. Without jsonschema the helper checks structure;
+    with jsonschema, it does a full schema check against meta_schema.json.&quot;&quot;&quot;
+    path = Path(args.path)
+    if not path.exists():
+        print(f&quot;ERROR: meta file not found: {path}&quot;, file=sys.stderr)
+        return 2
+    with _locked(path, &quot;r&quot;) as fh:
+        data = _load(fh)
+
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        errors.append(&quot;top-level value must be an object&quot;)
+    else:
+        if data.get(&quot;schema_version&quot;) != SCHEMA_VERSION:
+            errors.append(
+                f&quot;schema_version is {data.get(&#x27;schema_version&#x27;)!r} &quot;
+                f&quot;(expected {SCHEMA_VERSION})&quot;
+            )
+        for key in data:
+            if key in (&quot;schema_version&quot;, &quot;asset_name&quot;):
+                continue
+            if key not in KNOWN_SECTIONS:
+                errors.append(f&quot;unknown top-level section: &#x27;{key}&#x27;&quot;)
+            elif not isinstance(data[key], dict):
+                errors.append(f&quot;section &#x27;{key}&#x27; must be an object&quot;)
+
+    schema_path = Path(args.schema) if args.schema else None
+    if schema_path and schema_path.exists():
+        try:
+            import jsonschema  # type: ignore
+        except ImportError:
+            # Not fatal — structural checks above cover the basics. Surface
+            # the gap so the user can opt in to full validation if they want.
+            print(
+                &quot;[meta_helper] note: jsonschema not installed; skipped full schema &quot;
+                &quot;validation. Install in pipeline-tools-env to enable.&quot;,
+                file=sys.stderr,
+            )
+        else:
+            schema = json.loads(schema_path.read_text())
+            try:
+                jsonschema.validate(data, schema)
+            except jsonschema.ValidationError as exc:
+                errors.append(f&quot;schema validation: {exc.message}&quot;)
+
+    if errors:
+        for e in errors:
+            print(f&quot;INVALID: {e}&quot;, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({&quot;status&quot;: &quot;ok&quot;, &quot;path&quot;: str(path)}))
+    else:
+        print(f&quot;[meta_helper] {path} is valid&quot;)
+    return 0
+
+
+def build_parser() -&gt; argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=&quot;Per-asset meta.json helper&quot;)
+    sub = p.add_subparsers(dest=&quot;cmd&quot;, required=True)
+
+    p_merge = sub.add_parser(&quot;merge&quot;, help=&quot;Merge a section into the meta.json (create if missing)&quot;)
+    p_merge.add_argument(&quot;path&quot;, help=&quot;Path to &lt;output&gt;.meta.json&quot;)
+    p_merge.add_argument(&quot;--section&quot;, required=True, help=f&quot;One of: {sorted(KNOWN_SECTIONS)}&quot;)
+    g = p_merge.add_mutually_exclusive_group()
+    g.add_argument(&quot;--data&quot;, help=&quot;Inline JSON object string&quot;)
+    g.add_argument(&quot;--data-file&quot;, help=&quot;Path to a JSON file with the section data&quot;)
+    p_merge.add_argument(&quot;--allow-unknown-section&quot;, action=&quot;store_true&quot;)
+    p_merge.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, help=&quot;Emit a single-line JSON status on stdout&quot;)
+    p_merge.set_defaults(func=cmd_merge)
+
+    p_get = sub.add_parser(&quot;get&quot;, help=&quot;Print the meta.json (or one section) to stdout&quot;)
+    p_get.add_argument(&quot;path&quot;, help=&quot;Path to &lt;output&gt;.meta.json&quot;)
+    p_get.add_argument(&quot;--section&quot;, help=&quot;Print only this section instead of the whole file&quot;)
+    p_get.set_defaults(func=cmd_get)
+
+    p_validate = sub.add_parser(&quot;validate&quot;, help=&quot;Validate structure (and schema if available)&quot;)
+    p_validate.add_argument(&quot;path&quot;, help=&quot;Path to &lt;output&gt;.meta.json&quot;)
+    p_validate.add_argument(&quot;--schema&quot;, help=&quot;Path to meta_schema.json (defaults to alongside this script)&quot;)
+    p_validate.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    p_validate.set_defaults(func=cmd_validate)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -&gt; int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # Default schema path: same directory as this script
+    if args.cmd == &quot;validate&quot; and not args.schema:
+        here = Path(__file__).resolve().parent
+        default = here / &quot;meta_schema.json&quot;
+        if default.exists():
+            args.schema = str(default)
+    return args.func(args)
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>meta_schema.json</code>
+                <span class="script-summary-desc">JSON schema for the per-asset meta.json file (v0.3+)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/meta_schema.json << 'PIPELINE_EOF'
+{
+  &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+  &quot;title&quot;: &quot;Per-asset meta.json (v0.3+ asset-pipeline)&quot;,
+  &quot;description&quot;: &quot;Single file written by all quality passes. Sections are namespaced; each pass owns exactly one section. See improvement-spec.md cross-cutting principle 2.&quot;,
+  &quot;type&quot;: &quot;object&quot;,
+  &quot;required&quot;: [&quot;schema_version&quot;, &quot;asset_name&quot;],
+  &quot;properties&quot;: {
+    &quot;schema_version&quot;: { &quot;const&quot;: 1 },
+    &quot;asset_name&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1 },
+
+    &quot;input&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 4 — input image quality check + format normalisation&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;original_path&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;normalized_path&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;format_original&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;format_normalized&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;width&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;height&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;aspect_ratio&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;background_uniformity&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+        &quot;issues&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } }
+      }
+    },
+
+    &quot;preprocessing&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 1 — bg removal, etc.&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;bg_removal&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;applied&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;mode&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;auto&quot;, &quot;on&quot;, &quot;off&quot;] },
+            &quot;trigger&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+            &quot;model&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+            &quot;alpha_mean&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;fallback&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+            &quot;duration_seconds&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;reason&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] }
+          }
+        },
+        &quot;input_normalization&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true
+        }
+      }
+    },
+
+    &quot;generation&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview)&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;backend&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;model_role&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;license_bucket&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;texture_backend&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;inputs&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;object&quot; } },
+        &quot;polycount_target&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;texture_resolution&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+      }
+    },
+
+    &quot;cleanup&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 6 — clean_asset.py instrumentation&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;duplicate_vertices_removed&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+        &quot;loose_elements_deleted&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+        &quot;holes_filled&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+        &quot;decimate&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;before&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+            &quot;after&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+            &quot;ratio&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;error&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] }
+          }
+        },
+        &quot;duration_seconds&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] }
+      }
+    },
+
+    &quot;quality&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Items 2, 3, 13 — mesh / texture / UV / engine quality checks&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;manifold&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;is_watertight&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;is_winding_consistent&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;boundary_edges&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;hole_count&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;error&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] }
+          }
+        },
+        &quot;scale&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;longest_dim_normalized&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;longest_dim_mm&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;in_sane_range&quot;: { &quot;type&quot;: &quot;boolean&quot; }
+          }
+        },
+        &quot;textures&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;textures_present&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
+            &quot;issues&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
+            &quot;stats&quot;: { &quot;type&quot;: &quot;object&quot; }
+          }
+        },
+        &quot;uv&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;has_uv&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;island_count&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;occupancy_ratio&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;has_overlap&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;in_bounds&quot;: { &quot;type&quot;: &quot;boolean&quot; }
+          }
+        },
+        &quot;engine&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true
+        }
+      }
+    },
+
+    &quot;print&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Existing print.sh data + item 14 structural gates&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;final_dimensions_mm&quot;: { &quot;type&quot;: &quot;object&quot; },
+        &quot;fits_snapmaker_u1&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+        &quot;oversized_axes&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
+        &quot;structural&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;min_wall_thickness_mm&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+            &quot;wall_thickness_safe&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;disconnected_islands&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;self_intersections&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;overhang_area_mm2&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;base_contact_area_mm2&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;base_contact_safe&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;com_offset_normalized&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;stable_on_bed&quot;: { &quot;type&quot;: &quot;boolean&quot; }
+          }
+        }
+      }
+    },
+
+    &quot;preview&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 5 — turntable render outputs&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;mode&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;none&quot;, &quot;png&quot;, &quot;gif&quot;] },
+        &quot;hero_png_path&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;gif_path&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;frames&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;resolution&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;error&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] }
+      }
+    },
+
+    &quot;clip&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 8 — CLIP similarity scoring&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;similarity&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;model&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;model_band&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;percentile_for_this_model&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;rank&quot;: { &quot;type&quot;: &quot;integer&quot; }
+      }
+    }
+  },
+  &quot;additionalProperties&quot;: false
+}
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
