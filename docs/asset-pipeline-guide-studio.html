@@ -2568,9 +2568,38 @@ fi
 
 info &quot;Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)...&quot;
 &quot;$BLENDER&quot; --background --python &quot;$CLEAN_SCRIPT&quot; -- \
-    &quot;$RAW_PATH&quot; &quot;$CLEAN_PATH&quot; &quot;$POLYCOUNT&quot; &quot;$UP_AXIS&quot;
+    &quot;$RAW_PATH&quot; &quot;$CLEAN_PATH&quot; &quot;$POLYCOUNT&quot; &quot;$UP_AXIS&quot; &quot;$META_PATH&quot;
 
 [[ -f &quot;$CLEAN_PATH&quot; ]] || { err &quot;Cleanup did not produce $CLEAN_PATH&quot;; exit 1; }
+
+# v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
+# its `cleanup` section into the meta.json. Silent when the section is
+# missing (older clean_asset.py or meta_helper.py absent).
+if [[ -f &quot;$META_PATH&quot; ]]; then
+    python3 - &quot;$META_PATH&quot; &lt;&lt;&#x27;PY&#x27; 2&gt;/dev/null || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+c = data.get(&quot;cleanup&quot;) or {}
+if not c:
+    sys.exit(0)
+dec = c.get(&quot;decimate&quot;) or {}
+parts = []
+n = c.get(&quot;duplicate_vertices_removed&quot;)
+if n:
+    parts.append(f&quot;removed {n:,} duplicate points&quot;)
+n = c.get(&quot;holes_filled&quot;)
+if n:
+    parts.append(f&quot;filled {n} small gap(s)&quot;)
+b, a = dec.get(&quot;before&quot;), dec.get(&quot;after&quot;)
+if b and a and b != a:
+    parts.append(f&quot;simplified mesh: {b:,} → {a:,} polygons&quot;)
+if parts:
+    print(&quot;[pipeline] Cleanup: &quot; + &quot;, &quot;.join(parts))
+PY
+fi
 
 # --- Engine staging: copy clean GLB into project&#x27;s engine folder if applicable ---
 #
@@ -2926,18 +2955,27 @@ Headless Blender cleanup for AI-generated 3D assets.
 
 Run from generate.sh, or manually via:
   /Applications/Blender.app/Contents/MacOS/Blender --background \
-    --python clean_asset.py -- INPUT.glb OUTPUT.glb TARGET_POLY [up_axis]
+    --python clean_asset.py -- INPUT.glb OUTPUT.glb TARGET_POLY [up_axis] [meta_path]
 
 up_axis: &quot;y&quot; (Unity-friendly, default) or &quot;z&quot; (Unreal-friendly)
+meta_path (v0.3+): when provided, the script instruments each pass and
+writes a `cleanup` section into the per-asset meta.json via
+scripts/meta_helper.py (assumed to sit alongside this file). Empty
+means skip the meta write — v0.2 behaviour preserved.
 &quot;&quot;&quot;
 import bpy
+import json
+import subprocess
 import sys
+import time
 from mathutils import Matrix
+from pathlib import Path
 
 argv = sys.argv[sys.argv.index(&#x27;--&#x27;) + 1:]
 input_path, output_path = argv[0], argv[1]
 target_poly = int(argv[2])
 up_axis = argv[3].lower() if len(argv) &gt; 3 else &quot;y&quot;
+meta_path = argv[4] if len(argv) &gt; 4 else &quot;&quot;
 
 # --- clean scene ---
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -2962,7 +3000,27 @@ obj.select_set(True)
 # --- apply transforms ---
 bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
-# --- mesh hygiene ---
+# --- mesh hygiene with instrumentation (v0.3+) ---
+t0 = time.time()
+verts_before = len(obj.data.vertices)
+edges_before = len(obj.data.edges)
+faces_before = len(obj.data.polygons)
+
+
+def _boundary_edge_count(mesh) -&gt; int:
+    &quot;&quot;&quot;Edges shared by &lt; 2 faces — proxy for &quot;hole edges&quot; in a closed surface.&quot;&quot;&quot;
+    counts = {}
+    for poly in mesh.polygons:
+        for i in range(len(poly.vertices)):
+            a = poly.vertices[i]
+            b = poly.vertices[(i + 1) % len(poly.vertices)]
+            key = (a, b) if a &lt; b else (b, a)
+            counts[key] = counts.get(key, 0) + 1
+    return sum(1 for c in counts.values() if c == 1)
+
+
+boundary_before = _boundary_edge_count(obj.data)
+
 bpy.ops.object.mode_set(mode=&#x27;EDIT&#x27;)
 bpy.ops.mesh.select_all(action=&#x27;SELECT&#x27;)
 bpy.ops.mesh.remove_doubles(threshold=0.0001)
@@ -2971,12 +3029,26 @@ bpy.ops.mesh.delete_loose()
 bpy.ops.mesh.fill_holes(sides=6)
 bpy.ops.object.mode_set(mode=&#x27;OBJECT&#x27;)
 
+verts_after_hygiene = len(obj.data.vertices)
+edges_after_hygiene = len(obj.data.edges)
+boundary_after_hygiene = _boundary_edge_count(obj.data)
+
 # --- decimate to target polycount ---
 current = len(obj.data.polygons)
+decimate_before = current
+decimate_after = current
+decimate_ratio = 1.0
+decimate_error = None
 if current &gt; target_poly:
-    mod = obj.modifiers.new(name=&quot;Decimate&quot;, type=&#x27;DECIMATE&#x27;)
-    mod.ratio = target_poly / current
-    bpy.ops.object.modifier_apply(modifier=&quot;Decimate&quot;)
+    try:
+        mod = obj.modifiers.new(name=&quot;Decimate&quot;, type=&#x27;DECIMATE&#x27;)
+        mod.ratio = target_poly / current
+        bpy.ops.object.modifier_apply(modifier=&quot;Decimate&quot;)
+        decimate_after = len(obj.data.polygons)
+        decimate_ratio = round(decimate_after / decimate_before, 4) if decimate_before else 1.0
+    except Exception as e:
+        decimate_error = str(e)
+        decimate_after = len(obj.data.polygons)
 
 # --- normalize: pivot at bottom of bounding box, scale to ~1m ---
 bpy.ops.object.origin_set(type=&#x27;ORIGIN_GEOMETRY&#x27;, center=&#x27;BOUNDS&#x27;)
@@ -2998,7 +3070,50 @@ bpy.ops.export_scene.gltf(
     export_yup=(up_axis == &quot;y&quot;),
 )
 
+duration = round(time.time() - t0, 2)
+duplicate_vertices_removed = max(0, verts_before - verts_after_hygiene)
+loose_elements_deleted = max(0, edges_before - edges_after_hygiene)
+holes_filled = max(0, boundary_before - boundary_after_hygiene)
+
 print(f&quot;[clean_asset] OK -&gt; {output_path}  ({len(obj.data.polygons)} polys)&quot;)
+print(
+    f&quot;[clean_asset] cleanup: dedup_verts={duplicate_vertices_removed} &quot;
+    f&quot;loose={loose_elements_deleted} holes_filled={holes_filled} &quot;
+    f&quot;decimate={decimate_before}-&gt;{decimate_after} ({duration}s)&quot;
+)
+
+# --- v0.3: merge cleanup section into per-asset meta.json ---
+if meta_path:
+    here = Path(__file__).resolve().parent
+    helper = here / &quot;meta_helper.py&quot;
+    if not helper.exists():
+        # Fall back to global workspace install path
+        helper = Path(input_path).resolve().parent.parent / &quot;meta_helper.py&quot;
+    if helper.exists():
+        cleanup_section = {
+            &quot;duplicate_vertices_removed&quot;: duplicate_vertices_removed,
+            &quot;loose_elements_deleted&quot;: loose_elements_deleted,
+            &quot;holes_filled&quot;: holes_filled,
+            &quot;decimate&quot;: {
+                &quot;before&quot;: decimate_before,
+                &quot;after&quot;: decimate_after,
+                &quot;ratio&quot;: decimate_ratio,
+                &quot;error&quot;: decimate_error,
+            },
+            &quot;duration_seconds&quot;: duration,
+        }
+        try:
+            subprocess.run(
+                [
+                    sys.executable, str(helper), &quot;merge&quot;, meta_path,
+                    &quot;--section&quot;, &quot;cleanup&quot;,
+                    &quot;--data&quot;, json.dumps(cleanup_section),
+                ],
+                check=False,
+            )
+        except Exception as e:
+            print(f&quot;[clean_asset] could not write cleanup section to meta.json: {e}&quot;,
+                  file=sys.stderr)
 PIPELINE_EOF</pre></div>
             </details>
             <details class="script-detail">
@@ -6526,6 +6641,29 @@ line as JSON; `outputs[0]` is the first image.
 Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
+
+### Cleanup report (v0.3+)
+
+After `clean_asset.py` runs (always — it&#x27;s in v0.2), the wrapper now
+emits a one-line summary if the meta.json has a `cleanup` section:
+
+```
+[pipeline] Cleanup: removed 47 duplicate points, filled 2 small gap(s),
+                    simplified mesh: 18,400 → 3,000 polygons
+```
+
+Use this as a signal of generator output quality. Heuristics:
+
+- `holes_filled &gt; 5` or `duplicate_vertices_removed &gt; 1,000` →
+  raw mesh was poor; mention this to the user before they commit
+  the asset to their project (re-generation often helps)
+- `decimate ratio &lt; 0.05` → raw mesh was extremely dense; current
+  generator settings may be overkill; suggest a higher polycount
+  target if the user wants more detail
+- All counts ≈ 0 → raw mesh was already clean; nothing to flag
+
+For prints (Flow 4 / 5): higher cleanup counts correlate with
+slicer trouble. Worth surfacing when the destination is a printer.
 
 ### Input quality check (v0.3+)
 

@@ -310,9 +310,38 @@ fi
 
 info "Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)..."
 "$BLENDER" --background --python "$CLEAN_SCRIPT" -- \
-    "$RAW_PATH" "$CLEAN_PATH" "$POLYCOUNT" "$UP_AXIS"
+    "$RAW_PATH" "$CLEAN_PATH" "$POLYCOUNT" "$UP_AXIS" "$META_PATH"
 
 [[ -f "$CLEAN_PATH" ]] || { err "Cleanup did not produce $CLEAN_PATH"; exit 1; }
+
+# v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
+# its `cleanup` section into the meta.json. Silent when the section is
+# missing (older clean_asset.py or meta_helper.py absent).
+if [[ -f "$META_PATH" ]]; then
+    python3 - "$META_PATH" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+c = data.get("cleanup") or {}
+if not c:
+    sys.exit(0)
+dec = c.get("decimate") or {}
+parts = []
+n = c.get("duplicate_vertices_removed")
+if n:
+    parts.append(f"removed {n:,} duplicate points")
+n = c.get("holes_filled")
+if n:
+    parts.append(f"filled {n} small gap(s)")
+b, a = dec.get("before"), dec.get("after")
+if b and a and b != a:
+    parts.append(f"simplified mesh: {b:,} → {a:,} polygons")
+if parts:
+    print("[pipeline] Cleanup: " + ", ".join(parts))
+PY
+fi
 
 # --- Engine staging: copy clean GLB into project's engine folder if applicable ---
 #

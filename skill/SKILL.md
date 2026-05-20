@@ -243,6 +243,29 @@ Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
 
+### Cleanup report (v0.3+)
+
+After `clean_asset.py` runs (always — it's in v0.2), the wrapper now
+emits a one-line summary if the meta.json has a `cleanup` section:
+
+```
+[pipeline] Cleanup: removed 47 duplicate points, filled 2 small gap(s),
+                    simplified mesh: 18,400 → 3,000 polygons
+```
+
+Use this as a signal of generator output quality. Heuristics:
+
+- `holes_filled > 5` or `duplicate_vertices_removed > 1,000` →
+  raw mesh was poor; mention this to the user before they commit
+  the asset to their project (re-generation often helps)
+- `decimate ratio < 0.05` → raw mesh was extremely dense; current
+  generator settings may be overkill; suggest a higher polycount
+  target if the user wants more detail
+- All counts ≈ 0 → raw mesh was already clean; nothing to flag
+
+For prints (Flow 4 / 5): higher cleanup counts correlate with
+slicer trouble. Worth surfacing when the destination is a printer.
+
 ### Input quality check (v0.3+)
 
 When `pipeline-tools-env` is installed, the wrapper runs an input

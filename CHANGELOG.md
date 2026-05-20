@@ -2,6 +2,20 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.3: cleanup report (Tier 1)
+
+- `scripts/clean_asset.py` — instrumented each hygiene pass to count
+  what it changed (duplicate verts removed, loose elements deleted,
+  holes filled, decimate before/after). Result is written to the
+  per-asset meta.json `cleanup` section via meta_helper.py when an
+  optional 5th positional arg (META_PATH) is passed. Defaults preserve
+  v0.2 behaviour.
+- `scripts/generate.sh` passes META_PATH to clean_asset.py and then
+  surfaces a user-friendly one-line summary using the meta.json
+  contents.
+- `skill/SKILL.md` Flow 2 documents the new summary line + heuristics
+  for interpreting high cleanup counts.
+
 ## 2026-05-20 — P1.2: input quality check + WebP/GIF normalisation (Tier 1)
 
 - `scripts/input_quality_check.py` — Pillow-based check (resolution,
