@@ -2,6 +2,17 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q5 (open question): pipeline-doctor CI spec for review
+
+`docs/spec-pipeline-doctor-ci.md` — proposal for running
+`pipeline_doctor.py` in CI on PRs touching scripts/, skill/, or the
+embed map. Covers a new `--check structure` subcheck (validates
+the catalog itself, no model installs needed), a new GitHub Actions
+workflow, what's caught vs what isn't, trade-offs, and ~2.5h effort
+estimate.
+
+Spec only — awaiting user review before implementing.
+
 ## 2026-05-20 — Q2 (open question): meta.json schema migration framework
 
 `scripts/meta_helper.py` gains a migration framework so the per-asset
