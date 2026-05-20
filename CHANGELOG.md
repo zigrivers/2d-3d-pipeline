@@ -2,6 +2,27 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.1a.2: Document the MV-2D install in section 10
+
+Adds a second optional step to "section 10 / v0.3 prep" in both
+setup guides documenting the extra `diffusers`/`transformers`/
+`accelerate` install that the multi-view backend benchmark's
+Option B path (P3.1a.1) needs. Detailed copy explaining:
+
+  - What multi-view-aware 2D models are (Zero123++ as the reference);
+  - Why they matter for the benchmark (full-production-chain test
+    vs. backend-in-isolation; diagnostic delta against Option C);
+  - Why they matter for a future feature ("auto multi-view from
+    single concept" input mode for generate.sh, post-P3.1b);
+  - When NOT to install (skip unless benchmarking — v0.3's regular
+    generation pipeline doesn't touch these packages);
+  - Disk impact (~1.5 GB packages + ~3 GB Zero123++ weights).
+
+Both UPGRADES-{laptop,studio}.md get a parallel short note under
+"What's coming next (v0.3 prep)".
+
+Docs only. No script or skill changes. make verify clean.
+
 ## 2026-05-20 — P3.1a.1: Option B + Option C dataset tooling
 
 Builds on P3.1a's harness with two complementary input pipelines:

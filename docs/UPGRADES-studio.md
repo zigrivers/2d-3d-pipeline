@@ -265,4 +265,26 @@ If a wheel fails to install: `pip install --upgrade pip setuptools wheel`
 first, then retry. `torch` on Apple Silicon is the most common failure;
 make sure you're on Python 3.10–3.12.
 
+### Multi-view 2D generation (optional, for the multi-view backend benchmark)
+
+A second optional step inside section 10 now adds `diffusers`,
+`transformers`, and `accelerate` on top of `pipeline-tools-env`.
+These unlock multi-view-aware 2D generators — models like Zero123++
+(`sudo-ai/zero123plus-v1.2`) that take **one** image of a subject and
+produce **N consistent views** of the same subject at canonical angles.
+
+You only need them if you're going to build or re-run the multi-view
+backend benchmark at `tests/multiview-bench/`. The benchmark uses
+Zero123++ in its "Option B" path to test the full production chain
+(`one concept image → multi-view 2D model → 3D backend`) rather than
+just the 3D backend in isolation.
+
+Studio tier has the disk headroom to install it preemptively even if
+benchmarking isn't on your near-term plan. Disk impact: ~1.5 GB of
+packages + ~3 GB of Zero123++ weights on first benchmark run.
+
+Once a multi-view 3D backend is chosen (P3.1b in
+`docs/improvement-plan.md`), the same install also unlocks a future
+"auto multi-view from single concept" input mode for `generate.sh`.
+
 Last updated: 2026-05-20

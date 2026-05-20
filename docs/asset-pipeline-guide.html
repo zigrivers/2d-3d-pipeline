@@ -9828,6 +9828,57 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
         </div>
       </div>
 
+      <div class="step" data-step="pipeline-tools-mvgen">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Multi-view 2D generation <span style="color: var(--overlay0); font-style: italic; font-weight: normal;">(optional, for the multi-view backend benchmark)</span></h3>
+
+          <p><strong>What this is.</strong> Three extra Python packages on top of <code>pipeline-tools-env</code> — <code>diffusers</code>, <code>transformers</code>, <code>accelerate</code> — that unlock <strong>multi-view-aware 2D generators</strong>. These are models specifically trained to produce N <em>consistent</em> views of one object from a single input image. The reference model wired up today is <a href="https://huggingface.co/sudo-ai/zero123plus-v1.2">Zero123++</a> (sudo-ai/zero123plus-v1.2): it takes one image of a subject and produces 6 multi-view-consistent images of the same subject at canonical angles.</p>
+
+          <p><strong>Why this could be beneficial.</strong> The pipeline today is single-image → single 3D mesh. When you feed a 3D generator (SF3D / SPAR3D / TRELLIS / future multi-view backends) only one view, it has to <em>hallucinate</em> the parts it can't see — the back of a character, the underside of a prop. Multi-view-consistent 2D generation closes that gap by handing the 3D stage real information about every angle, all derived from one starting image.</p>
+
+          <p>Two concrete uses today, one tomorrow:</p>
+
+          <div class="callout callout-info" style="margin-top: 12px;">
+            <div class="callout-label">Use 1 — multi-view backend benchmark (today)</div>
+            <p>The benchmark at <code>tests/multiview-bench/</code> uses these packages in its "Option B" path:</p>
+            <ol style="margin-top: 8px;">
+              <li>Start from a known source GLB.</li>
+              <li>Render one concept view of it via headless Blender.</li>
+              <li>Feed that single view into Zero123++ → get 6 multi-view-consistent images.</li>
+              <li>Hand those 6 to each candidate 3D backend (TRELLIS multi-view, InstantMesh, OpenLRM) and compare reconstruction quality against the source.</li>
+            </ol>
+            <p style="margin-top: 12px;">That measures the <strong>full production chain</strong> a real user will hit — "I give you one image, you give me back a 3D asset" — instead of just the 3D backend in isolation. Without these extras you can still run the benchmark's "Option C" (render 4 calibrated views directly from a known GLB), which measures backend reconstruction quality on perfect input but doesn't catch failures introduced upstream.</p>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 12px;">
+            <div class="callout-label">Use 2 — diagnostic delta (today)</div>
+            <p>Because both pipelines (Option B mvgen and Option C synthetic) share the <em>same</em> source GLB as ground truth, the difference between a backend's synthetic and mvgen scores is the most useful diagnostic in the benchmark: it tells you whether a backend's failure mode is "bad at reconstructing well-conditioned input" (both fail) or "bad at handling AI-generated views" (only mvgen fails). That decides whether you fix the backend or pair it with a different multi-view 2D model.</p>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 12px;">
+            <div class="callout-label">Use 3 — single-image-to-3D upgrade path (future)</div>
+            <p>Once a multi-view backend is chosen (P3.1b in <code>docs/improvement-plan.md</code>), this same install also unlocks a future <em>auto-multi-view-from-single-concept</em> input mode for <code>generate.sh</code>: one sketch → 6 consistent views → 3D mesh, no manual photography needed. That feature isn't built yet, but the dependencies will already be in place.</p>
+          </div>
+
+          <p><strong>When to install.</strong> Only when you're about to build or re-run the multi-view backend benchmark. Skip otherwise — the regular v0.3 generation pipeline doesn't need any of this.</p>
+
+          <p><strong>Disk impact.</strong> Packages are ~1.5&nbsp;GB. The Zero123++ weights are another ~3&nbsp;GB on the first benchmark run (downloaded automatically by <code>diffusers</code> to the standard HuggingFace cache; route via <code>HF_HOME</code> if you want to keep it under <code>~/3d-pipeline/models/</code>).</p>
+
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/pipeline-tools-env/bin/activate
+<span class="tk-prompt">$ </span>pip install <span class="tk-str">'diffusers&gt;=0.25'</span> transformers accelerate
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+
+          <div class="verify" style="margin-top: 16px;">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">Confirm the imports succeed:</div>
+          </div>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/pipeline-tools-env/bin/activate
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import diffusers, transformers, accelerate; print('ok')"</span>
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+        </div>
+      </div>
+
       <p style="margin-top: 40px; padding: 24px; background: var(--mantle); border-left: 3px solid var(--mauve); border-radius: 0 4px 4px 0;">
         <strong style="color: var(--mauve); font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;">No behaviour change yet</strong><br><br>
         <span style="color: var(--subtext1);">Installing this venv doesn't change anything about how the v0.2 pipeline runs. The scripts that use it ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
