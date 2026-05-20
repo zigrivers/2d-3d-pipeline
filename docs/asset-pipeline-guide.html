@@ -2543,6 +2543,17 @@ info &quot;Cleaning with Blender (target $POLYCOUNT polys, $UP_AXIS-up)...&quot;
 
 [[ -f &quot;$CLEAN_PATH&quot; ]] || { err &quot;Cleanup did not produce $CLEAN_PATH&quot;; exit 1; }
 
+# v0.3 — mesh quality check (watertight + scale sanity). Silent no-op
+# when pipeline-tools-env isn&#x27;t installed.
+PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+MESH_CHECK=&quot;$SCRIPT_DIR/mesh_quality_check.py&quot;
+[[ -f &quot;$MESH_CHECK&quot; ]] || MESH_CHECK=&quot;$PIPELINE_ROOT/workspace/mesh_quality_check.py&quot;
+if [[ -f &quot;$MESH_CHECK&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$MESH_CHECK&quot; \
+        --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized 2&gt;&amp;1 \
+        | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[mesh-check\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+fi
+
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is
 # missing (older clean_asset.py or meta_helper.py absent).
@@ -3316,6 +3327,31 @@ api_used = export_stl_compat(output_path)
 
 # Sidecar JSON is the authoritative source for print.sh&#x27;s --json result.
 write_meta(fits=fits)
+
+
+# ---------- v0.3: mesh quality check on the printable STL ----------
+# Runs in pipeline-tools-env (trimesh + numpy). Writes to the STL&#x27;s
+# meta.json next to it. Silent when the venv / helper aren&#x27;t present.
+import subprocess as _sp
+import os as _os
+_meta_path = output_path + &quot;.meta.json&quot;
+_here = _os.path.dirname(_os.path.abspath(__file__))
+_check = _os.path.join(_here, &quot;mesh_quality_check.py&quot;)
+if not _os.path.exists(_check):
+    _check = _os.path.expanduser(&quot;~/3d-pipeline/workspace/mesh_quality_check.py&quot;)
+_helper_py = _os.path.expanduser(&quot;~/3d-pipeline/pipeline-tools-env/bin/python&quot;)
+if _os.path.exists(_check) and _os.path.exists(_helper_py):
+    try:
+        _sp.run(
+            [_helper_py, _check,
+             &quot;--input&quot;, output_path,
+             &quot;--meta&quot;, _meta_path,
+             &quot;--mode&quot;, &quot;mm&quot;],
+            check=False,
+            timeout=60,
+        )
+    except Exception as _e:
+        print(f&quot;[prepare_for_print] mesh_quality_check skipped: {_e}&quot;)
 
 
 # ---------- report ----------
@@ -6288,6 +6324,207 @@ if __name__ == &quot;__main__&quot;:
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>mesh_quality_check.py</code>
+                <span class="script-summary-desc">v0.3 mesh watertight + scale sanity check</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/mesh_quality_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — mesh watertight + scale sanity check.
+
+Loads a GLB / STL with trimesh and reports:
+  - is_watertight + boundary edge / hole count
+  - is_winding_consistent
+  - scale sanity (longest dimension within a &quot;sane&quot; range)
+
+Results merge into the per-asset meta.json `quality.manifold` and
+`quality.scale` sections via meta_helper.py.
+
+Called from generate.sh after clean_asset.py finishes, and from
+prepare_for_print.py after the STL is written.
+
+Usage:
+    mesh_quality_check.py --input PATH --meta PATH [--mode {normalized,mm}]
+                          [--json]
+
+--mode normalized (default): the input is the cleaned GLB whose
+longest dim has been normalized to ~1.0. Scale sanity is &quot;is the
+longest dim in [0.001, 1000]?&quot; — catches generator outputs that are
+microscopic or astronomically large.
+
+--mode mm: the input is the printable STL in millimetres. Scale
+sanity is &quot;is the longest dim in [1.0, 1000.0]?&quot; — catches outputs
+that would silently print at 0.5mm or 5m scales.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+NORMALIZED_SANE_MIN = 0.001
+NORMALIZED_SANE_MAX = 1000.0
+MM_SANE_MIN = 1.0
+MM_SANE_MAX = 1000.0
+
+
+def _check_trimesh() -&gt; &quot;module&quot;:
+    try:
+        import trimesh  # type: ignore
+        return trimesh
+    except ImportError:
+        print(
+            &quot;ERROR: trimesh not installed. Activate pipeline-tools-env first:\n&quot;
+            &quot;    source ~/3d-pipeline/pipeline-tools-env/bin/activate&quot;,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def check(input_path: Path, mode: str) -&gt; dict:
+    trimesh = _check_trimesh()
+    try:
+        mesh = trimesh.load(str(input_path), force=&quot;mesh&quot;)
+    except Exception as e:
+        return {
+            &quot;manifold&quot;: {&quot;error&quot;: f&quot;load_failed: {e}&quot;},
+            &quot;scale&quot;: {&quot;error&quot;: &quot;load_failed&quot;},
+        }
+
+    is_watertight = bool(mesh.is_watertight)
+    is_winding_consistent = bool(mesh.is_winding_consistent)
+
+    # Boundary edges = edges that appear in exactly one face. Count by
+    # finding unique edges that aren&#x27;t in face_adjacency_edges (shared edges).
+    boundary_edges = 0
+    try:
+        import numpy as np  # type: ignore
+        # edges_unique: Nx2 unique edges; face_adjacency_edges: edges shared by
+        # neighbouring faces (always present in a closed surface). The set
+        # difference is the boundary.
+        unique = {tuple(sorted(e)) for e in mesh.edges_unique.tolist()}
+        shared = {tuple(sorted(e)) for e in mesh.face_adjacency_edges.tolist()}
+        boundary_edges = len(unique - shared)
+    except Exception:
+        # Fallback: trimesh.outline() returns a Path3D whose entities are
+        # the boundary loops. The entity count is a rough proxy for holes.
+        try:
+            outline = mesh.outline()
+            boundary_edges = int(sum(len(e.points) for e in outline.entities))
+        except Exception:
+            boundary_edges = 0
+
+    # Approximate hole count: each hole boundary is a closed loop, so a
+    # reasonable proxy is &quot;number of connected components of boundary
+    # edges&quot;. We don&#x27;t have that cheaply; use the outline-entity count
+    # when available, otherwise fall back to a coarse estimate.
+    hole_count = 0
+    if not is_watertight:
+        try:
+            outline = mesh.outline()
+            hole_count = int(len(outline.entities)) if outline else 1
+        except Exception:
+            hole_count = max(1, boundary_edges // 6)
+
+    extents = mesh.extents if mesh.extents is not None else [0.0, 0.0, 0.0]
+    longest = float(max(extents))
+
+    if mode == &quot;mm&quot;:
+        in_range = MM_SANE_MIN &lt;= longest &lt;= MM_SANE_MAX
+        scale_block = {
+            &quot;longest_dim_mm&quot;: round(longest, 3),
+            &quot;in_sane_range&quot;: bool(in_range),
+            &quot;mode&quot;: &quot;mm&quot;,
+        }
+    else:
+        in_range = NORMALIZED_SANE_MIN &lt;= longest &lt;= NORMALIZED_SANE_MAX
+        scale_block = {
+            &quot;longest_dim_normalized&quot;: round(longest, 4),
+            &quot;in_sane_range&quot;: bool(in_range),
+            &quot;mode&quot;: &quot;normalized&quot;,
+        }
+
+    return {
+        &quot;manifold&quot;: {
+            &quot;is_watertight&quot;: is_watertight,
+            &quot;is_winding_consistent&quot;: is_winding_consistent,
+            &quot;boundary_edges&quot;: int(boundary_edges),
+            &quot;hole_count&quot;: int(hole_count),
+        },
+        &quot;scale&quot;: scale_block,
+    }
+
+
+def _merge_into_meta(meta_path: Path, payload: dict) -&gt; None:
+    &quot;&quot;&quot;Each sub-key of `payload` is a top-level meta section under `quality`.
+    We merge them as &#x27;quality&#x27; but our helper merges per-section. To preserve
+    keys we already had under quality, merge a quality dict containing
+    manifold + scale.&quot;&quot;&quot;
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;quality&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True, help=&quot;Path to a GLB or STL&quot;)
+    p.add_argument(&quot;--meta&quot;, required=True, help=&quot;Path to &lt;output&gt;.meta.json&quot;)
+    p.add_argument(&quot;--mode&quot;, choices=[&quot;normalized&quot;, &quot;mm&quot;], default=&quot;normalized&quot;,
+                   help=&quot;Scale-sanity mode (default: normalized)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, help=&quot;Emit JSON result on stdout&quot;)
+    args = p.parse_args()
+
+    input_path = Path(os.path.expanduser(args.input))
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    if not input_path.exists():
+        print(f&quot;ERROR: input not found: {input_path}&quot;, file=sys.stderr)
+        return 1
+
+    result = check(input_path, args.mode)
+    _merge_into_meta(meta_path, result)
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        manifold = result[&quot;manifold&quot;]
+        if &quot;error&quot; in manifold:
+            print(f&quot;[mesh-check] could not analyze mesh: {manifold[&#x27;error&#x27;]}&quot;, file=sys.stderr)
+            return 0
+        wt = manifold[&quot;is_watertight&quot;]
+        hc = manifold[&quot;hole_count&quot;]
+        if wt:
+            print(f&quot;[mesh-check] Mesh: fully sealed (good for printing) — 0 holes&quot;)
+        else:
+            print(f&quot;[mesh-check] Mesh: {hc} small gap(s) in the surface (may still print)&quot;)
+        scale = result[&quot;scale&quot;]
+        if &quot;error&quot; in scale:
+            print(f&quot;[mesh-check] scale check unavailable&quot;, file=sys.stderr)
+        elif not scale[&quot;in_sane_range&quot;]:
+            if scale[&quot;mode&quot;] == &quot;mm&quot;:
+                dim = scale[&quot;longest_dim_mm&quot;]
+                print(f&quot;[mesh-check] Scale: ⚠ longest dim {dim} mm is outside the sane range ({MM_SANE_MIN}–{MM_SANE_MAX} mm)&quot;)
+            else:
+                dim = scale[&quot;longest_dim_normalized&quot;]
+                print(f&quot;[mesh-check] Scale: ⚠ longest dim {dim} is outside the sane normalized range&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
@@ -6612,6 +6849,56 @@ line as JSON; `outputs[0]` is the first image.
 Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
+
+### Translation map (v0.3+ user-friendly language)
+
+The wrappers and Claude both speak engine-jargon natively, but the
+user does not. When relaying quality-check output, translate via
+this table (cross-cutting principle 8 from improvement-spec.md):
+
+| Engine term | User-facing translation |
+|---|---|
+| &quot;non-manifold edge&quot; / &quot;boundary edge&quot; | &quot;small gap in the surface&quot; |
+| &quot;is_watertight=true&quot; | &quot;fully sealed (good for printing)&quot; |
+| &quot;is_watertight=false, hole_count=N&quot; | &quot;N small gap(s) in the surface — may still print&quot; |
+| &quot;UV island&quot; | &quot;texture patch&quot; |
+| &quot;decimate ratio 0.16&quot; | &quot;simplified mesh: 18,400 → 3,000 polygons&quot; |
+| &quot;alpha_mean 0.42&quot; | &quot;subject takes up about 42% of the image&quot; |
+| &quot;CLIP similarity 0.84&quot; | &quot;image matches your prompt: very good (0.84/1.0)&quot; |
+| &quot;CLIP similarity 0.71&quot; | &quot;image matches your prompt: weak (0.71/1.0) — consider re-generating&quot; |
+| &quot;non-manifold internal shell&quot; | &quot;hidden geometry inside the mesh&quot; |
+| &quot;wall thickness 0.4mm&quot; | &quot;thinnest part is 0.4mm — may fail to print&quot; |
+| &quot;extreme_aspect_ratio&quot; | &quot;image is unusually wide/tall — output mesh will be distorted&quot; |
+| &quot;low_resolution&quot; | &quot;image is below 512px — output quality will suffer&quot; |
+
+When a check emits a raw value (in `--json` mode), translate before
+speaking to the user. The wrapper already pre-translates some lines
+for stderr (`[pipeline] Mesh: fully sealed (good for printing)`),
+but if you&#x27;re reading meta.json directly, do the translation here.
+
+### Mesh quality check (v0.3+)
+
+After cleanup, the wrapper runs a watertight + scale sanity check
+on the cleaned GLB. Output looks like:
+
+```
+[pipeline] Mesh: fully sealed (good for printing) — 0 holes
+```
+
+Or when problems:
+
+```
+[pipeline] Mesh: 3 small gap(s) in the surface (may still print)
+[pipeline] Scale: ⚠ longest dim 0.0008 is outside the sane normalized range
+```
+
+Skill behaviour:
+
+- `is_watertight=false` + low hole count (1–3) → mention to the user;
+  print may still work via Orca&#x27;s Auto Repair
+- High hole count (&gt; 10) → strongly recommend re-generation
+- `scale.in_sane_range=false` → almost always a generator bug; offer
+  to re-generate with a different seed
 
 ### Cleanup report (v0.3+)
 

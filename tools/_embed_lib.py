@@ -50,6 +50,7 @@ EMBEDS: dict[str, str] = {
     "scripts/pipeline_doctor.py":       "~/3d-pipeline/workspace/pipeline_doctor.py",
     "scripts/model_manifest.json":      "~/3d-pipeline/workspace/model_manifest.json",
     "scripts/input_quality_check.py":   "~/3d-pipeline/workspace/input_quality_check.py",
+    "scripts/mesh_quality_check.py":    "~/3d-pipeline/workspace/mesh_quality_check.py",
 }
 
 # Block pattern: opener line, body, closing PIPELINE_EOF on its own line.

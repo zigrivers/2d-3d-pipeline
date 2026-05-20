@@ -223,6 +223,31 @@ api_used = export_stl_compat(output_path)
 write_meta(fits=fits)
 
 
+# ---------- v0.3: mesh quality check on the printable STL ----------
+# Runs in pipeline-tools-env (trimesh + numpy). Writes to the STL's
+# meta.json next to it. Silent when the venv / helper aren't present.
+import subprocess as _sp
+import os as _os
+_meta_path = output_path + ".meta.json"
+_here = _os.path.dirname(_os.path.abspath(__file__))
+_check = _os.path.join(_here, "mesh_quality_check.py")
+if not _os.path.exists(_check):
+    _check = _os.path.expanduser("~/3d-pipeline/workspace/mesh_quality_check.py")
+_helper_py = _os.path.expanduser("~/3d-pipeline/pipeline-tools-env/bin/python")
+if _os.path.exists(_check) and _os.path.exists(_helper_py):
+    try:
+        _sp.run(
+            [_helper_py, _check,
+             "--input", output_path,
+             "--meta", _meta_path,
+             "--mode", "mm"],
+            check=False,
+            timeout=60,
+        )
+    except Exception as _e:
+        print(f"[prepare_for_print] mesh_quality_check skipped: {_e}")
+
+
 # ---------- report ----------
 print(f"[prepare_for_print] OK -> {output_path}")
 print(f"  Dimensions:        {dims_mm[0]} x {dims_mm[1]} x {dims_mm[2]} mm")

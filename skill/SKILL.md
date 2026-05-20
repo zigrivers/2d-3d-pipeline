@@ -243,6 +243,56 @@ Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
 for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
 license bucket if you pick anything other than SF3D.
 
+### Translation map (v0.3+ user-friendly language)
+
+The wrappers and Claude both speak engine-jargon natively, but the
+user does not. When relaying quality-check output, translate via
+this table (cross-cutting principle 8 from improvement-spec.md):
+
+| Engine term | User-facing translation |
+|---|---|
+| "non-manifold edge" / "boundary edge" | "small gap in the surface" |
+| "is_watertight=true" | "fully sealed (good for printing)" |
+| "is_watertight=false, hole_count=N" | "N small gap(s) in the surface — may still print" |
+| "UV island" | "texture patch" |
+| "decimate ratio 0.16" | "simplified mesh: 18,400 → 3,000 polygons" |
+| "alpha_mean 0.42" | "subject takes up about 42% of the image" |
+| "CLIP similarity 0.84" | "image matches your prompt: very good (0.84/1.0)" |
+| "CLIP similarity 0.71" | "image matches your prompt: weak (0.71/1.0) — consider re-generating" |
+| "non-manifold internal shell" | "hidden geometry inside the mesh" |
+| "wall thickness 0.4mm" | "thinnest part is 0.4mm — may fail to print" |
+| "extreme_aspect_ratio" | "image is unusually wide/tall — output mesh will be distorted" |
+| "low_resolution" | "image is below 512px — output quality will suffer" |
+
+When a check emits a raw value (in `--json` mode), translate before
+speaking to the user. The wrapper already pre-translates some lines
+for stderr (`[pipeline] Mesh: fully sealed (good for printing)`),
+but if you're reading meta.json directly, do the translation here.
+
+### Mesh quality check (v0.3+)
+
+After cleanup, the wrapper runs a watertight + scale sanity check
+on the cleaned GLB. Output looks like:
+
+```
+[pipeline] Mesh: fully sealed (good for printing) — 0 holes
+```
+
+Or when problems:
+
+```
+[pipeline] Mesh: 3 small gap(s) in the surface (may still print)
+[pipeline] Scale: ⚠ longest dim 0.0008 is outside the sane normalized range
+```
+
+Skill behaviour:
+
+- `is_watertight=false` + low hole count (1–3) → mention to the user;
+  print may still work via Orca's Auto Repair
+- High hole count (> 10) → strongly recommend re-generation
+- `scale.in_sane_range=false` → almost always a generator bug; offer
+  to re-generate with a different seed
+
 ### Cleanup report (v0.3+)
 
 After `clean_asset.py` runs (always — it's in v0.2), the wrapper now

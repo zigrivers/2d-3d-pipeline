@@ -2,6 +2,20 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.4: mesh watertight + scale sanity check (Tier 1)
+
+- `scripts/mesh_quality_check.py` (in pipeline-tools-env) — trimesh-
+  based watertight + boundary-edge + scale-sanity probe. Writes
+  `quality.manifold` and `quality.scale` sections to the per-asset
+  meta.json via meta_helper.py. Two modes: `normalized` for the
+  cleaned GLB (longest dim ≈ 1.0) and `mm` for the printable STL.
+- `scripts/generate.sh` runs it on the cleaned GLB after cleanup.
+- `scripts/prepare_for_print.py` runs it on the STL after export
+  (mm mode). Sidecar STL meta.json next to the file.
+- `skill/SKILL.md` gains a "Translation map" section near Flow 2
+  (cross-cutting principle 8 — turn "non-manifold edge" into "small
+  gap in the surface") plus a "Mesh quality check" subsection.
+
 ## 2026-05-20 — P1.3: cleanup report (Tier 1)
 
 - `scripts/clean_asset.py` — instrumented each hygiene pass to count
