@@ -39,6 +39,7 @@ SKIP_CLEAN=0
 SKIP_ENGINE_STAGE=0
 OVERWRITE_ENGINE=0
 JSON_MODE=0
+BG_REMOVAL_MODE=""
 
 usage() {
     cat <<EOF
@@ -96,6 +97,8 @@ while [[ $# -gt 0 ]]; do
         --no-clean)          SKIP_CLEAN=1;      shift ;;
         --no-engine-stage)   SKIP_ENGINE_STAGE=1; shift ;;
         --overwrite-engine)  OVERWRITE_ENGINE=1; shift ;;
+        --bg-removal)        BG_REMOVAL_MODE="$2"; shift 2 ;;
+        --no-bg-removal)     BG_REMOVAL_MODE="off"; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -140,6 +143,30 @@ META_PATH="${CLEAN_PATH}.meta.json"
 # v0.3: input quality check + WebP/GIF normalisation. No-op when the
 # helper script or pipeline-tools-env isn't installed (v0.2 behaviour).
 check_and_normalize_input
+
+# v0.3: conditional background removal. Reads input.background_uniformity
+# from the meta.json that check_and_normalize_input just wrote. Updates
+# $INPUT to the no-background PNG when the run actually applies.
+[[ -z "$BG_REMOVAL_MODE" ]] && BG_REMOVAL_MODE="$(read_pipeline_config bg_removal_mode auto 2>/dev/null || echo auto)"
+PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+REMBG_SCRIPT="$SCRIPT_DIR/rembg_preprocess.py"
+[[ -f "$REMBG_SCRIPT" ]] || REMBG_SCRIPT="$PIPELINE_ROOT/workspace/rembg_preprocess.py"
+if [[ -f "$REMBG_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" && "$BG_REMOVAL_MODE" != "off" ]]; then
+    REMBG_RESULT="$("$PIPELINE_TOOLS_ENV/bin/python" "$REMBG_SCRIPT" \
+        --input "$INPUT" --output-dir "$ASSETS_ROOT/concept" --meta "$META_PATH" \
+        --mode "$BG_REMOVAL_MODE" --name "$OUTPUT_NAME" --json 2>/dev/null || echo '{}')"
+    NEW_INPUT="$(printf '%s' "$REMBG_RESULT" | python3 -c "
+import json, sys
+try: d = json.loads(sys.stdin.read())
+except Exception: sys.exit(0)
+if d.get('applied') and d.get('output_path'):
+    print(d['output_path'])
+" 2>/dev/null)"
+    if [[ -n "$NEW_INPUT" && -f "$NEW_INPUT" ]]; then
+        info "Background removed → $NEW_INPUT"
+        INPUT="$NEW_INPUT"
+    fi
+fi
 
 COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
 HUMAN_FD=1

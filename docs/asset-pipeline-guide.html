@@ -2268,6 +2268,7 @@ SKIP_CLEAN=0
 SKIP_ENGINE_STAGE=0
 OVERWRITE_ENGINE=0
 JSON_MODE=0
+BG_REMOVAL_MODE=&quot;&quot;
 
 usage() {
     cat &lt;&lt;EOF
@@ -2325,6 +2326,8 @@ while [[ $# -gt 0 ]]; do
         --no-clean)          SKIP_CLEAN=1;      shift ;;
         --no-engine-stage)   SKIP_ENGINE_STAGE=1; shift ;;
         --overwrite-engine)  OVERWRITE_ENGINE=1; shift ;;
+        --bg-removal)        BG_REMOVAL_MODE=&quot;$2&quot;; shift 2 ;;
+        --no-bg-removal)     BG_REMOVAL_MODE=&quot;off&quot;; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
@@ -2369,6 +2372,30 @@ META_PATH=&quot;${CLEAN_PATH}.meta.json&quot;
 # v0.3: input quality check + WebP/GIF normalisation. No-op when the
 # helper script or pipeline-tools-env isn&#x27;t installed (v0.2 behaviour).
 check_and_normalize_input
+
+# v0.3: conditional background removal. Reads input.background_uniformity
+# from the meta.json that check_and_normalize_input just wrote. Updates
+# $INPUT to the no-background PNG when the run actually applies.
+[[ -z &quot;$BG_REMOVAL_MODE&quot; ]] &amp;&amp; BG_REMOVAL_MODE=&quot;$(read_pipeline_config bg_removal_mode auto 2&gt;/dev/null || echo auto)&quot;
+PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+REMBG_SCRIPT=&quot;$SCRIPT_DIR/rembg_preprocess.py&quot;
+[[ -f &quot;$REMBG_SCRIPT&quot; ]] || REMBG_SCRIPT=&quot;$PIPELINE_ROOT/workspace/rembg_preprocess.py&quot;
+if [[ -f &quot;$REMBG_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &amp;&amp; &quot;$BG_REMOVAL_MODE&quot; != &quot;off&quot; ]]; then
+    REMBG_RESULT=&quot;$(&quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$REMBG_SCRIPT&quot; \
+        --input &quot;$INPUT&quot; --output-dir &quot;$ASSETS_ROOT/concept&quot; --meta &quot;$META_PATH&quot; \
+        --mode &quot;$BG_REMOVAL_MODE&quot; --name &quot;$OUTPUT_NAME&quot; --json 2&gt;/dev/null || echo &#x27;{}&#x27;)&quot;
+    NEW_INPUT=&quot;$(printf &#x27;%s&#x27; &quot;$REMBG_RESULT&quot; | python3 -c &quot;
+import json, sys
+try: d = json.loads(sys.stdin.read())
+except Exception: sys.exit(0)
+if d.get(&#x27;applied&#x27;) and d.get(&#x27;output_path&#x27;):
+    print(d[&#x27;output_path&#x27;])
+&quot; 2&gt;/dev/null)&quot;
+    if [[ -n &quot;$NEW_INPUT&quot; &amp;&amp; -f &quot;$NEW_INPUT&quot; ]]; then
+        info &quot;Background removed → $NEW_INPUT&quot;
+        INPUT=&quot;$NEW_INPUT&quot;
+    fi
+fi
 
 COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
 HUMAN_FD=1
@@ -6716,6 +6743,228 @@ def main() -&gt; int:
             print(f&quot;[texture-check] Textures: {n} map(s), all look healthy&quot;)
         else:
             print(f&quot;[texture-check] Textures: {n} map(s) — ⚠ issues: &quot; + &quot;, &quot;.join(result[&quot;issues&quot;]))
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>rembg_preprocess.py</code>
+                <span class="script-summary-desc">v0.3 conditional background removal (rembg / u2net)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/rembg_preprocess.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — conditional background removal pre-generator.
+
+Wraps `rembg` (MIT, commercial_safe; default model u2net, Apache 2.0).
+Decides whether to run based on `--mode {auto,on,off}` and signals from
+the input quality check (item 4) recorded in the per-asset meta.json:
+
+  auto: run only when the input quality check measured the background
+        as non-uniform (a cluttered photo, not a clean studio shot)
+        AND the input doesn&#x27;t already have low-coverage alpha (was
+        already cropped) AND it isn&#x27;t grayscale (a sketch).
+  on:   run unconditionally.
+  off:  never run; just record applied=false.
+
+After rembg returns, a sanity check runs:
+  - If foreground_coverage &lt; 5% → rembg destroyed the subject; the
+    fallback is the original image.
+  - If foreground_coverage &gt; 95% → rembg didn&#x27;t actually remove
+    anything; record applied=false, reason=&quot;nothing_to_remove&quot;.
+
+Result writes `preprocessing.bg_removal` into the meta.json. The
+wrapper script reassigns INPUT to the returned path so the generator
+sees the cleaned image.
+
+Usage:
+    rembg_preprocess.py --input PATH --output-dir DIR --meta PATH
+                        --mode {auto,on,off} [--model u2net|isnet-general-use]
+                        [--name NAME] [--json]
+
+The stdout JSON includes `&quot;output_path&quot;` — the wrapper reads this
+to decide whether to swap $INPUT.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+FOREGROUND_LOST_THRESHOLD = 0.05
+FOREGROUND_TOO_HIGH_THRESHOLD = 0.95
+BACKGROUND_UNIFORM_THRESHOLD = 0.85  # &gt;= this: skip rembg
+
+
+def _imports():
+    try:
+        from PIL import Image  # type: ignore
+        import numpy as np  # type: ignore
+        return Image, np
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping rembg.&quot;, file=sys.stderr)
+        return None, None
+
+
+def _read_meta(meta_path: Path) -&gt; dict:
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _alpha_coverage(img, np) -&gt; float:
+    if img.mode != &quot;RGBA&quot;:
+        return 1.0
+    arr = np.asarray(img)
+    if arr.shape[-1] &lt; 4:
+        return 1.0
+    alpha = arr[..., 3] / 255.0
+    return float((alpha &gt; 0.05).mean())
+
+
+def _decide(mode: str, input_path: Path, meta: dict, Image, np) -&gt; tuple[bool, str | None]:
+    &quot;&quot;&quot;Return (should_run, reason_if_skipped).&quot;&quot;&quot;
+    if mode == &quot;off&quot;:
+        return False, &quot;mode=off&quot;
+    if mode == &quot;on&quot;:
+        return True, None
+    # auto
+    try:
+        img = Image.open(input_path)
+        img.load()
+    except Exception:
+        return False, &quot;input_unreadable&quot;
+    # Already cropped (RGBA with sparse alpha)?
+    if img.mode == &quot;RGBA&quot;:
+        cov = _alpha_coverage(img, np)
+        if cov &lt; 0.8:
+            return False, &quot;already_cropped&quot;
+    # Grayscale / sketch?
+    if img.mode in (&quot;L&quot;, &quot;1&quot;, &quot;P&quot;):
+        return False, &quot;grayscale&quot;
+    # Background uniformity from item 4?
+    inp = meta.get(&quot;input&quot;) or {}
+    bg_unif = inp.get(&quot;background_uniformity&quot;)
+    if bg_unif is not None and bg_unif &gt;= BACKGROUND_UNIFORM_THRESHOLD:
+        return False, &quot;uniform_background&quot;
+    return True, None
+
+
+def _run_rembg(input_bytes: bytes, model_name: str):
+    &quot;&quot;&quot;Invoke rembg.remove. Returns (output_bytes, used_model).&quot;&quot;&quot;
+    try:
+        from rembg import remove, new_session  # type: ignore
+    except ImportError:
+        return None, None
+    session = new_session(model_name)
+    return remove(input_bytes, session=session), model_name
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--output-dir&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--mode&quot;, choices=[&quot;auto&quot;, &quot;on&quot;, &quot;off&quot;], default=&quot;auto&quot;)
+    p.add_argument(&quot;--model&quot;, default=&quot;u2net&quot;,
+                   help=&quot;rembg model name (u2net | isnet-general-use)&quot;)
+    p.add_argument(&quot;--name&quot;, default=&quot;&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    Image, np = _imports()
+    if Image is None:
+        return 0  # graceful no-op
+
+    input_path = Path(os.path.expanduser(args.input))
+    output_dir = Path(os.path.expanduser(args.output_dir))
+    meta_path = Path(os.path.expanduser(args.meta))
+    name = args.name or input_path.stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = _read_meta(meta_path)
+    should_run, skip_reason = _decide(args.mode, input_path, meta, Image, np)
+
+    payload: dict = {
+        &quot;applied&quot;: False,
+        &quot;mode&quot;: args.mode,
+        &quot;trigger&quot;: None,
+        &quot;model&quot;: None,
+        &quot;alpha_mean&quot;: None,
+        &quot;fallback&quot;: None,
+        &quot;duration_seconds&quot;: None,
+    }
+    output_path = str(input_path)  # default: no change
+
+    if not should_run:
+        payload[&quot;reason&quot;] = skip_reason
+    else:
+        try:
+            with open(input_path, &quot;rb&quot;) as fh:
+                in_bytes = fh.read()
+            t0 = time.time()
+            out_bytes, used = _run_rembg(in_bytes, args.model)
+            payload[&quot;duration_seconds&quot;] = round(time.time() - t0, 2)
+            if out_bytes is None:
+                payload[&quot;reason&quot;] = &quot;rembg_not_installed&quot;
+                print(
+                    &quot;[rembg] rembg not installed in pipeline-tools-env. &quot;
+                    &quot;Install with: pip install rembg[cpu]&quot;,
+                    file=sys.stderr,
+                )
+            else:
+                target = output_dir / f&quot;{name}_nobg.png&quot;
+                target.write_bytes(out_bytes)
+                # Sanity check: coverage
+                out_img = Image.open(target)
+                out_img.load()
+                cov = _alpha_coverage(out_img, np)
+                payload[&quot;alpha_mean&quot;] = round(cov, 3)
+                payload[&quot;model&quot;] = used
+                if cov &lt; FOREGROUND_LOST_THRESHOLD:
+                    payload[&quot;fallback&quot;] = &quot;subject_lost&quot;
+                elif cov &gt; FOREGROUND_TOO_HIGH_THRESHOLD:
+                    payload[&quot;reason&quot;] = &quot;nothing_to_remove&quot;
+                    payload[&quot;applied&quot;] = False
+                    target.unlink(missing_ok=True)
+                else:
+                    payload[&quot;applied&quot;] = True
+                    payload[&quot;trigger&quot;] = &quot;auto&quot; if args.mode == &quot;auto&quot; else args.mode
+                    output_path = str(target)
+        except Exception as e:
+            payload[&quot;reason&quot;] = f&quot;rembg_failed: {e}&quot;
+
+    # Merge into meta.json
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;preprocessing&quot;,
+         &quot;--data&quot;, json.dumps({&quot;bg_removal&quot;: payload})],
+        check=False,
+    )
+
+    result = {**payload, &quot;output_path&quot;: output_path}
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        if payload[&quot;applied&quot;]:
+            print(f&quot;[rembg] applied ({payload[&#x27;model&#x27;]}, &quot;
+                  f&quot;coverage {payload[&#x27;alpha_mean&#x27;]}) → {output_path}&quot;)
+        elif payload.get(&quot;fallback&quot;):
+            print(f&quot;[rembg] result discarded ({payload[&#x27;fallback&#x27;]}); using original&quot;)
+        else:
+            print(f&quot;[rembg] skipped: {payload.get(&#x27;reason&#x27;, &#x27;(unknown)&#x27;)}&quot;)
     return 0
 
 

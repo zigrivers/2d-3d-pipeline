@@ -2,6 +2,24 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.6: conditional background removal (Tier 1)
+
+- `scripts/rembg_preprocess.py` (in pipeline-tools-env) — wraps rembg
+  (u2net by default; isnet-general-use opt-in). Three modes:
+    auto: run only when the input quality check reports a non-uniform
+          background AND the input isn't already cropped (RGBA with
+          sparse alpha) AND isn't grayscale.
+    on:   run unconditionally.
+    off:  never run.
+  Post-run sanity: if foreground coverage < 5% the result is
+  discarded (subject_lost fallback); > 95% means rembg didn't
+  actually remove anything (nothing_to_remove). Writes
+  `preprocessing.bg_removal` to the per-asset meta.json.
+- `scripts/generate.sh` gains `--bg-removal {auto,on,off}` and an
+  alias `--no-bg-removal`. Default reads `bg_removal_mode` from
+  `~/3d-pipeline/.config` (falls back to "auto"). When applied,
+  $INPUT is reassigned to the no-bg PNG so the generator sees it.
+
 ## 2026-05-20 — P1.5: texture quality validation (Tier 1)
 
 - `scripts/texture_quality_check.py` (in pipeline-tools-env) —
