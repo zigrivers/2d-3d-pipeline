@@ -5320,6 +5320,56 @@ KNOWN_SECTIONS = {
     &quot;clip&quot;,
 }
 
+# --- v0.3+ — schema migration framework -------------------------------
+#
+# When meta.json&#x27;s shape evolves (post-v0.3), each transition gets a
+# migration callable registered here. The framework runs them in order
+# until the data is at SCHEMA_VERSION. A `migrate` subcommand applies
+# them to a file on disk; `_ensure_current` is the internal hook used
+# by `merge`/`get` to lazily upgrade old files on access.
+#
+# Best practices baked in (v0.3 punts on the hard problem of breaking
+# changes by only supporting additive evolution, but the scaffolding
+# is here for the day that changes):
+#
+#   1. Schema version is on disk, not implicit.
+#   2. Migrations are pure functions data -&gt; data; no I/O.
+#   3. Forward-only — never auto-downgrade.
+#   4. New sections are additive (don&#x27;t bump the version).
+#   5. Renamed / restructured sections DO bump the version + ship a
+#      migration function so old files keep working.
+#   6. Per-section schemas in meta_schema.json describe the CURRENT
+#      shape; archived schemas should live in meta_schema_vN.json so
+#      external tools can validate against a known historical shape.
+#
+# Today (v0.3): SCHEMA_VERSION = 1, no migrations registered, all
+# files are at v1 by construction.
+
+MIGRATIONS: dict[int, &quot;callable&quot;] = {}
+# Register with: MIGRATIONS[from_version] = migrate_fn
+# Each fn takes the parsed dict, returns the dict at (from_version + 1).
+# Example for the day v2 ships:
+#   def _migrate_v1_to_v2(data: dict) -&gt; dict:
+#       # e.g. rename quality.manifold.hole_count -&gt; quality.manifold.boundary_loop_count
+#       ...
+#       data[&quot;schema_version&quot;] = 2
+#       return data
+#   MIGRATIONS[1] = _migrate_v1_to_v2
+
+
+def _ensure_current(data: dict) -&gt; tuple[dict, list[int]]:
+    &quot;&quot;&quot;Run any registered migrations up to SCHEMA_VERSION.
+    Returns (migrated_data, [versions_applied]).&quot;&quot;&quot;
+    applied: list[int] = []
+    while data.get(&quot;schema_version&quot;, 0) &lt; SCHEMA_VERSION:
+        cur = data.get(&quot;schema_version&quot;, 0)
+        if cur not in MIGRATIONS:
+            # Can&#x27;t continue forward; trust the explicit version.
+            break
+        data = MIGRATIONS[cur](data)
+        applied.append(cur)
+    return data, applied
+
 
 @contextmanager
 def _locked(path: Path, mode: str):
@@ -5396,6 +5446,8 @@ def cmd_merge(args: argparse.Namespace) -&gt; int:
         existing = _load(fh)
         if not existing:
             existing = _seed_skeleton(asset_name)
+        # Lazy-migrate older meta files on access (no-op at SCHEMA_VERSION 1).
+        existing, _applied = _ensure_current(existing)
         existing.setdefault(section, {})
         if not isinstance(existing[section], dict):
             print(
@@ -5484,6 +5536,40 @@ def cmd_validate(args: argparse.Namespace) -&gt; int:
     return 0
 
 
+def cmd_migrate(args: argparse.Namespace) -&gt; int:
+    &quot;&quot;&quot;Apply registered migrations to a meta.json file in place.
+    Idempotent — if the file is already at SCHEMA_VERSION, it&#x27;s a no-op.&quot;&quot;&quot;
+    path = Path(args.path)
+    if not path.exists():
+        print(f&quot;ERROR: meta file not found: {path}&quot;, file=sys.stderr)
+        return 2
+    with _locked(path, &quot;r+&quot;) as fh:
+        data = _load(fh)
+        if not data:
+            print(f&quot;[meta_helper] {path} is empty; nothing to migrate&quot;, file=sys.stderr)
+            return 0
+        before = data.get(&quot;schema_version&quot;, 0)
+        data, applied = _ensure_current(data)
+        if applied:
+            _dump(fh, data)
+        after = data.get(&quot;schema_version&quot;, 0)
+    if args.json:
+        print(json.dumps({
+            &quot;status&quot;: &quot;ok&quot;,
+            &quot;path&quot;: str(path),
+            &quot;from_version&quot;: before,
+            &quot;to_version&quot;: after,
+            &quot;migrations_applied&quot;: applied,
+        }))
+    else:
+        if applied:
+            print(f&quot;[meta_helper] migrated {path}: v{before} -&gt; v{after} &quot;
+                  f&quot;(applied: {applied})&quot;)
+        else:
+            print(f&quot;[meta_helper] {path} already at v{after}; no migration needed&quot;)
+    return 0
+
+
 def build_parser() -&gt; argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=&quot;Per-asset meta.json helper&quot;)
     sub = p.add_subparsers(dest=&quot;cmd&quot;, required=True)
@@ -5508,6 +5594,12 @@ def build_parser() -&gt; argparse.ArgumentParser:
     p_validate.add_argument(&quot;--schema&quot;, help=&quot;Path to meta_schema.json (defaults to alongside this script)&quot;)
     p_validate.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
     p_validate.set_defaults(func=cmd_validate)
+
+    p_migrate = sub.add_parser(&quot;migrate&quot;,
+                               help=&quot;Apply registered schema migrations to an existing meta.json&quot;)
+    p_migrate.add_argument(&quot;path&quot;, help=&quot;Path to &lt;output&gt;.meta.json&quot;)
+    p_migrate.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    p_migrate.set_defaults(func=cmd_migrate)
 
     return p
 

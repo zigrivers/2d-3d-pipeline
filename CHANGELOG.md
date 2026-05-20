@@ -2,6 +2,29 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q2 (open question): meta.json schema migration framework
+
+`scripts/meta_helper.py` gains a migration framework so the per-asset
+meta.json can evolve safely after v0.3 ships. Today's SCHEMA_VERSION
+is 1; no migrations registered (all files are at v1 by construction).
+
+Scaffolding added:
+
+  - `MIGRATIONS: dict[from_version, callable]` registry; each callable
+    is data->data and bumps the version.
+  - `_ensure_current(data)` runs migrations forward until current.
+    Invoked lazily by `merge`/`get` so old files upgrade on access.
+  - `meta_helper.py migrate <path>` new subcommand for explicit
+    in-place upgrades (idempotent; no-op when already current).
+  - Inline documentation of best practices: additive changes don't
+    bump version; renamed / restructured sections DO and ship a
+    migration; archived schemas live as `meta_schema_vN.json` for
+    external validators.
+
+No behaviour change yet — the framework is dormant. When v2 of the
+schema ships, it'll add a migration function + a `meta_schema_v1.json`
+archived copy and the runtime upgrades happen automatically.
+
 ## 2026-05-20 — Q3 (open question): CLIP auto-calibration
 
 `scripts/calibrate_clip.py` — recomputes per-model CLIP percentile
