@@ -2,6 +2,27 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q3 (open question): CLIP auto-calibration
+
+`scripts/calibrate_clip.py` — recomputes per-model CLIP percentile
+bands (p10 / p25 / p50) in `scripts/clip_calibration.json` from your
+own concept generations. Walks the asset manifest for
+(generator, concept_path, prompt) triples; calls `clip_score.py` for
+each; computes percentiles per model.
+
+  - Models with fewer than --min-samples (default 20) scored samples
+    are left untouched, so partial calibration doesn't wipe seed
+    defaults.
+  - --dry-run reports what would change without writing.
+  - Records `_calibrated.at` timestamp + manifest source in the
+    output file so you can see when it last ran.
+  - Pure stdlib (no numpy / pandas dep); percentiles computed
+    directly. Shells out to clip_score.py for the actual scoring.
+
+No manual intervention required — recommended cadence is after ~100
+new concept generations or quarterly. Drop it in cron / launchd if
+you want continuous calibration.
+
 ## 2026-05-20 — Q1 (open question): rigorous wall-thickness algorithm
 
 Replaces the ray-cast wall-thickness heuristic in

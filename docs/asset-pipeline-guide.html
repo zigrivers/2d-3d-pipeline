@@ -8465,6 +8465,236 @@ if __name__ == &quot;__main__&quot;:
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>calibrate_clip.py</code>
+                <span class="script-summary-desc">v0.3 auto-calibrate per-model CLIP percentile bands from your own generations</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/calibrate_clip.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — auto-calibrate per-model CLIP percentile bands.
+
+Recomputes `scripts/clip_calibration.json` from your own concept
+generations so the per-model bands (p10 / p25 / p50) reflect your
+actual prompts + model usage rather than the seed values from
+research.
+
+How calibration works:
+  1. Walk an asset manifest (default: ~/3d-pipeline/workspace/asset_manifest.json)
+     looking for entries with both a `concept_path` (PNG) AND a
+     `generation.prompt` or top-level `prompt`.
+  2. Group by `generator` (z-image-turbo / flux-schnell / flux-dev /
+     qwen-image).
+  3. For each model with &gt;= MIN_SAMPLES generations, compute a fresh
+     CLIP similarity score per (image, prompt) pair via clip_score.py
+     (silent — JSON mode).
+  4. Compute the new p50, p25, p10 percentiles per model.
+  5. Write the result to `scripts/clip_calibration.json`, keeping
+     models below MIN_SAMPLES as-is so partial calibration doesn&#x27;t
+     wipe known-good defaults.
+
+Usage:
+    calibrate_clip.py [--manifest PATH] [--out PATH] [--min-samples 20]
+                      [--dry-run] [--json]
+
+Recommended cadence: re-run after every ~100 new concept generations
+or quarterly, whichever comes first. No manual intervention required;
+add it to a cron / launchd job if you want the bands to keep up
+automatically as your prompt patterns evolve.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CLIP_SCORE = SCRIPT_DIR / &quot;clip_score.py&quot;
+DEFAULT_CALIBRATION = SCRIPT_DIR / &quot;clip_calibration.json&quot;
+DEFAULT_MANIFEST = Path(os.path.expanduser(&quot;~/3d-pipeline/workspace/asset_manifest.json&quot;))
+MIN_SAMPLES = 20
+
+# Models we calibrate. Anything in the manifest with a generator name
+# outside this set is ignored (e.g., SF3D — that&#x27;s a 3D model, not 2D).
+CALIBRATABLE_MODELS = {&quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;, &quot;qwen-image&quot;}
+
+
+def _percentile(values: list[float], q: float) -&gt; float:
+    &quot;&quot;&quot;Simple percentile (no numpy dep). q is in [0, 100].&quot;&quot;&quot;
+    if not values:
+        return 0.0
+    s = sorted(values)
+    idx = (q / 100.0) * (len(s) - 1)
+    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+    frac = idx - lo
+    return s[lo] * (1 - frac) + s[hi] * frac
+
+
+def _extract_pair(entry: dict) -&gt; tuple[str, str, str] | None:
+    &quot;&quot;&quot;Pull (generator, concept_path, prompt) from a manifest entry.&quot;&quot;&quot;
+    generator = entry.get(&quot;generator&quot;) or (entry.get(&quot;model&quot;) or {}).get(&quot;name&quot;)
+    concept_path = entry.get(&quot;concept_path&quot;)
+    prompt = entry.get(&quot;prompt&quot;) or (entry.get(&quot;generation&quot;) or {}).get(&quot;prompt&quot;)
+    if not (generator and concept_path and prompt):
+        return None
+    if generator not in CALIBRATABLE_MODELS:
+        return None
+    cp = Path(os.path.expanduser(concept_path))
+    if not cp.exists():
+        return None
+    return generator, str(cp), prompt
+
+
+def _score_one(image_path: str, prompt: str, model_name: str) -&gt; float | None:
+    &quot;&quot;&quot;Run clip_score.py once, return raw similarity. None on failure.&quot;&quot;&quot;
+    if not CLIP_SCORE.exists():
+        return None
+    with tempfile.NamedTemporaryFile(suffix=&quot;.meta.json&quot;, delete=False) as tmp:
+        meta_path = tmp.name
+    try:
+        cp = subprocess.run(
+            [sys.executable, str(CLIP_SCORE),
+             &quot;--prompt&quot;, prompt,
+             &quot;--image&quot;, image_path,
+             &quot;--meta&quot;, meta_path,
+             &quot;--model-name&quot;, model_name,
+             &quot;--json&quot;],
+            capture_output=True, text=True, timeout=120,
+        )
+        if cp.returncode != 0 or not cp.stdout.strip():
+            return None
+        last = cp.stdout.strip().splitlines()[-1]
+        data = json.loads(last)
+        return float(data.get(&quot;similarity&quot;))
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(meta_path)
+        except FileNotFoundError:
+            pass
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--manifest&quot;, default=str(DEFAULT_MANIFEST),
+                   help=&quot;Path to asset_manifest.json (default: ~/3d-pipeline/workspace/...)&quot;)
+    p.add_argument(&quot;--out&quot;, default=str(DEFAULT_CALIBRATION),
+                   help=&quot;Where to write the new calibration JSON&quot;)
+    p.add_argument(&quot;--min-samples&quot;, type=int, default=MIN_SAMPLES,
+                   help=&quot;Models with fewer than N scored samples are left untouched&quot;)
+    p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Compute + report but don&#x27;t write&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Emit JSON summary on stdout&quot;)
+    args = p.parse_args()
+
+    manifest_path = Path(os.path.expanduser(args.manifest))
+    if not manifest_path.exists():
+        print(f&quot;ERROR: manifest not found: {manifest_path}&quot;, file=sys.stderr)
+        return 2
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f&quot;ERROR: manifest is not valid JSON: {e}&quot;, file=sys.stderr)
+        return 2
+
+    # v2/v3 manifests have {assets: {name: entry, ...}}. v1 list-of-assets is
+    # auto-migrated by update_manifest.py, but tolerate both shapes here.
+    assets = manifest.get(&quot;assets&quot;) or {}
+    if isinstance(assets, list):
+        entries = assets
+    else:
+        entries = list(assets.values())
+
+    pairs_by_model: dict[str, list[tuple[str, str]]] = {}
+    for entry in entries:
+        triple = _extract_pair(entry)
+        if not triple:
+            continue
+        gen, img, prompt = triple
+        pairs_by_model.setdefault(gen, []).append((img, prompt))
+
+    scores_by_model: dict[str, list[float]] = {}
+    for model_name, pairs in pairs_by_model.items():
+        scores: list[float] = []
+        for img, prompt in pairs:
+            s = _score_one(img, prompt, model_name)
+            if s is not None:
+                scores.append(s)
+        scores_by_model[model_name] = scores
+
+    # Load existing calibration so we can keep models we didn&#x27;t recalibrate.
+    out_path = Path(os.path.expanduser(args.out))
+    existing = {}
+    if out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text())
+        except Exception:
+            pass
+
+    new_calibration = dict(existing)
+    new_calibration[&quot;_calibrated&quot;] = {
+        &quot;at&quot;: __import__(&quot;datetime&quot;).datetime.utcnow().isoformat(timespec=&quot;seconds&quot;) + &quot;Z&quot;,
+        &quot;manifest&quot;: str(manifest_path),
+        &quot;min_samples&quot;: args.min_samples,
+    }
+
+    summary: list[dict] = []
+    for model_name, scores in scores_by_model.items():
+        if len(scores) &lt; args.min_samples:
+            summary.append({
+                &quot;model&quot;: model_name,
+                &quot;scored&quot;: len(scores),
+                &quot;status&quot;: &quot;skipped_too_few_samples&quot;,
+                &quot;min_samples&quot;: args.min_samples,
+            })
+            continue
+        bands = {
+            &quot;p50&quot;: round(_percentile(scores, 50), 4),
+            &quot;p25&quot;: round(_percentile(scores, 25), 4),
+            &quot;p10&quot;: round(_percentile(scores, 10), 4),
+            &quot;n_samples&quot;: len(scores),
+        }
+        new_calibration[model_name] = bands
+        summary.append({&quot;model&quot;: model_name, &quot;scored&quot;: len(scores), &quot;status&quot;: &quot;updated&quot;, &quot;bands&quot;: bands})
+
+    if not args.dry_run:
+        out_path.write_text(json.dumps(new_calibration, indent=2, sort_keys=True) + &quot;\n&quot;)
+
+    if args.json:
+        print(json.dumps({
+            &quot;manifest&quot;: str(manifest_path),
+            &quot;out&quot;: str(out_path),
+            &quot;dry_run&quot;: args.dry_run,
+            &quot;summary&quot;: summary,
+        }, indent=2, sort_keys=True))
+    else:
+        print(f&quot;[calibrate-clip] manifest: {manifest_path}&quot;)
+        for row in summary:
+            if row[&quot;status&quot;] == &quot;updated&quot;:
+                b = row[&quot;bands&quot;]
+                print(f&quot;[calibrate-clip] {row[&#x27;model&#x27;]}: p50={b[&#x27;p50&#x27;]} p25={b[&#x27;p25&#x27;]} &quot;
+                      f&quot;p10={b[&#x27;p10&#x27;]} (n={b[&#x27;n_samples&#x27;]})&quot;)
+            else:
+                print(f&quot;[calibrate-clip] {row[&#x27;model&#x27;]}: skipped (only {row[&#x27;scored&#x27;]} &quot;
+                      f&quot;sample(s); need {row[&#x27;min_samples&#x27;]})&quot;)
+        if args.dry_run:
+            print(&quot;[calibrate-clip] DRY RUN — no write&quot;)
+        else:
+            print(f&quot;[calibrate-clip] wrote {out_path}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
