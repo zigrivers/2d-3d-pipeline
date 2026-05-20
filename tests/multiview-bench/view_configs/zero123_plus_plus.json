@@ -1,0 +1,14 @@
+{
+  "name": "zero123_plus_plus",
+  "description": "View spec matching Zero123++ v1.2's native 6-view output (sudo-ai/zero123plus-v1.2). Use this with render_benchmark_views.py to produce a synthetic dataset that's apples-to-apples comparable with a Zero123++ mvgen run.",
+  "source": "https://huggingface.co/sudo-ai/zero123plus-v1.2",
+  "views": [
+    {"name": "v030_30",   "azimuth_deg": 30,  "elevation_deg": 30},
+    {"name": "v090_neg20","azimuth_deg": 90,  "elevation_deg": -20},
+    {"name": "v150_30",   "azimuth_deg": 150, "elevation_deg": 30},
+    {"name": "v210_neg20","azimuth_deg": 210, "elevation_deg": -20},
+    {"name": "v270_30",   "azimuth_deg": 270, "elevation_deg": 30},
+    {"name": "v330_neg20","azimuth_deg": 330, "elevation_deg": -20}
+  ],
+  "notes": "Zero123++ alternates +30°/-20° elevation across its 6 azimuth positions. Verify against the upstream pipeline's `pipeline.cond_lat` setting if behavior changes in a future version."
+}

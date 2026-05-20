@@ -8113,21 +8113,24 @@ Usage:
                            [--output-dir tests/multiview-bench/results]
                            [--score-only]
 
-The harness is a SCAFFOLD: it dispatches each backend via a backend
-adapter you supply (`scripts/multiview_backends/&lt;name&gt;.py`),
-collects per-run GLBs into the results directory, and writes
-`benchmark_results.json` ready for manual scoring + recommendation
-write-up at `docs/multiview-backend-research.md`.
+The harness reads each subject&#x27;s `meta.json` for the `input_pipeline`
+field (synthetic / mvgen). Results are recorded per-(backend, subject,
+run) with the input_pipeline carried through so `--score-only` can
+roll up scores per (backend, input_pipeline) — the diagnostic that
+tells you whether a backend&#x27;s failure mode is &quot;bad at reconstruction&quot;
+(both pipelines fail) or &quot;bad at handling AI-generated views&quot; (only
+mvgen fails).
 
-Initial commit (P3.1a) ships:
-  - this harness
-  - the rubric JSON
-  - the dataset directory layout (placeholder READMEs only)
-  - a stub backend adapter showing the interface
+Backend adapters live in tools/multiview_backends/&lt;name&gt;.py — they&#x27;re
+maintainer tooling, not pipeline runtime, so they bypass the
+canonical-vs-embedded rule. Each adapter exposes:
 
-P3.1b will fill in real adapters + run the benchmark; the user
-chooses a backend based on the recommendation that lands in the
-research doc.
+    adapter.py --views v0,v1,v2,v3 --output-glb PATH --json
+
+P3.1a shipped this harness + the rubric + the dataset layout.
+P3.1a.1 added the dataset builders (Option B + Option C) and the
+input-pipeline-aware rollup. P3.1b will populate adapters + run the
+benchmark.
 &quot;&quot;&quot;
 from __future__ import annotations
 
@@ -8137,44 +8140,78 @@ import os
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-ADAPTERS_DIR = SCRIPT_DIR / &quot;multiview_backends&quot;
+ADAPTERS_DIR = REPO_ROOT / &quot;tools&quot; / &quot;multiview_backends&quot;
 DEFAULT_DATASET = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;subjects&quot;
 DEFAULT_RUBRIC = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;scoring_rubric.json&quot;
 DEFAULT_OUTPUT = REPO_ROOT / &quot;tests&quot; / &quot;multiview-bench&quot; / &quot;results&quot;
 
+# Subjects must have at LEAST these view names for the harness to
+# consider them runnable. Other view names (e.g. Zero123++&#x27;s v030_30,
+# v090_neg20) are accepted too — we pass the full set of PNGs.
+MIN_VIEW_COUNT = 3
+
+
+def _load_subject_meta(sub: Path) -&gt; dict:
+    meta_path = sub / &quot;meta.json&quot;
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
 
 def discover_subjects(dataset_dir: Path) -&gt; list[dict]:
+    &quot;&quot;&quot;Walk dataset_dir/* and inventory each subject directory.
+
+    Returns one record per subject with:
+      name           — directory basename
+      path           — absolute path
+      views          — {view_name: image_path}
+      view_paths     — list of all view PNG paths (for the adapter call)
+      input_pipeline — &quot;synthetic&quot; / &quot;mvgen&quot; / &quot;&quot; (from meta.json)
+      mv_2d_model    — present when input_pipeline=mvgen (from meta.json)
+      ground_truth   — path to ground_truth.glb if present, else &quot;&quot;
+      complete       — True iff len(view_paths) &gt;= MIN_VIEW_COUNT
+    &quot;&quot;&quot;
     subjects: list[dict] = []
     if not dataset_dir.exists():
         return subjects
     for sub in sorted(dataset_dir.iterdir()):
         if not sub.is_dir():
             continue
-        images = sorted(sub.glob(&quot;*.png&quot;))
-        # Expected: front, right, back, left
-        expected_views = [&quot;front&quot;, &quot;right&quot;, &quot;back&quot;, &quot;left&quot;]
-        view_map = {}
-        for img in images:
-            for v in expected_views:
-                if v in img.name.lower():
-                    view_map[v] = str(img)
-                    break
+        meta = _load_subject_meta(sub)
+        # Prefer the meta.json&#x27;s view list (records both names + angles).
+        if meta.get(&quot;views&quot;) and isinstance(meta[&quot;views&quot;], list):
+            views = {v[&quot;name&quot;]: v[&quot;path&quot;] for v in meta[&quot;views&quot;] if &quot;name&quot; in v and &quot;path&quot; in v}
+            view_paths = [v[&quot;path&quot;] for v in meta[&quot;views&quot;] if &quot;path&quot; in v]
+        else:
+            # Fall back to scanning PNGs by filename (concept.png excluded).
+            images = sorted(p for p in sub.glob(&quot;*.png&quot;) if p.name != &quot;concept.png&quot;)
+            views = {p.stem: str(p) for p in images}
+            view_paths = [str(p) for p in images]
+        gt = sub / &quot;ground_truth.glb&quot;
         subjects.append({
             &quot;name&quot;: sub.name,
             &quot;path&quot;: str(sub),
-            &quot;views&quot;: view_map,
-            &quot;complete&quot;: all(v in view_map for v in expected_views),
+            &quot;views&quot;: views,
+            &quot;view_paths&quot;: view_paths,
+            &quot;input_pipeline&quot;: meta.get(&quot;input_pipeline&quot;, &quot;&quot;),
+            &quot;mv_2d_model&quot;: meta.get(&quot;mv_2d_model&quot;),
+            &quot;ground_truth&quot;: str(gt) if gt.exists() else &quot;&quot;,
+            &quot;complete&quot;: len(view_paths) &gt;= MIN_VIEW_COUNT,
         })
     return subjects
 
 
 def run_backend(backend: str, subject: dict, output_dir: Path,
                 runs_per_subject: int) -&gt; list[dict]:
-    &quot;&quot;&quot;Invoke a backend adapter (scripts/multiview_backends/&lt;backend&gt;.py).
+    &quot;&quot;&quot;Invoke a backend adapter (tools/multiview_backends/&lt;backend&gt;.py).
     Each adapter is expected to expose:
         adapter.py --views v0,v1,v2,v3 --output-glb PATH --json
     and report its own duration + license bucket.
@@ -8185,21 +8222,22 @@ def run_backend(backend: str, subject: dict, output_dir: Path,
         runs.append({
             &quot;backend&quot;: backend,
             &quot;subject&quot;: subject[&quot;name&quot;],
+            &quot;input_pipeline&quot;: subject.get(&quot;input_pipeline&quot;, &quot;&quot;),
             &quot;run&quot;: 0,
             &quot;status&quot;: &quot;adapter_missing&quot;,
             &quot;reason&quot;: f&quot;no adapter at {adapter}&quot;,
         })
         return runs
 
-    views = [subject[&quot;views&quot;][v] for v in (&quot;front&quot;, &quot;right&quot;, &quot;back&quot;, &quot;left&quot;)
-             if v in subject[&quot;views&quot;]]
-    if len(views) &lt; 3:
+    view_paths = subject.get(&quot;view_paths&quot;) or []
+    if len(view_paths) &lt; MIN_VIEW_COUNT:
         runs.append({
             &quot;backend&quot;: backend,
             &quot;subject&quot;: subject[&quot;name&quot;],
+            &quot;input_pipeline&quot;: subject.get(&quot;input_pipeline&quot;, &quot;&quot;),
             &quot;run&quot;: 0,
             &quot;status&quot;: &quot;skipped&quot;,
-            &quot;reason&quot;: &quot;insufficient views&quot;,
+            &quot;reason&quot;: f&quot;insufficient views (have {len(view_paths)}, need {MIN_VIEW_COUNT})&quot;,
         })
         return runs
 
@@ -8210,7 +8248,7 @@ def run_backend(backend: str, subject: dict, output_dir: Path,
         try:
             cp = subprocess.run(
                 [sys.executable, str(adapter),
-                 &quot;--views&quot;, &quot;,&quot;.join(views),
+                 &quot;--views&quot;, &quot;,&quot;.join(view_paths),
                  &quot;--output-glb&quot;, str(target_glb),
                  &quot;--json&quot;],
                 capture_output=True, text=True, timeout=600,
@@ -8225,17 +8263,30 @@ def run_backend(backend: str, subject: dict, output_dir: Path,
             runs.append({
                 &quot;backend&quot;: backend,
                 &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;input_pipeline&quot;: subject.get(&quot;input_pipeline&quot;, &quot;&quot;),
+                &quot;mv_2d_model&quot;: subject.get(&quot;mv_2d_model&quot;),
+                &quot;ground_truth&quot;: subject.get(&quot;ground_truth&quot;),
                 &quot;run&quot;: i,
                 &quot;exit_code&quot;: cp.returncode,
                 &quot;duration_seconds&quot;: duration,
                 &quot;output_glb&quot;: str(target_glb) if target_glb.exists() else None,
                 &quot;adapter_result&quot;: parsed,
                 &quot;status&quot;: &quot;ok&quot; if cp.returncode == 0 else &quot;failed&quot;,
+                # Placeholder scores — fill in manually after visual review.
+                &quot;scores&quot;: {
+                    &quot;geometric_accuracy&quot;: None,
+                    &quot;texture_fidelity&quot;: None,
+                    &quot;speed_studio&quot;: None,
+                    &quot;speed_laptop&quot;: None,
+                    &quot;install_footprint&quot;: None,
+                    &quot;license_clarity&quot;: None,
+                },
             })
         except subprocess.TimeoutExpired:
             runs.append({
                 &quot;backend&quot;: backend,
                 &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;input_pipeline&quot;: subject.get(&quot;input_pipeline&quot;, &quot;&quot;),
                 &quot;run&quot;: i,
                 &quot;status&quot;: &quot;timeout&quot;,
                 &quot;duration_seconds&quot;: round(time.time() - t0, 2),
@@ -8244,11 +8295,57 @@ def run_backend(backend: str, subject: dict, output_dir: Path,
             runs.append({
                 &quot;backend&quot;: backend,
                 &quot;subject&quot;: subject[&quot;name&quot;],
+                &quot;input_pipeline&quot;: subject.get(&quot;input_pipeline&quot;, &quot;&quot;),
                 &quot;run&quot;: i,
                 &quot;status&quot;: &quot;error&quot;,
                 &quot;error&quot;: str(e),
             })
     return runs
+
+
+def _weighted_total(scores: dict, weights: dict) -&gt; float | None:
+    &quot;&quot;&quot;Compute weighted total only when every dimension has a score.&quot;&quot;&quot;
+    parts = []
+    for dim, w in weights.items():
+        s = scores.get(dim)
+        if s is None:
+            return None
+        parts.append(float(s) * float(w))
+    return round(sum(parts), 2)
+
+
+def _rollup_by_pipeline(runs: list[dict], rubric: dict) -&gt; dict:
+    &quot;&quot;&quot;Per (backend, input_pipeline) average of the weighted totals.
+    Surfaces the diagnostic the v3 spec calls for: a backend&#x27;s
+    intrinsic quality (synthetic) vs its production-chain quality
+    (mvgen). Delta = the MV-2D model&#x27;s tax.&quot;&quot;&quot;
+    weights = {dim: meta[&quot;weight&quot;] for dim, meta in rubric.get(&quot;dimensions&quot;, {}).items()}
+    if not weights:
+        return {}
+    by_key: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for run in runs:
+        if run.get(&quot;status&quot;) != &quot;ok&quot;:
+            continue
+        wt = _weighted_total(run.get(&quot;scores&quot;) or {}, weights)
+        if wt is None:
+            continue
+        key = (run[&quot;backend&quot;], run.get(&quot;input_pipeline&quot;, &quot;&quot;) or &quot;unknown&quot;)
+        by_key[key].append(wt)
+    rollup: dict[str, dict] = {}
+    for (backend, pipeline), values in by_key.items():
+        rollup.setdefault(backend, {})[pipeline] = {
+            &quot;mean_weighted_total&quot;: round(sum(values) / len(values), 2),
+            &quot;runs&quot;: len(values),
+        }
+    # Compute synthetic-vs-mvgen delta per backend when both exist.
+    for backend, by_pipe in rollup.items():
+        synth = by_pipe.get(&quot;synthetic&quot;)
+        mvgen = by_pipe.get(&quot;mvgen&quot;)
+        if synth and mvgen:
+            by_pipe[&quot;delta_synthetic_minus_mvgen&quot;] = round(
+                synth[&quot;mean_weighted_total&quot;] - mvgen[&quot;mean_weighted_total&quot;], 2
+            )
+    return rollup
 
 
 def main() -&gt; int:
@@ -8257,7 +8354,7 @@ def main() -&gt; int:
     p.add_argument(&quot;--rubric&quot;, default=str(DEFAULT_RUBRIC))
     p.add_argument(&quot;--backends&quot;, default=&quot;trellis,instantmesh,openlrm&quot;,
                    help=&quot;Comma-separated backend names; expects adapters at &quot;
-                        &quot;scripts/multiview_backends/&lt;name&gt;.py&quot;)
+                        &quot;tools/multiview_backends/&lt;name&gt;.py&quot;)
     p.add_argument(&quot;--runs-per-subject&quot;, type=int, default=3)
     p.add_argument(&quot;--output-dir&quot;, default=str(DEFAULT_OUTPUT))
     p.add_argument(&quot;--score-only&quot;, action=&quot;store_true&quot;,
@@ -8268,19 +8365,27 @@ def main() -&gt; int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     rubric_path = Path(args.rubric)
+    rubric = json.loads(rubric_path.read_text()) if rubric_path.exists() else {}
 
     subjects = discover_subjects(dataset_dir)
     if not any(s[&quot;complete&quot;] for s in subjects):
-        print(&quot;ERROR: no complete subject (need front/right/back/left views).&quot;,
+        print(&quot;ERROR: no complete subject (need &gt;= 3 view PNGs).&quot;,
               file=sys.stderr)
         print(f&quot;Dataset: {dataset_dir}&quot;, file=sys.stderr)
         return 2
 
-    rubric = json.loads(rubric_path.read_text()) if rubric_path.exists() else {}
-
-    all_runs: list[dict] = []
-    if not args.score_only:
+    results_path = output_dir / &quot;benchmark_results.json&quot;
+    if args.score_only:
+        # Reload existing results and recompute rollup.
+        if not results_path.exists():
+            print(f&quot;ERROR: --score-only but no prior results at {results_path}&quot;,
+                  file=sys.stderr)
+            return 2
+        prior = json.loads(results_path.read_text())
+        all_runs = prior.get(&quot;runs&quot;, [])
+    else:
         backends = [b.strip() for b in args.backends.split(&quot;,&quot;) if b.strip()]
+        all_runs = []
         for subject in subjects:
             if not subject[&quot;complete&quot;]:
                 continue
@@ -8288,18 +8393,27 @@ def main() -&gt; int:
                 runs = run_backend(backend, subject, output_dir, args.runs_per_subject)
                 all_runs.extend(runs)
 
+    rollup = _rollup_by_pipeline(all_runs, rubric)
+
     summary = {
         &quot;dataset&quot;: str(dataset_dir),
         &quot;rubric&quot;: rubric,
-        &quot;subjects&quot;: [{&quot;name&quot;: s[&quot;name&quot;], &quot;complete&quot;: s[&quot;complete&quot;]} for s in subjects],
+        &quot;subjects&quot;: [
+            {&quot;name&quot;: s[&quot;name&quot;],
+             &quot;complete&quot;: s[&quot;complete&quot;],
+             &quot;input_pipeline&quot;: s.get(&quot;input_pipeline&quot;),
+             &quot;mv_2d_model&quot;: s.get(&quot;mv_2d_model&quot;),
+             &quot;ground_truth&quot;: s.get(&quot;ground_truth&quot;)}
+            for s in subjects
+        ],
         &quot;runs&quot;: all_runs,
+        &quot;rollup_by_backend_and_pipeline&quot;: rollup,
         &quot;note&quot;: (
-            &quot;Per-dimension scores are entered manually after visual review. &quot;
-            &quot;Run with `--score-only` after editing this file to recompute &quot;
-            &quot;weighted totals.&quot;
+            &quot;Per-dimension scores live under runs[].scores and are entered &quot;
+            &quot;manually after visual review. Re-run with `--score-only` to &quot;
+            &quot;recompute the rollup once scores are filled in.&quot;
         ),
     }
-    results_path = output_dir / &quot;benchmark_results.json&quot;
     with open(results_path, &quot;w&quot;) as fh:
         json.dump(summary, fh, indent=2, sort_keys=True)
         fh.write(&quot;\n&quot;)
@@ -8308,6 +8422,17 @@ def main() -&gt; int:
     print(f&quot;[multiview-bench] subjects: {len(subjects)} &quot;
           f&quot;(complete: {sum(1 for s in subjects if s[&#x27;complete&#x27;])})&quot;)
     print(f&quot;[multiview-bench] total runs: {len(all_runs)}&quot;)
+    if rollup:
+        print(f&quot;[multiview-bench] backends with scored runs: {sorted(rollup.keys())}&quot;)
+        for backend, by_pipe in sorted(rollup.items()):
+            for pipeline, stats in sorted(by_pipe.items()):
+                if pipeline.startswith(&quot;delta_&quot;):
+                    continue
+                print(f&quot;[multiview-bench]   {backend} / {pipeline}: &quot;
+                      f&quot;{stats[&#x27;mean_weighted_total&#x27;]} ({stats[&#x27;runs&#x27;]} run(s))&quot;)
+            if &quot;delta_synthetic_minus_mvgen&quot; in by_pipe:
+                print(f&quot;[multiview-bench]   {backend}  Δ synth-mvgen: &quot;
+                      f&quot;{by_pipe[&#x27;delta_synthetic_minus_mvgen&#x27;]}&quot;)
     return 0
 
 

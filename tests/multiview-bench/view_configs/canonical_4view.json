@@ -1,0 +1,10 @@
+{
+  "name": "canonical_4view",
+  "description": "Standard 4-view spec used by Option C synthetic photography for general benchmarking. Front / right / back / left at elevation 0°.",
+  "views": [
+    {"name": "front", "azimuth_deg": 0,   "elevation_deg": 0},
+    {"name": "right", "azimuth_deg": 90,  "elevation_deg": 0},
+    {"name": "back",  "azimuth_deg": 180, "elevation_deg": 0},
+    {"name": "left",  "azimuth_deg": 270, "elevation_deg": 0}
+  ]
+}

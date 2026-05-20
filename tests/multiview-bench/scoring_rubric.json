@@ -1,5 +1,6 @@
 {
   "_schema_note": "Multi-view backend benchmark scoring rubric. v3 spec, item 12 Phase 1. Each dimension is scored 0-10 per (backend, subject, run); weighted total >= 6.5 required to qualify a backend.",
+  "_scoring_grouping": "P3.1a.1 — score backends per input_pipeline (synthetic / mvgen), NOT merged. The delta between synthetic and mvgen for the same backend is the most useful diagnostic (intrinsic backend quality vs full-chain UX). See tests/multiview-bench/README.md for interpretation.",
   "dimensions": {
     "geometric_accuracy": {
       "weight": 0.35,

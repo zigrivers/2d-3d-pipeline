@@ -2,6 +2,61 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.1a.1: Option B + Option C dataset tooling
+
+Builds on P3.1a's harness with two complementary input pipelines:
+
+- **synthetic** (Option C): render 4 calibrated views from a source
+  GLB via headless Blender. Source-mesh ground truth for free
+  (real Hausdorff distance, not visual guesses).
+- **mvgen** (Option B): render one concept image from the source,
+  dispatch a multi-view-aware 2D model (Zero123++ to start), use its
+  outputs as input. Tests the full production chain.
+
+Both pipelines share the same `ground_truth.glb` (the original
+source), so synthetic-vs-mvgen scores for the same backend reveal
+whether failure mode is "bad at reconstruction" (both fail) or
+"bad at AI-generated views" (only mvgen fails).
+
+New tooling (all under /tools, not subject to the embed rule):
+
+- `tools/render_benchmark_views.py` — Blender headless, renders N
+  views per a view-config JSON. Reuses the turntable rig from P1.7.
+- `tools/build_mvgen_dataset.py` — Option B orchestrator. Renders
+  concept → dispatches MV-2D adapter → assembles subject dir.
+- `tools/multiview_2d_adapters/zero123_plus_plus.py` — first
+  multi-view-2D adapter. Loads `sudo-ai/zero123plus-v1.2` via
+  diffusers; splits the 6-tile grid; saves per-view PNGs.
+  License bucket assigned conservatively as `commercial_threshold`.
+
+New configs:
+
+- `tests/multiview-bench/view_configs/canonical_4view.json` —
+  default Option C spec (front/right/back/left at elev 0).
+- `tests/multiview-bench/view_configs/zero123_plus_plus.json` —
+  Zero123++'s native 6 angles (azimuth 30/90/150/210/270/330,
+  alternating ±30°/-20° elevation). Use with Option C to produce a
+  perfectly apples-to-apples comparison against a Zero123++ mvgen run.
+
+Harness updates (`scripts/multiview_benchmark.py`):
+
+- Adapters now live in `tools/multiview_backends/` (off the embed
+  path; no subdirectory-in-EMBEDS complication).
+- Per-subject `meta.json` is read for `input_pipeline` + `mv_2d_model`,
+  carried through into every run record.
+- New `rollup_by_backend_and_pipeline` block in `benchmark_results.json`
+  summarises mean weighted totals per (backend, pipeline) and
+  computes the synth-vs-mvgen delta.
+- Subjects now use the per-subject `meta.json` views list instead of
+  hard-coding `front/right/back/left.png`, so Zero123++'s 6 native
+  views (`v030_30`, `v090_neg20`, …) work without further changes.
+
+Docs:
+
+- `tests/multiview-bench/README.md` rewritten to document both
+  pipelines, the new directory layout, and step-by-step dataset-build
+  commands.
+
 ## 2026-05-20 — P3.1a: multi-view backend benchmark scaffolding
 
 First sub-PR of item 12. Ships the methodology + harness so the
