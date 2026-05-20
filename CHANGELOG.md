@@ -2,6 +2,41 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P3.1b: multi-view backend adapters + recommendation skeleton
+
+Ships the three backend adapters the harness expects + a recommendation
+doc template ready to be filled in once the benchmark actually runs:
+
+  tools/multiview_backends/trellis.py      non_commercial (CC BY-NC)
+  tools/multiview_backends/instantmesh.py  unclear_risky (auto-DQ until reviewed)
+  tools/multiview_backends/openlrm.py      commercial_safe (Apache 2.0)
+
+Each adapter has the same shape (called by multiview_benchmark.py):
+  --views v0,v1,v2,v3 --output-glb PATH --json
+Each tries to invoke the backend at its expected install location;
+emits structured `not_installed` JSON if the backend isn't there.
+Each records its license bucket in the result so the harness can
+DQ in scoring per the rubric.
+
+Install layouts (override via env vars):
+  $TRELLIS_DIR        default ~/3d-pipeline/trellis-mac/
+  $INSTANTMESH_DIR    default ~/3d-pipeline/InstantMesh/
+  $OPENLRM_DIR        default ~/3d-pipeline/openlrm/
+
+Each adapter is intentionally close to its backend's published
+canonical CLI, with notes pointing at where to edit if your local
+install differs.
+
+docs/multiview-backend-research.md — skeleton of the recommendation
+deliverable. Sections (methodology recap, candidates, raw scores,
+per-(backend, pipeline) rollup, DQs, recommendation, follow-ups)
+in order; fill in after running the benchmark.
+
+P3.1b is "scaffolding complete" — actual benchmark run still needs
+source GLBs (you provide) + backend installs (~hours of model
+downloads). Once the recommendation lands, P3.1c (multiview.sh
+wrapper) can default to the chosen backend.
+
 ## 2026-05-20 — Q5 (open question): pipeline-doctor CI spec for review
 
 `docs/spec-pipeline-doctor-ci.md` — proposal for running
