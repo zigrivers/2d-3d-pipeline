@@ -2,6 +2,27 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P2.3: Hunyuan3D-Paint un-stub (license approved)
+
+License review completed 2026-05-20
+(`docs/license-review-hunyuan3d-paint.md`); ships paint mode for
+real.
+
+- `scripts/texture.sh --mode paint -i <glb>` — replaced the
+  needs_license_review stub with the real Hunyuan3D-Paint
+  invocation. Routes through `$HUNYUAN3D_PAINT_DIR/.venv` (override
+  via env). Outputs land in `<assets>/textures/<name>_painted.glb`.
+- `scripts/_pipeline_lib.sh::license_bucket_for_model` — bucket for
+  `hunyuan3d-paint` changes from `unclear_risky` to
+  `commercial_threshold` (same as SF3D / SPAR3D).
+- `skill/SKILL.md` Flow 6 — replaces the "do not enable" warning
+  with the routing-rules table: when to recommend paint
+  (TRELLIS-Mac vertex-only outputs, degenerate textures from earlier
+  generators, explicit user ask) vs when to leave the existing PBR
+  alone.
+
+Tier 2 of the v0.3 plan now complete (P2.1, P2.2, P2.3 shipped).
+
 ## 2026-05-20 — P2.2: CLIP variant ranking + per-model soft signal
 
 - `scripts/clip_score.py` — OpenCLIP ViT-L/14 scoring with two modes:

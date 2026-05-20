@@ -160,37 +160,107 @@ if [[ "$MODE" == "inspect" ]]; then
     exit 0
 fi
 
-# ---------- paint mode (Hunyuan3D-Paint placeholder) ----------
-# Hunyuan3D-Paint generates PBR maps for an input mesh. It's the most
-# promising candidate for filling out the texture pipeline beyond
-# simple upscale, but the Tencent Hunyuan Community License has
-# revenue thresholds and region exclusions that haven't been reviewed
-# against Ken's commercial use (Grithkin, GripCraft, GitHub releases).
-# Until that review happens, this mode refuses to run rather than
-# silently producing assets with unclear commercial usability.
+# ---------- paint mode (Hunyuan3D-Paint, approved 2026-05-20) ----------
+# Hunyuan3D-Paint generates PBR maps for an input mesh. License review
+# completed 2026-05-20 (Tencent Hunyuan Community License, bucket
+# `commercial_threshold`; see docs/license-review-hunyuan3d-paint.md).
+# Install layout assumed (override with $HUNYUAN3D_PAINT_DIR):
+#   $HUNYUAN3D_PAINT_DIR/.venv             one venv per tool
+#   $HUNYUAN3D_PAINT_DIR/run.py            inference entrypoint
+# If the upstream uses a different entrypoint, update the python
+# invocation below to match — the wrapper is intentionally close to
+# the SF3D / SPAR3D shape.
+HUNYUAN3D_PAINT_DIR="${HUNYUAN3D_PAINT_DIR:-$PIPELINE_ROOT/hunyuan3d-paint}"
+HUNYUAN3D_PAINT_VENV="${HUNYUAN3D_PAINT_VENV:-$HUNYUAN3D_PAINT_DIR/.venv}"
+
 if [[ "$MODE" == "paint" ]]; then
-    err "Hunyuan3D-Paint mode is gated pending licence review."
-    err "  Licence:   Tencent Hunyuan Community License"
-    err "             (revenue thresholds + region exclusions apply)"
-    err "  Action:    Review the licence against your commercial usage"
-    err "             (Grithkin / GripCraft / 3D-print products / GitHub releases)"
-    err "             before enabling this mode. The wrapper will not run"
-    err "             until the gate is removed in scripts/texture.sh."
+    # Sanity-check inputs: paint mode requires a GLB.
+    case "${INPUT_ABS,,}" in
+        *.glb|*.gltf) ;;
+        *)
+            err "paint mode requires a .glb or .gltf input (got: $INPUT_ABS)"
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_mode_end
+                python3 "$SCRIPT_DIR/json_emit.py" \
+                    status=error stage=texture_paint \
+                    error=unsupported_input tool=hunyuan3d-paint \
+                    license_bucket=commercial_threshold \
+                    input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                    machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+            fi
+            exit 2
+            ;;
+    esac
+
+    if [[ ! -d "$HUNYUAN3D_PAINT_DIR" || ! -d "$HUNYUAN3D_PAINT_VENV" || ! -f "$HUNYUAN3D_PAINT_DIR/run.py" ]]; then
+        err "Hunyuan3D-Paint not installed (expected $HUNYUAN3D_PAINT_DIR with .venv + run.py)."
+        err "  Override location:  export HUNYUAN3D_PAINT_DIR=/path/to/Hunyuan3D-2"
+        err "  License:            Tencent Hunyuan Community License (approved 2026-05-20)"
+        err "                      see docs/license-review-hunyuan3d-paint.md"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=texture_paint \
+                error=not_installed tool=hunyuan3d-paint \
+                license_bucket=commercial_threshold \
+                input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    LICENSE_BUCKET_PAINT="$(license_bucket_for_model hunyuan3d-paint)"
+    info "Painting textures via Hunyuan3D-Paint (license: $LICENSE_BUCKET_PAINT)"
+    info "Input mesh:  $INPUT_ABS"
+
+    TEXTURES_DIR="$ASSETS_ROOT/textures"
+    mkdir -p "$TEXTURES_DIR"
+    out_base="$(basename "${INPUT_ABS%.*}")"
+    PAINTED_PATH="$TEXTURES_DIR/${out_base}_painted.glb"
+
+    PAINT_START=$(date +%s)
+    (
+        cd "$HUNYUAN3D_PAINT_DIR"
+        # shellcheck source=/dev/null
+        source "$HUNYUAN3D_PAINT_VENV/bin/activate"
+        PYTORCH_ENABLE_MPS_FALLBACK=1 python run.py \
+            "$INPUT_ABS" \
+            --output "$PAINTED_PATH"
+        deactivate
+    ) || {
+        err "Hunyuan3D-Paint inference failed"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=texture_paint \
+                error=inference_failed tool=hunyuan3d-paint \
+                license_bucket="$LICENSE_BUCKET_PAINT" \
+                input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 1
+    }
+    PAINT_END=$(date +%s)
+    PAINT_DURATION=$((PAINT_END - PAINT_START))
+
+    [[ -f "$PAINTED_PATH" ]] || { err "Hunyuan3D-Paint did not produce $PAINTED_PATH"; exit 1; }
+    done_ "Painted in ${PAINT_DURATION}s -> $PAINTED_PATH"
+
     if [[ "$JSON_MODE" == "1" ]]; then
         json_mode_end
         python3 "$SCRIPT_DIR/json_emit.py" \
-            status=error \
-            stage=texture_paint \
-            error=needs_license_review \
+            status=ok stage=texture_paint \
             tool=hunyuan3d-paint \
-            license_bucket=unclear_risky \
-            input="$INPUT_ABS" \
+            license_bucket="$LICENSE_BUCKET_PAINT" \
+            input="$INPUT_ABS" output="$PAINTED_PATH" \
             assets_root="$ASSETS_ROOT" \
-            machine="$MACHINE" \
-            hardware_tier="$HW_TIER" \
-            created="$CREATED_AT"
+            --int duration_seconds="$PAINT_DURATION" \
+            machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+    else
+        # Last line is the painted GLB path — preserves chaining.
+        echo "$PAINTED_PATH"
     fi
-    exit 2
+    exit 0
 fi
 
 # ---------- upscale mode ----------

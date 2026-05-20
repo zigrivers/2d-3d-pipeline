@@ -275,11 +275,10 @@ license_bucket_for_model() {
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
-        # Hunyuan3D-Paint: licensed under the Tencent Hunyuan Community
-        # License, which has revenue thresholds and region exclusions
-        # that the user hasn't reviewed yet. Reported as unclear_risky
-        # so it never accidentally becomes a default before that review.
-        hunyuan3d-paint)                        echo unclear_risky ;;
+        # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
+        # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
+        # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
+        hunyuan3d-paint)                        echo commercial_threshold ;;
         "")                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac

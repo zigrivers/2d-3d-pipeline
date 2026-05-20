@@ -531,23 +531,35 @@ Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine's `Textures/`
 folder when applicable.
 
-### Paint (placeholder for Hunyuan3D-Paint — licence-gated, do NOT enable)
+### Paint mode — Hunyuan3D-Paint (v0.3.4+, approved)
 
-`texture.sh --mode paint` is a deliberately broken placeholder. It fails
-with `status=error error=needs_license_review` and exits 2. The reason:
-Hunyuan3D-Paint is licensed under the Tencent Hunyuan Community License,
-which has revenue thresholds and region exclusions that haven't been
-reviewed against Ken's commercial usage. Until that review happens,
-the mode refuses to run rather than silently producing assets with
-unclear commercial usability.
+`texture.sh --mode paint -i <glb>` paints PBR textures onto an
+existing 3D mesh using Tencent's Hunyuan3D-Paint. License review
+was completed 2026-05-20; bucket is `commercial_threshold` — same
+as SF3D and SPAR3D — and shipped assets are usable in commercial
+projects subject to the same MAU threshold every Hunyuan model has.
+See `docs/license-review-hunyuan3d-paint.md` for the full record.
 
-The licence bucket for `hunyuan3d-paint` is `unclear_risky` in
-`_pipeline_lib.sh::license_bucket_for_model` so anything that *does*
-get tagged with it shows up in manifests and benchmarks as unreviewed.
+**When to recommend paint mode** (per item 7 routing rules):
 
-If the user asks about Hunyuan3D-Paint, do not try to enable it. Explain
-the gate, point at the structured error message, and offer to help with
-the licence review (which is human work, not pipeline work).
+| Signal in meta.json | Recommendation |
+|---|---|
+| `generator=trellis` AND `quality.textures.textures_present` is empty | Strongly recommend paint — TRELLIS-on-Mac ships vertex colours only |
+| `quality.textures.issues` includes `flat-black-albedo` or `uninitialised-*` | Recommend paint — original generator produced degenerate textures |
+| `quality.textures.issues` empty AND `textures_present` non-empty | Don't recommend paint — existing PBR is fine |
+| User explicitly asks "re-texture" / "paint this mesh" | Run paint regardless |
+
+The wrapper never auto-runs paint after `generate.sh`. It's always
+a separate `texture.sh --mode paint -i <glb>` call. State the
+`commercial_threshold` bucket inline (same convention as recommending
+SPAR3D over SF3D).
+
+Install layout: `$HUNYUAN3D_PAINT_DIR` (default
+`~/3d-pipeline/hunyuan3d-paint/`) with `.venv` and `run.py`. When
+the wrapper finds either missing, it exits with structured
+`status=error error=not_installed` JSON and points at the install
+docs. Relay the install guidance; don't try to substitute a different
+texture generator.
 
 ## Flow 7: Model bake-off / benchmark
 
