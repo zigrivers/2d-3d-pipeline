@@ -902,6 +902,7 @@ footer .signature { color: var(--peach); }
         <li><a href="#scripts"><span class="num">07</span>Wrapper scripts</a></li>
         <li><a href="#skill"><span class="num">08</span>Claude Code skill</a></li>
         <li><a href="#smoke-test"><span class="num">09</span>Smoke test</a></li>
+        <li><a href="#install-pipeline-tools"><span class="num">10</span>v0.3 prep (optional)</a></li>
         <li><a href="#parallel-path"><span class="num">P</span>Parallel install</a></li>
       </ul>
     </div>
@@ -5950,6 +5951,60 @@ chmod +x ~/.claude/skills/asset-pipeline/scripts/update_manifest.py</pre></div>
       <p style="margin-top: 40px; padding: 24px; background: var(--mantle); border-left: 3px solid var(--green); border-radius: 0 4px 4px 0;">
         <strong style="color: var(--green); font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;">Setup complete</strong><br><br>
         <span style="color: var(--subtext1);">If the smoke test produced a recognizable chest, your pipeline is fully operational. The rest of this document is workflow examples for common scenarios.</span>
+      </p>
+    </section>
+
+    <!-- ============ INSTALL PIPELINE TOOLS ENV (v0.3 prep) ============ -->
+    <section id="install-pipeline-tools">
+      <div class="section-num">10 / v0.3 prep</div>
+      <h2>Install <em>pipeline-tools-env</em> <span style="font-size: 24px; color: var(--overlay0); font-style: normal;">(optional, v0.3+)</span></h2>
+      <p class="section-deck">A shared Python environment for the quality-check scripts shipping in v0.3+ (watertight checks, texture validation, CLIP scoring, background removal, the pipeline doctor). Empty until v0.3 features ship; install it now if you want a head start. Skip otherwise — v0.2 doesn't use it. Studio tier has the disk headroom to install it preemptively.</p>
+
+      <div class="step" data-step="pipeline-tools-venv">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Create the pipeline-tools venv</h3>
+          <p>Same Python version as SF3D / mflux. The venv houses <code>trimesh</code>, <code>open_clip_torch</code>, <code>rembg</code>, and a few small helpers. Total disk impact: ~6&nbsp;GB once populated (vs. ~15&nbsp;GB if each tool had its own venv).</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
+<span class="tk-prompt">$ </span>python3.12 -m venv pipeline-tools-env    <span class="tk-cmt"># match SF3D / mflux Python version</span>
+<span class="tk-prompt">$ </span>source pipeline-tools-env/bin/activate
+<span class="tk-prompt">$ </span>pip install --upgrade pip
+<span class="tk-prompt">$ </span>pip install trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+          <p>First install: 5–10 minutes on Studio tier. <code>torch</code> is the heaviest dep (~2&nbsp;GB) and is shared by <code>open_clip_torch</code> + <code>rembg</code>.</p>
+        </div>
+      </div>
+
+      <div class="step" data-step="pipeline-tools-cache-dirs">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Create the model-cache directories</h3>
+          <p>v0.3 quality scripts download small models on first use (rembg's u2net ~170&nbsp;MB, OpenCLIP ViT-L/14 ~890&nbsp;MB). Caches go under <code>~/3d-pipeline/models/</code> so the pipeline doctor can manage them.</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>mkdir -p ~/3d-pipeline/models/rembg ~/3d-pipeline/models/clip</pre></div>
+          <p>Two env vars route each library's cache into these dirs. Add them to your shell rc (<code>~/.zshrc</code> or <code>~/.bashrc</code>) so every shell sees them:</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre>export U2NET_HOME=<span class="tk-str">"$HOME/3d-pipeline/models/rembg"</span>
+export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"</span></pre></div>
+        </div>
+      </div>
+
+      <div class="step" data-step="pipeline-tools-verify">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Verify</h3>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/pipeline-tools-env/bin/activate
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests; print('ok')"</span>
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+          <p>You should see <code>ok</code> with no traceback. No models download in this step — that happens when v0.3 features actually run.</p>
+          <div class="verify">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">Each import succeeds. If <code>rembg</code> or <code>open_clip_torch</code> fail to install on your machine, see the troubleshooting notes in <a href="UPGRADES-studio.md">UPGRADES-studio.md</a>.</div>
+          </div>
+        </div>
+      </div>
+
+      <p style="margin-top: 40px; padding: 24px; background: var(--mantle); border-left: 3px solid var(--mauve); border-radius: 0 4px 4px 0;">
+        <strong style="color: var(--mauve); font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;">No behaviour change yet</strong><br><br>
+        <span style="color: var(--subtext1);">Installing this venv doesn't change anything about how the v0.2 pipeline runs. The scripts that use it ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
       </p>
     </section>
 

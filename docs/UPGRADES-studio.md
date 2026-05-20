@@ -235,4 +235,34 @@ With 8&nbsp;TB local storage each, duplication is fine.
 - **`--allow-oversize` is for when you've decided to print in pieces.** Not
   a default to enable casually.
 
-Last updated: 2026-05-19
+## What's coming next (v0.3 prep)
+
+### `pipeline-tools-env` venv (optional, installable now)
+
+v0.3 adds quality-check scripts (watertight + scale, texture quality,
+input quality, background removal, CLIP scoring, pipeline doctor) that
+share a single Python environment at `~/3d-pipeline/pipeline-tools-env/`.
+
+The setup guide ships a new optional step (section 10) for installing
+this venv. The venv is **unused** by v0.2 — nothing changes about how
+your current pipeline runs. On studio tier you have the disk headroom to
+install it preemptively; the v0.3 features will then be ready as soon as
+they land.
+
+Packages installed:
+
+```
+trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests
+```
+
+Disk impact: ~6 GB once populated. Caches at `~/3d-pipeline/models/rembg/`
+(env: `U2NET_HOME`) and `~/3d-pipeline/models/clip/`
+(env: `OPEN_CLIP_CACHE_DIR`). The pipeline doctor (item 10, ships in v0.3.0)
+will eventually manage these caches and additional heavy models
+(Hunyuan3D-Paint ~5 GB, ComfyUI stack ~10 GB) for the items beyond v0.3.0.
+
+If a wheel fails to install: `pip install --upgrade pip setuptools wheel`
+first, then retry. `torch` on Apple Silicon is the most common failure;
+make sure you're on Python 3.10–3.12.
+
+Last updated: 2026-05-20

@@ -2,6 +2,25 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P0.1: pipeline-tools-env install step
+
+First foundation PR for the v0.3 quality-improvement work
+(see `docs/improvement-spec.md` + `docs/improvement-plan.md`).
+Pure docs — no script or skill changes. The new venv is unused until
+the meta_helper / update_manifest / pipeline-doctor PRs land (P0.2,
+P0.3, P1.1).
+
+- New section 10 in both setup guides (`docs/asset-pipeline-guide.html`
+  and `-studio.html`): install `~/3d-pipeline/pipeline-tools-env/` with
+  `trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm
+  requests`. Model-cache locations under `~/3d-pipeline/models/{rembg,clip}/`
+  with `U2NET_HOME` + `OPEN_CLIP_CACHE_DIR` env vars. Marked optional /
+  "v0.3 prep" since v0.2 doesn't use any of it.
+- Sidebar nav in both guides lists the new section.
+- `docs/UPGRADES-{laptop,studio}.md` get a "What's coming next (v0.3
+  prep)" section documenting the venv + the troubleshooting hint for
+  `torch` wheel failures.
+
 ## 2026-05-19 — post-v0.2.0 polish
 
 Small clean-ups landed after the v0.2.0 tag:

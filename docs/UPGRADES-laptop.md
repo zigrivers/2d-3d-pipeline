@@ -181,4 +181,31 @@ wins on the asset class you care about.
 - **Don't run `print.sh` on a raw GLB.** Always use the cleaned version from
   `assets/clean/`.
 
-Last updated: 2026-05-19
+## What's coming next (v0.3 prep)
+
+### `pipeline-tools-env` venv (optional, installable now)
+
+v0.3 adds quality-check scripts (watertight + scale, texture quality,
+input quality, background removal, CLIP scoring, pipeline doctor) that
+share a single Python environment at `~/3d-pipeline/pipeline-tools-env/`.
+
+The setup guide ships a new optional step (section 10) for installing
+this venv. The venv is **unused** by v0.2 — nothing changes about how
+your current pipeline runs. Install it now if you want a head start on
+v0.3; skip it otherwise.
+
+Packages installed:
+
+```
+trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests
+```
+
+Disk impact: ~6 GB once populated. Caches at `~/3d-pipeline/models/rembg/`
+(env: `U2NET_HOME`) and `~/3d-pipeline/models/clip/`
+(env: `OPEN_CLIP_CACHE_DIR`).
+
+If a wheel fails to install: `pip install --upgrade pip setuptools wheel`
+first, then retry. `torch` on Apple Silicon is the most common failure;
+make sure you're on Python 3.10–3.12.
+
+Last updated: 2026-05-20
