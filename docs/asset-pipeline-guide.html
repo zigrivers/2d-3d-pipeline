@@ -1567,10 +1567,10 @@ resolve_project_context() {
         AUTO_INCREMENT=&quot;0&quot;
     fi
 
-    # Make sure all needed dirs exist (textures/ added in v0.2 for texture.sh).
+    # Make sure all needed dirs exist (textures/ + preview/ added in v0.3).
     mkdir -p &quot;$ASSETS_ROOT/concept&quot; &quot;$ASSETS_ROOT/raw&quot; \
              &quot;$ASSETS_ROOT/clean&quot; &quot;$ASSETS_ROOT/print&quot; \
-             &quot;$ASSETS_ROOT/textures&quot;
+             &quot;$ASSETS_ROOT/textures&quot; &quot;$ASSETS_ROOT/preview&quot;
     [[ -n &quot;$ENGINE_PATH&quot; ]] &amp;&amp; mkdir -p &quot;$ENGINE_PATH&quot;
 
     return 0
@@ -2269,6 +2269,7 @@ SKIP_ENGINE_STAGE=0
 OVERWRITE_ENGINE=0
 JSON_MODE=0
 BG_REMOVAL_MODE=&quot;&quot;
+PREVIEW_MODE=&quot;&quot;
 
 usage() {
     cat &lt;&lt;EOF
@@ -2328,6 +2329,8 @@ while [[ $# -gt 0 ]]; do
         --overwrite-engine)  OVERWRITE_ENGINE=1; shift ;;
         --bg-removal)        BG_REMOVAL_MODE=&quot;$2&quot;; shift 2 ;;
         --no-bg-removal)     BG_REMOVAL_MODE=&quot;off&quot;; shift ;;
+        --preview)           PREVIEW_MODE=&quot;$2&quot;; shift 2 ;;
+        --no-preview)        PREVIEW_MODE=&quot;none&quot;; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
@@ -2651,6 +2654,64 @@ if [[ &quot;$PROJECT_MODE&quot; == &quot;project&quot; &amp;&amp; $SKIP_ENGINE_S
             cp &quot;$CLEAN_PATH&quot; &quot;$ENGINE_STAGED_PATH&quot;
             info &quot;Staged for engine: $ENGINE_STAGED_PATH&quot;
         fi
+    fi
+fi
+
+# v0.3 — turntable preview render (hero PNG + optional GIF).
+# Tier-aware default: laptop = png, studio = gif. Queue forces none.
+TURNTABLE_SCRIPT=&quot;$SCRIPT_DIR/turntable_render.py&quot;
+[[ -f &quot;$TURNTABLE_SCRIPT&quot; ]] || TURNTABLE_SCRIPT=&quot;$PIPELINE_ROOT/workspace/turntable_render.py&quot;
+if [[ -z &quot;$PREVIEW_MODE&quot; ]]; then
+    if [[ &quot;$HW_TIER&quot; == &quot;studio&quot; ]]; then
+        PREVIEW_MODE=&quot;$(read_pipeline_config preview_default_studio gif 2&gt;/dev/null || echo gif)&quot;
+    else
+        PREVIEW_MODE=&quot;$(read_pipeline_config preview_default_laptop png 2&gt;/dev/null || echo png)&quot;
+    fi
+fi
+if [[ &quot;$PREVIEW_MODE&quot; != &quot;none&quot; &amp;&amp; -f &quot;$TURNTABLE_SCRIPT&quot; &amp;&amp; -x &quot;$BLENDER&quot; ]]; then
+    PREVIEW_DIR=&quot;$ASSETS_ROOT/preview&quot;
+    FRAMES=1
+    RESOLUTION=1024
+    if [[ &quot;$PREVIEW_MODE&quot; == &quot;gif&quot; ]]; then
+        FRAMES=12
+        RESOLUTION=512
+    fi
+    info &quot;Rendering preview ($PREVIEW_MODE mode, $FRAMES frame(s))...&quot;
+    &quot;$BLENDER&quot; --background --python &quot;$TURNTABLE_SCRIPT&quot; -- \
+        &quot;$CLEAN_PATH&quot; &quot;$PREVIEW_DIR&quot; &quot;$OUTPUT_NAME&quot; &quot;$PREVIEW_MODE&quot; \
+        &quot;$FRAMES&quot; &quot;$RESOLUTION&quot; 32 &quot;$META_PATH&quot; 2&gt;&amp;1 \
+        | grep &#x27;^\[turntable\]&#x27; | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[turntable\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    # Assemble GIF if mode=gif using pipeline-tools-env Pillow
+    if [[ &quot;$PREVIEW_MODE&quot; == &quot;gif&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; - &lt;&lt;&#x27;PY&#x27; &quot;$PREVIEW_DIR&quot; &quot;$OUTPUT_NAME&quot; &quot;$META_PATH&quot; 2&gt;/dev/null || true
+import json, os, sys, glob, subprocess
+preview_dir, name, meta_path = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest_path = os.path.join(preview_dir, f&quot;{name}_preview_manifest.json&quot;)
+try:
+    m = json.load(open(manifest_path))
+except Exception:
+    sys.exit(0)
+frames = m.get(&quot;frame_paths&quot;) or []
+if not frames:
+    sys.exit(0)
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit(0)
+imgs = [Image.open(f).convert(&quot;RGBA&quot;) for f in frames]
+gif_path = os.path.join(preview_dir, f&quot;{name}.gif&quot;)
+imgs[0].save(gif_path, save_all=True, append_images=imgs[1:], duration=125, loop=0, disposal=2)
+print(f&quot;[pipeline] Preview: turntable GIF → {gif_path}&quot;)
+# Update meta.json with the gif path
+helper = os.path.expanduser(os.path.dirname(os.path.abspath(__file__)) + &quot;/meta_helper.py&quot;)
+if not os.path.exists(helper):
+    helper = os.path.expanduser(&quot;~/3d-pipeline/workspace/meta_helper.py&quot;)
+try:
+    subprocess.run([sys.executable, helper, &quot;merge&quot;, meta_path,
+                    &quot;--section&quot;, &quot;preview&quot;, &quot;--data&quot;, json.dumps({&quot;gif_path&quot;: gif_path})], check=False)
+except Exception:
+    pass
+PY
     fi
 fi
 
@@ -6970,6 +7031,214 @@ def main() -&gt; int:
 
 if __name__ == &quot;__main__&quot;:
     sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>turntable_render.py</code>
+                <span class="script-summary-desc">v0.3 turntable preview renderer (Blender)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/turntable_render.py << 'PIPELINE_EOF'
+&quot;&quot;&quot;v0.3 — turntable preview renderer (Blender headless).
+
+Renders a glTF asset to a hero PNG (single frame) and/or a 12-frame
+turntable. Frames are written to &lt;preview_dir&gt;/&lt;name&gt;_NN.png. A
+Pillow-based GIF assembly is left to the caller (generate.sh) when
+mode=gif; this script does NOT depend on Pillow so it runs inside
+Blender&#x27;s bundled Python without extra setup.
+
+Run from generate.sh:
+
+  blender --background --python turntable_render.py -- \
+      INPUT.glb PREVIEW_DIR ASSET_NAME MODE FRAMES RESOLUTION SAMPLES META_PATH
+
+  MODE       : png | gif | none
+  FRAMES     : 1 for png, 12 for gif (other values accepted)
+  RESOLUTION : square px (e.g. 1024 for hero, 512 for gif)
+  SAMPLES    : Eevee samples per frame (e.g. 32)
+  META_PATH  : per-asset meta.json (optional; &quot;&quot; to skip)
+
+Camera is auto-framed at a 30° elevation, distance = 1.7 × longest
+bbox dim. Three-point light rig (key, fill, rim) in Eevee for speed.
+&quot;&quot;&quot;
+import bpy
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+from mathutils import Vector
+
+argv = sys.argv[sys.argv.index(&#x27;--&#x27;) + 1:]
+input_path = argv[0]
+preview_dir = argv[1]
+name = argv[2]
+mode = argv[3]
+frames = int(argv[4])
+resolution = int(argv[5])
+samples = int(argv[6])
+meta_path = argv[7] if len(argv) &gt; 7 else &quot;&quot;
+
+os.makedirs(preview_dir, exist_ok=True)
+t0 = time.time()
+
+# --- empty scene ---
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene = bpy.context.scene
+
+# --- import ---
+bpy.ops.import_scene.gltf(filepath=input_path)
+meshes = [o for o in scene.objects if o.type == &#x27;MESH&#x27;]
+if not meshes:
+    print(f&quot;[turntable] ERROR: no mesh in {input_path}&quot;, file=sys.stderr)
+    sys.exit(1)
+if len(meshes) &gt; 1:
+    bpy.ops.object.select_all(action=&#x27;DESELECT&#x27;)
+    for m in meshes:
+        m.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.join()
+obj = bpy.context.view_layer.objects.active
+
+# Compute target centre + distance from bbox.
+bb = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+center = sum(bb, Vector()) / 8.0
+extents = Vector((
+    max(p.x for p in bb) - min(p.x for p in bb),
+    max(p.y for p in bb) - min(p.y for p in bb),
+    max(p.z for p in bb) - min(p.z for p in bb),
+))
+longest = max(extents)
+dist = max(longest * 1.7, 0.05)
+elev = math.radians(30.0)
+
+# --- camera ---
+cam_data = bpy.data.cameras.new(&quot;PreviewCam&quot;)
+cam = bpy.data.objects.new(&quot;PreviewCam&quot;, cam_data)
+scene.collection.objects.link(cam)
+scene.camera = cam
+cam_data.lens = 50.0
+
+# --- three-point lights ---
+def make_light(name, energy, x, y, z):
+    ld = bpy.data.lights.new(name=name, type=&#x27;AREA&#x27;)
+    ld.energy = energy
+    ld.size = max(longest * 0.5, 0.5)
+    obj_l = bpy.data.objects.new(name, ld)
+    obj_l.location = (x, y, z)
+    scene.collection.objects.link(obj_l)
+    return obj_l
+
+key = make_light(&quot;Key&quot;, 600, center.x + dist * 0.7, center.y - dist * 0.5, center.z + dist * 0.5)
+fill = make_light(&quot;Fill&quot;, 300, center.x - dist * 0.6, center.y - dist * 0.3, center.z + dist * 0.2)
+rim = make_light(&quot;Rim&quot;, 400, center.x, center.y + dist * 0.8, center.z + dist * 0.5)
+for light in (key, fill, rim):
+    constraint = light.constraints.new(&#x27;TRACK_TO&#x27;)
+    constraint.target = obj
+    constraint.track_axis = &#x27;TRACK_NEGATIVE_Z&#x27;
+    constraint.up_axis = &#x27;UP_Y&#x27;
+
+# --- render settings (Eevee for speed) ---
+scene.render.engine = &#x27;BLENDER_EEVEE_NEXT&#x27; if &#x27;BLENDER_EEVEE_NEXT&#x27; in {e.identifier for e in bpy.types.RenderSettings.bl_rna.properties[&#x27;engine&#x27;].enum_items} else &#x27;BLENDER_EEVEE&#x27;
+scene.render.resolution_x = resolution
+scene.render.resolution_y = resolution
+scene.render.image_settings.file_format = &#x27;PNG&#x27;
+scene.render.image_settings.color_mode = &#x27;RGBA&#x27;
+scene.render.film_transparent = True
+try:
+    scene.eevee.taa_render_samples = samples
+except Exception:
+    pass
+
+# Auto-fit camera by adjusting distance per frame. Centre look-at.
+hero_path = &quot;&quot;
+gif_frame_paths = []
+
+def position_camera(angle_rad: float):
+    cx = center.x + dist * math.cos(angle_rad)
+    cy = center.y + dist * math.sin(angle_rad)
+    cz = center.z + dist * math.sin(elev) * 0.5
+    cam.location = (cx, cy, cz)
+    direction = (center - Vector((cx, cy, cz))).normalized()
+    cam.rotation_mode = &#x27;XYZ&#x27;
+    # Compute Euler that aims -Z at target
+    rot_quat = direction.to_track_quat(&#x27;-Z&#x27;, &#x27;Y&#x27;)
+    cam.rotation_euler = rot_quat.to_euler()
+
+if mode == &quot;none&quot; or frames &lt; 1:
+    pass
+else:
+    if mode == &quot;png&quot;:
+        position_camera(math.radians(45))
+        hero_path = os.path.join(preview_dir, f&quot;{name}.png&quot;)
+        scene.render.filepath = hero_path
+        bpy.ops.render.render(write_still=True)
+    else:  # gif or any frame count &gt; 1
+        # Render N frames + a hero (first frame at 45°)
+        for i in range(frames):
+            angle = math.radians(i * 360.0 / frames)
+            position_camera(angle)
+            frame_path = os.path.join(preview_dir, f&quot;{name}_f{i:02d}.png&quot;)
+            scene.render.filepath = frame_path
+            bpy.ops.render.render(write_still=True)
+            gif_frame_paths.append(frame_path)
+        # Hero = first frame
+        if gif_frame_paths:
+            hero_path = os.path.join(preview_dir, f&quot;{name}.png&quot;)
+            try:
+                import shutil as _shutil
+                _shutil.copyfile(gif_frame_paths[0], hero_path)
+            except Exception:
+                hero_path = gif_frame_paths[0]
+
+duration = round(time.time() - t0, 2)
+
+# Manifest (read by generate.sh; the GIF assembly happens there using Pillow).
+manifest = {
+    &quot;mode&quot;: mode,
+    &quot;hero_png_path&quot;: hero_path or None,
+    &quot;gif_path&quot;: None,  # filled by generate.sh after assembly
+    &quot;frame_paths&quot;: gif_frame_paths,
+    &quot;frames&quot;: len(gif_frame_paths) if gif_frame_paths else (1 if hero_path else 0),
+    &quot;resolution&quot;: resolution,
+    &quot;duration_seconds&quot;: duration,
+}
+manifest_path = os.path.join(preview_dir, f&quot;{name}_preview_manifest.json&quot;)
+with open(manifest_path, &quot;w&quot;) as fh:
+    json.dump(manifest, fh, indent=2, sort_keys=True)
+
+# Merge a preliminary entry into meta.json (gif_path stays null until
+# generate.sh assembles it).
+if meta_path:
+    here = os.path.dirname(os.path.abspath(__file__))
+    helper = os.path.join(here, &quot;meta_helper.py&quot;)
+    if not os.path.exists(helper):
+        helper = os.path.expanduser(&quot;~/3d-pipeline/workspace/meta_helper.py&quot;)
+    if os.path.exists(helper):
+        preview_section = {
+            &quot;mode&quot;: mode,
+            &quot;hero_png_path&quot;: hero_path or None,
+            &quot;gif_path&quot;: None,
+            &quot;frames&quot;: manifest[&quot;frames&quot;],
+            &quot;resolution&quot;: resolution,
+            &quot;duration_seconds&quot;: duration,
+        }
+        try:
+            subprocess.run(
+                [sys.executable, helper, &quot;merge&quot;, meta_path,
+                 &quot;--section&quot;, &quot;preview&quot;,
+                 &quot;--data&quot;, json.dumps(preview_section)],
+                check=False,
+            )
+        except Exception:
+            pass
+
+print(f&quot;[turntable] mode={mode} frames={manifest[&#x27;frames&#x27;]} duration={duration}s&quot;)
+print(f&quot;[turntable] manifest={manifest_path}&quot;)
+if hero_path:
+    print(f&quot;[turntable] hero={hero_path}&quot;)
 PIPELINE_EOF</pre></div>
             </details>
 

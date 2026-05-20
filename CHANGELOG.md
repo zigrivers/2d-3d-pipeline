@@ -2,6 +2,23 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.7: turntable preview render (Tier 1)
+
+- `scripts/turntable_render.py` — Blender-headless renderer. One
+  hero PNG (1024×1024, Eevee, 32 samples) at 45° angle, OR 12-frame
+  turntable at 512×512 (gif mode). Three-point light rig auto-fit to
+  the asset's bounding box. Frames + a manifest written to
+  `<assets>/preview/`.
+- `scripts/generate.sh` — runs the renderer after cleanup. Tier-aware
+  default: laptop = png, studio = gif. Override via
+  `--preview {none,png,gif}` or `--no-preview`. After Blender exits,
+  if mode = gif, an inline pipeline-tools-env Python snippet uses
+  Pillow to assemble the 12 frames into a single GIF; the
+  manifest's `gif_path` is then merged back into the per-asset
+  meta.json `preview` section.
+- `_pipeline_lib.sh`: `resolve_project_context` now also creates
+  `$ASSETS_ROOT/preview/`.
+
 ## 2026-05-20 — P1.6: conditional background removal (Tier 1)
 
 - `scripts/rembg_preprocess.py` (in pipeline-tools-env) — wraps rembg

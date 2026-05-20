@@ -40,6 +40,7 @@ SKIP_ENGINE_STAGE=0
 OVERWRITE_ENGINE=0
 JSON_MODE=0
 BG_REMOVAL_MODE=""
+PREVIEW_MODE=""
 
 usage() {
     cat <<EOF
@@ -99,6 +100,8 @@ while [[ $# -gt 0 ]]; do
         --overwrite-engine)  OVERWRITE_ENGINE=1; shift ;;
         --bg-removal)        BG_REMOVAL_MODE="$2"; shift 2 ;;
         --no-bg-removal)     BG_REMOVAL_MODE="off"; shift ;;
+        --preview)           PREVIEW_MODE="$2"; shift 2 ;;
+        --no-preview)        PREVIEW_MODE="none"; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -422,6 +425,64 @@ if [[ "$PROJECT_MODE" == "project" && $SKIP_ENGINE_STAGE -eq 0 ]]; then
             cp "$CLEAN_PATH" "$ENGINE_STAGED_PATH"
             info "Staged for engine: $ENGINE_STAGED_PATH"
         fi
+    fi
+fi
+
+# v0.3 — turntable preview render (hero PNG + optional GIF).
+# Tier-aware default: laptop = png, studio = gif. Queue forces none.
+TURNTABLE_SCRIPT="$SCRIPT_DIR/turntable_render.py"
+[[ -f "$TURNTABLE_SCRIPT" ]] || TURNTABLE_SCRIPT="$PIPELINE_ROOT/workspace/turntable_render.py"
+if [[ -z "$PREVIEW_MODE" ]]; then
+    if [[ "$HW_TIER" == "studio" ]]; then
+        PREVIEW_MODE="$(read_pipeline_config preview_default_studio gif 2>/dev/null || echo gif)"
+    else
+        PREVIEW_MODE="$(read_pipeline_config preview_default_laptop png 2>/dev/null || echo png)"
+    fi
+fi
+if [[ "$PREVIEW_MODE" != "none" && -f "$TURNTABLE_SCRIPT" && -x "$BLENDER" ]]; then
+    PREVIEW_DIR="$ASSETS_ROOT/preview"
+    FRAMES=1
+    RESOLUTION=1024
+    if [[ "$PREVIEW_MODE" == "gif" ]]; then
+        FRAMES=12
+        RESOLUTION=512
+    fi
+    info "Rendering preview ($PREVIEW_MODE mode, $FRAMES frame(s))..."
+    "$BLENDER" --background --python "$TURNTABLE_SCRIPT" -- \
+        "$CLEAN_PATH" "$PREVIEW_DIR" "$OUTPUT_NAME" "$PREVIEW_MODE" \
+        "$FRAMES" "$RESOLUTION" 32 "$META_PATH" 2>&1 \
+        | grep '^\[turntable\]' | { while IFS= read -r line; do printf "[pipeline] %s\n" "${line#\[turntable\] }" >&"$HUMAN_FD"; done; } || true
+    # Assemble GIF if mode=gif using pipeline-tools-env Pillow
+    if [[ "$PREVIEW_MODE" == "gif" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        "$PIPELINE_TOOLS_ENV/bin/python" - <<'PY' "$PREVIEW_DIR" "$OUTPUT_NAME" "$META_PATH" 2>/dev/null || true
+import json, os, sys, glob, subprocess
+preview_dir, name, meta_path = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest_path = os.path.join(preview_dir, f"{name}_preview_manifest.json")
+try:
+    m = json.load(open(manifest_path))
+except Exception:
+    sys.exit(0)
+frames = m.get("frame_paths") or []
+if not frames:
+    sys.exit(0)
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit(0)
+imgs = [Image.open(f).convert("RGBA") for f in frames]
+gif_path = os.path.join(preview_dir, f"{name}.gif")
+imgs[0].save(gif_path, save_all=True, append_images=imgs[1:], duration=125, loop=0, disposal=2)
+print(f"[pipeline] Preview: turntable GIF → {gif_path}")
+# Update meta.json with the gif path
+helper = os.path.expanduser(os.path.dirname(os.path.abspath(__file__)) + "/meta_helper.py")
+if not os.path.exists(helper):
+    helper = os.path.expanduser("~/3d-pipeline/workspace/meta_helper.py")
+try:
+    subprocess.run([sys.executable, helper, "merge", meta_path,
+                    "--section", "preview", "--data", json.dumps({"gif_path": gif_path})], check=False)
+except Exception:
+    pass
+PY
     fi
 fi
 
