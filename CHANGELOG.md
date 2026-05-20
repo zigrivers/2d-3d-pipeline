@@ -2,6 +2,23 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P2.2: CLIP variant ranking + per-model soft signal
+
+- `scripts/clip_score.py` — OpenCLIP ViT-L/14 scoring with two modes:
+    single: one image → similarity + per-model band
+    rank:   N images → sorted by score; primary written to meta.json
+  Per-model bands come from `scripts/clip_calibration.json`. Bands
+  are p50 / p25 / p10 / below_p10 — below_p10 is the "consider
+  re-generating" threshold (per codex v3 MMR feedback: don't use
+  a global absolute threshold).
+- `scripts/clip_calibration.json` — initial bands for z-image-turbo,
+  flux-schnell, flux-dev, qwen-image. Refresh quarterly.
+- `scripts/concept.sh` — when pipeline-tools-env is installed, runs
+  the score after generation. With `-n N`, ranks variants and
+  reports the order.
+- Result writes to a sidecar meta.json next to the PNG
+  (`<output>.png.meta.json`).
+
 ## 2026-05-20 — P2.1: generator auto-selection (skill text only)
 
 - `skill/SKILL.md` Flow 2 — adds a six-row recommendation matrix

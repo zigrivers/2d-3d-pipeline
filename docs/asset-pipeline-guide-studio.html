@@ -2214,6 +2214,27 @@ done_ &quot;Generated $COUNT image(s) in ${DURATION}s&quot;
 
 FIRST_OUTPUT=&quot;${OUTPUT_PATHS[0]}&quot;
 
+# v0.3 — CLIP variant ranking / per-model soft signal. No-op when
+# pipeline-tools-env or clip_score.py isn&#x27;t installed.
+PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+CLIP_SCRIPT=&quot;$SCRIPT_DIR/clip_score.py&quot;
+[[ -f &quot;$CLIP_SCRIPT&quot; ]] || CLIP_SCRIPT=&quot;$PIPELINE_ROOT/workspace/clip_score.py&quot;
+if [[ -f &quot;$CLIP_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    META_FOR_CONCEPT=&quot;${FIRST_OUTPUT}.meta.json&quot;
+    if [[ &quot;$COUNT&quot; -gt 1 ]]; then
+        # Rank variants
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$CLIP_SCRIPT&quot; \
+            --prompt &quot;$PROMPT&quot; --images &quot;${OUTPUT_PATHS[@]}&quot; \
+            --meta &quot;$META_FOR_CONCEPT&quot; --model-name &quot;$MODEL&quot; --rank 2&gt;&amp;1 \
+            | grep &#x27;^\[clip\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[clip\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    else
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$CLIP_SCRIPT&quot; \
+            --prompt &quot;$PROMPT&quot; --image &quot;$FIRST_OUTPUT&quot; \
+            --meta &quot;$META_FOR_CONCEPT&quot; --model-name &quot;$MODEL&quot; 2&gt;&amp;1 \
+            | grep &#x27;^\[clip\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[clip\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    fi
+fi
+
 if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     # Build the JSON outputs array via Python so paths with special chars
     # round-trip cleanly.
@@ -7755,6 +7776,237 @@ def main() -&gt; int:
 
 if __name__ == &quot;__main__&quot;:
     sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>clip_score.py</code>
+                <span class="script-summary-desc">v0.3 CLIP variant ranking + per-model soft signal</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/clip_score.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3 — CLIP variant ranking + per-model soft signal.
+
+Scores generated images against their prompts using OpenCLIP ViT-L/14
+(MIT; commercial_safe). Two modes:
+
+  single:  score one image against one prompt. Writes
+           clip.similarity + clip.model + clip.model_band +
+           clip.percentile_for_this_model into the meta.json.
+  rank:    score N images against the same prompt. Sorts by
+           similarity desc; writes a &#x27;rank&#x27; field per variant.
+
+Calibration per model lives in scripts/clip_calibration.json (per-
+model percentile bands). Below-p25 scores trigger the &quot;weak&quot; band;
+below-p10 triggers &quot;very weak&quot; — at which point the wrapper /
+skill should suggest re-generation.
+
+Usage:
+    clip_score.py --prompt TEXT --image PATH --meta PATH --model-name MFLUX [--json]
+    clip_score.py --prompt TEXT --images PATH1 PATH2 ... --meta PATH --rank
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+CALIBRATION = SCRIPT_DIR / &quot;clip_calibration.json&quot;
+
+
+def _imports():
+    try:
+        import open_clip  # type: ignore
+        import torch  # type: ignore
+        from PIL import Image  # type: ignore
+        return open_clip, torch, Image
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping. Activate pipeline-tools-env.&quot;,
+              file=sys.stderr)
+        return None, None, None
+
+
+def _band(model_name: str, score: float) -&gt; tuple[str, float]:
+    &quot;&quot;&quot;Return (band_label, approx_percentile) for `score` under `model_name`&#x27;s
+    per-model calibration. Falls back to a global 0.75 threshold if the
+    calibration file is missing.&quot;&quot;&quot;
+    try:
+        cal = json.loads(CALIBRATION.read_text())
+    except Exception:
+        return (&quot;below_p25&quot; if score &lt; 0.75 else &quot;p50_or_better&quot;), -1.0
+    bands = cal.get(model_name) or cal.get(&quot;default&quot;) or {&quot;p50&quot;: 0.80, &quot;p25&quot;: 0.75, &quot;p10&quot;: 0.70}
+    if score &gt;= bands[&quot;p50&quot;]:
+        return &quot;p50_or_better&quot;, 0.5
+    if score &gt;= bands[&quot;p25&quot;]:
+        return &quot;p25&quot;, 0.25
+    if score &gt;= bands[&quot;p10&quot;]:
+        return &quot;p10&quot;, 0.10
+    return &quot;below_p10&quot;, 0.05
+
+
+def _score(prompt: str, image_paths: list[Path], open_clip, torch, Image) -&gt; list[float]:
+    model_id = &quot;ViT-L-14&quot;
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        model_id, pretrained=&quot;openai&quot;
+    )
+    tokenizer = open_clip.get_tokenizer(model_id)
+    model.eval()
+
+    text_tokens = tokenizer([prompt])
+    with torch.no_grad():
+        text_feat = model.encode_text(text_tokens)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+
+        scores: list[float] = []
+        for p in image_paths:
+            img = Image.open(p).convert(&quot;RGB&quot;)
+            img_tensor = preprocess(img).unsqueeze(0)
+            img_feat = model.encode_image(img_tensor)
+            img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+            sim = float((img_feat @ text_feat.T).item())
+            scores.append(sim)
+    return scores
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--prompt&quot;, required=True)
+    p.add_argument(&quot;--image&quot;, help=&quot;Single image path (or use --images for rank mode)&quot;)
+    p.add_argument(&quot;--images&quot;, nargs=&quot;+&quot;, help=&quot;Multiple image paths for --rank&quot;)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--model-name&quot;, default=&quot;z-image-turbo&quot;,
+                   help=&quot;Generator name (used to pick the calibration band)&quot;)
+    p.add_argument(&quot;--rank&quot;, action=&quot;store_true&quot;, help=&quot;Rank multiple images&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    open_clip, torch, Image = _imports()
+    if open_clip is None:
+        # Graceful no-op
+        return 0
+
+    if args.rank:
+        if not args.images:
+            print(&quot;ERROR: --rank requires --images PATH1 PATH2 ...&quot;, file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(p)) for p in args.images]
+    else:
+        if not args.image:
+            print(&quot;ERROR: --image is required (or use --rank --images ...)&quot;, file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(args.image))]
+
+    t0 = time.time()
+    scores = _score(args.prompt, image_paths, open_clip, torch, Image)
+    duration = round(time.time() - t0, 2)
+
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    if args.rank:
+        # Sort indices by score desc
+        ranked = sorted(enumerate(scores), key=lambda kv: -kv[1])
+        result = []
+        for rank, (idx, score) in enumerate(ranked, start=1):
+            band, pct = _band(args.model_name, score)
+            result.append({
+                &quot;rank&quot;: rank,
+                &quot;image&quot;: str(image_paths[idx]),
+                &quot;similarity&quot;: round(score, 3),
+                &quot;model&quot;: &quot;ViT-L-14&quot;,
+                &quot;model_band&quot;: band,
+                &quot;percentile_for_this_model&quot;: pct,
+            })
+        # Merge primary result into meta.json
+        primary = result[0]
+        subprocess.run(
+            [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+             &quot;--section&quot;, &quot;clip&quot;,
+             &quot;--data&quot;, json.dumps({
+                 &quot;similarity&quot;: primary[&quot;similarity&quot;],
+                 &quot;model&quot;: primary[&quot;model&quot;],
+                 &quot;model_band&quot;: primary[&quot;model_band&quot;],
+                 &quot;percentile_for_this_model&quot;: primary[&quot;percentile_for_this_model&quot;],
+                 &quot;rank&quot;: primary[&quot;rank&quot;],
+                 &quot;duration_seconds&quot;: duration,
+             })],
+            check=False,
+        )
+        if args.json:
+            print(json.dumps({&quot;results&quot;: result}, indent=2, sort_keys=True))
+        else:
+            for r in result:
+                print(f&quot;[clip] #{r[&#x27;rank&#x27;]} {r[&#x27;similarity&#x27;]:.3f} ({r[&#x27;model_band&#x27;]}) {r[&#x27;image&#x27;]}&quot;)
+    else:
+        score = scores[0]
+        band, pct = _band(args.model_name, score)
+        payload = {
+            &quot;similarity&quot;: round(score, 3),
+            &quot;model&quot;: &quot;ViT-L-14&quot;,
+            &quot;model_band&quot;: band,
+            &quot;percentile_for_this_model&quot;: pct,
+            &quot;duration_seconds&quot;: duration,
+        }
+        subprocess.run(
+            [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+             &quot;--section&quot;, &quot;clip&quot;,
+             &quot;--data&quot;, json.dumps(payload)],
+            check=False,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f&quot;[clip] CLIP similarity: {score:.3f} ({band})&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>clip_calibration.json</code>
+                <span class="script-summary-desc">v0.3 per-model CLIP percentile calibration</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/clip_calibration.json << 'PIPELINE_EOF'
+{
+  &quot;_schema_note&quot;: &quot;Per-model percentile bands for CLIP ViT-L/14 similarity scores. Used by scripts/clip_score.py to translate raw scores into model-aware bands. Initial values approximated from 2026 research; refresh quarterly against actual generations.&quot;,
+  &quot;_units&quot;: &quot;raw cosine similarity from CLIP ViT-L/14&quot;,
+  &quot;_bands&quot;: &quot;p50 = median, p25 = lower quartile, p10 = bottom decile. A score below the p10 of its model strongly suggests re-generation.&quot;,
+  &quot;default&quot;: {
+    &quot;p50&quot;: 0.80,
+    &quot;p25&quot;: 0.75,
+    &quot;p10&quot;: 0.70
+  },
+  &quot;z-image-turbo&quot;: {
+    &quot;p50&quot;: 0.81,
+    &quot;p25&quot;: 0.76,
+    &quot;p10&quot;: 0.71
+  },
+  &quot;flux-schnell&quot;: {
+    &quot;p50&quot;: 0.78,
+    &quot;p25&quot;: 0.73,
+    &quot;p10&quot;: 0.68
+  },
+  &quot;flux-dev&quot;: {
+    &quot;p50&quot;: 0.83,
+    &quot;p25&quot;: 0.78,
+    &quot;p10&quot;: 0.73
+  },
+  &quot;qwen-image&quot;: {
+    &quot;p50&quot;: 0.79,
+    &quot;p25&quot;: 0.74,
+    &quot;p10&quot;: 0.69
+  }
+}
 PIPELINE_EOF</pre></div>
             </details>
 

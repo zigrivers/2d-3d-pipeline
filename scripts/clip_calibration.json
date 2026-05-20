@@ -1,0 +1,30 @@
+{
+  "_schema_note": "Per-model percentile bands for CLIP ViT-L/14 similarity scores. Used by scripts/clip_score.py to translate raw scores into model-aware bands. Initial values approximated from 2026 research; refresh quarterly against actual generations.",
+  "_units": "raw cosine similarity from CLIP ViT-L/14",
+  "_bands": "p50 = median, p25 = lower quartile, p10 = bottom decile. A score below the p10 of its model strongly suggests re-generation.",
+  "default": {
+    "p50": 0.80,
+    "p25": 0.75,
+    "p10": 0.70
+  },
+  "z-image-turbo": {
+    "p50": 0.81,
+    "p25": 0.76,
+    "p10": 0.71
+  },
+  "flux-schnell": {
+    "p50": 0.78,
+    "p25": 0.73,
+    "p10": 0.68
+  },
+  "flux-dev": {
+    "p50": 0.83,
+    "p25": 0.78,
+    "p10": 0.73
+  },
+  "qwen-image": {
+    "p50": 0.79,
+    "p25": 0.74,
+    "p10": 0.69
+  }
+}

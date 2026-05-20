@@ -266,6 +266,27 @@ done_ "Generated $COUNT image(s) in ${DURATION}s"
 
 FIRST_OUTPUT="${OUTPUT_PATHS[0]}"
 
+# v0.3 — CLIP variant ranking / per-model soft signal. No-op when
+# pipeline-tools-env or clip_score.py isn't installed.
+PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+CLIP_SCRIPT="$SCRIPT_DIR/clip_score.py"
+[[ -f "$CLIP_SCRIPT" ]] || CLIP_SCRIPT="$PIPELINE_ROOT/workspace/clip_score.py"
+if [[ -f "$CLIP_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+    META_FOR_CONCEPT="${FIRST_OUTPUT}.meta.json"
+    if [[ "$COUNT" -gt 1 ]]; then
+        # Rank variants
+        "$PIPELINE_TOOLS_ENV/bin/python" "$CLIP_SCRIPT" \
+            --prompt "$PROMPT" --images "${OUTPUT_PATHS[@]}" \
+            --meta "$META_FOR_CONCEPT" --model-name "$MODEL" --rank 2>&1 \
+            | grep '^\[clip\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[clip\] }" >&"$HUMAN_FD"; done; } || true
+    else
+        "$PIPELINE_TOOLS_ENV/bin/python" "$CLIP_SCRIPT" \
+            --prompt "$PROMPT" --image "$FIRST_OUTPUT" \
+            --meta "$META_FOR_CONCEPT" --model-name "$MODEL" 2>&1 \
+            | grep '^\[clip\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[clip\] }" >&"$HUMAN_FD"; done; } || true
+    fi
+fi
+
 if [[ "$JSON_MODE" == "1" ]]; then
     # Build the JSON outputs array via Python so paths with special chars
     # round-trip cleanly.

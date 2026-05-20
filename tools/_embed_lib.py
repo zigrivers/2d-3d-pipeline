@@ -56,6 +56,8 @@ EMBEDS: dict[str, str] = {
     "scripts/turntable_render.py":      "~/3d-pipeline/workspace/turntable_render.py",
     "scripts/game_asset_check.py":      "~/3d-pipeline/workspace/game_asset_check.py",
     "scripts/print_structural_check.py": "~/3d-pipeline/workspace/print_structural_check.py",
+    "scripts/clip_score.py":             "~/3d-pipeline/workspace/clip_score.py",
+    "scripts/clip_calibration.json":     "~/3d-pipeline/workspace/clip_calibration.json",
 }
 
 # Block pattern: opener line, body, closing PIPELINE_EOF on its own line.
