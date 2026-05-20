@@ -5334,6 +5334,577 @@ PIPELINE_EOF</pre></div>
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>pipeline_doctor.py</code>
+                <span class="script-summary-desc">v0.3 pipeline doctor + cache manager</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/pipeline_doctor.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Pipeline doctor + cache manager.
+
+Diagnoses the pipeline install (disk / venvs / models / wrappers) and
+optionally fixes what it can. Required before first asset work on a
+fresh install — the v0.3+ quality scripts download models on demand,
+and without this preflight a generation request can stall on a
+multi-GB download with no indication anything is happening.
+
+Usage:
+    pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}]
+                       [--include FEATURE,FEATURE,...]
+                       [--warm-cache]
+                       [--fix]
+                       [--json]
+
+Examples:
+    pipeline_doctor.py --check all
+    pipeline_doctor.py --warm-cache
+    pipeline_doctor.py --warm-cache --include hunyuan3d-paint
+    pipeline_doctor.py --check disk --json
+
+Feature sets (from scripts/model_manifest.json):
+    tier1            v0.3 quality features (rembg + CLIP)
+    hunyuan3d-paint  Item 7 — Hunyuan3D-Paint texture painting
+    comfyui          Item 11 — ComfyUI consistency mode
+    multiview        Item 12 — multi-view reconstruction (TBD)
+
+Default scope is tier1. --include adds opt-in feature sets.
+
+Disk threshold is dynamic: the doctor sums declared sizes for any
+component in scope that isn&#x27;t already installed, plus a 5 GB working
+margin. Hard floor: warns unconditionally if free space &lt; 20 GB.
+
+Pure stdlib (Python 3.10+). tqdm + requests are used opportunistically
+for nicer progress bars during --warm-cache; absent, falls back to
+urllib + no-op progress.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+PIPELINE_ROOT = Path(os.environ.get(&quot;PIPELINE_ROOT&quot;, os.path.expanduser(&quot;~/3d-pipeline&quot;)))
+SCRIPT_DIR = Path(__file__).resolve().parent
+MANIFEST_PATH = SCRIPT_DIR / &quot;model_manifest.json&quot;
+
+# Disk thresholds
+HARD_FLOOR_GB = 20.0
+WORKING_MARGIN_GB = 5.0
+
+
+def _expand(path_str: str) -&gt; Path:
+    return Path(os.path.expanduser(path_str))
+
+
+def _free_space_gb(path: Path) -&gt; float:
+    &quot;&quot;&quot;Free space (GB) on the volume containing `path`. Walks up to find it.&quot;&quot;&quot;
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        usage = shutil.disk_usage(p)
+        return usage.free / (1024**3)
+    except OSError:
+        return 0.0
+
+
+def _load_manifest() -&gt; dict:
+    if not MANIFEST_PATH.exists():
+        print(f&quot;ERROR: model_manifest.json not found at {MANIFEST_PATH}&quot;,
+              file=sys.stderr)
+        sys.exit(2)
+    return json.loads(MANIFEST_PATH.read_text())
+
+
+def _resolve_feature_sets(manifest: dict, include: list[str]) -&gt; set[str]:
+    sets = {&quot;tier1&quot;}
+    sets.update(include)
+    unknown = sets - set(manifest[&quot;feature_sets&quot;].keys())
+    if unknown:
+        print(f&quot;WARNING: unknown feature sets: {sorted(unknown)}&quot;,
+              file=sys.stderr)
+        sets -= unknown
+    return sets
+
+
+# ---------------- checks ----------------
+
+def check_disk(manifest: dict, scope: set[str]) -&gt; dict:
+    free_gb = _free_space_gb(PIPELINE_ROOT)
+    # Required = sum of (component sizes for items in scope that AREN&#x27;T installed)
+    required_gb = 0.0
+    missing_components: list[dict] = []
+    for model in manifest[&quot;models&quot;]:
+        if model[&quot;feature_set&quot;] not in scope:
+            continue
+        target = _expand(model[&quot;cache_dir&quot;]) / model[&quot;filename&quot;]
+        if not target.exists():
+            required_gb += model[&quot;size_mb&quot;] / 1024
+            missing_components.append({
+                &quot;id&quot;: model[&quot;id&quot;],
+                &quot;filename&quot;: model[&quot;filename&quot;],
+                &quot;size_mb&quot;: model[&quot;size_mb&quot;],
+            })
+    for venv in manifest[&quot;venvs&quot;]:
+        if venv[&quot;feature_set&quot;] not in scope:
+            continue
+        if not _expand(venv[&quot;path&quot;]).exists():
+            required_gb += venv[&quot;size_gb&quot;]
+            missing_components.append({
+                &quot;id&quot;: venv[&quot;name&quot;],
+                &quot;size_gb&quot;: venv[&quot;size_gb&quot;],
+            })
+    required_total = required_gb + WORKING_MARGIN_GB
+
+    status = &quot;ok&quot;
+    notes: list[str] = []
+    if free_gb &lt; HARD_FLOOR_GB:
+        status = &quot;warning&quot;
+        notes.append(f&quot;free space {free_gb:.1f} GB is below the {HARD_FLOOR_GB:.0f} GB hard-floor warning level&quot;)
+    if free_gb &lt; required_total:
+        status = &quot;critical&quot;
+        notes.append(f&quot;free space {free_gb:.1f} GB is below the {required_total:.1f} GB required for scope {sorted(scope)} (sum of uninstalled components + {WORKING_MARGIN_GB:.0f} GB margin)&quot;)
+    return {
+        &quot;status&quot;: status,
+        &quot;free_gb&quot;: round(free_gb, 1),
+        &quot;required_gb&quot;: round(required_total, 1),
+        &quot;missing_components&quot;: missing_components,
+        &quot;notes&quot;: notes,
+    }
+
+
+def check_venvs(manifest: dict, scope: set[str]) -&gt; dict:
+    rows: list[dict] = []
+    for venv in manifest[&quot;venvs&quot;]:
+        in_scope = venv[&quot;feature_set&quot;] in scope
+        exists = _expand(venv[&quot;path&quot;]).exists()
+        status = &quot;ok&quot; if exists else (&quot;missing&quot; if venv[&quot;required&quot;] or in_scope else &quot;missing_optional&quot;)
+        rows.append({
+            &quot;name&quot;: venv[&quot;name&quot;],
+            &quot;path&quot;: venv[&quot;path&quot;],
+            &quot;feature_set&quot;: venv[&quot;feature_set&quot;],
+            &quot;exists&quot;: exists,
+            &quot;in_scope&quot;: in_scope,
+            &quot;required&quot;: venv[&quot;required&quot;],
+            &quot;status&quot;: status,
+            &quot;purpose&quot;: venv[&quot;purpose&quot;],
+        })
+    overall = &quot;ok&quot;
+    for r in rows:
+        if r[&quot;in_scope&quot;] and not r[&quot;exists&quot;]:
+            overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;venvs&quot;: rows}
+
+
+def check_models(manifest: dict, scope: set[str]) -&gt; dict:
+    rows: list[dict] = []
+    for model in manifest[&quot;models&quot;]:
+        in_scope = model[&quot;feature_set&quot;] in scope
+        target = _expand(model[&quot;cache_dir&quot;]) / model[&quot;filename&quot;]
+        exists = target.exists()
+        size_mb = target.stat().st_size / (1024**2) if exists else None
+        # Light &quot;partial&quot; heuristic: if the file is way smaller than declared, flag it
+        is_partial = False
+        if exists and size_mb is not None and size_mb &lt; model[&quot;size_mb&quot;] * 0.5:
+            is_partial = True
+        status = &quot;ok&quot;
+        if not exists:
+            status = &quot;missing&quot; if in_scope else &quot;missing_optional&quot;
+        elif is_partial:
+            status = &quot;partial&quot;
+        rows.append({
+            &quot;id&quot;: model[&quot;id&quot;],
+            &quot;filename&quot;: model[&quot;filename&quot;],
+            &quot;feature_set&quot;: model[&quot;feature_set&quot;],
+            &quot;in_scope&quot;: in_scope,
+            &quot;expected_size_mb&quot;: model[&quot;size_mb&quot;],
+            &quot;actual_size_mb&quot;: round(size_mb, 1) if size_mb else None,
+            &quot;license_bucket&quot;: model[&quot;license_bucket&quot;],
+            &quot;status&quot;: status,
+        })
+    overall = &quot;ok&quot;
+    for r in rows:
+        if r[&quot;in_scope&quot;] and r[&quot;status&quot;] in (&quot;missing&quot;, &quot;partial&quot;):
+            overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;models&quot;: rows}
+
+
+def check_wrappers(manifest: dict) -&gt; dict:
+    workspace = PIPELINE_ROOT / &quot;workspace&quot;
+    rows: list[dict] = []
+    overall = &quot;ok&quot;
+    for wrapper in manifest[&quot;wrappers&quot;]:
+        path = workspace / wrapper
+        if not path.exists():
+            rows.append({&quot;name&quot;: wrapper, &quot;status&quot;: &quot;missing&quot;, &quot;exit_code&quot;: None})
+            overall = &quot;warning&quot;
+            continue
+        try:
+            r = subprocess.run(
+                [str(path), &quot;--help&quot;],
+                capture_output=True, text=True, timeout=10,
+            )
+            rows.append({
+                &quot;name&quot;: wrapper,
+                &quot;status&quot;: &quot;ok&quot; if r.returncode == 0 else &quot;broken&quot;,
+                &quot;exit_code&quot;: r.returncode,
+            })
+            if r.returncode != 0:
+                overall = &quot;warning&quot;
+        except (subprocess.TimeoutExpired, OSError) as e:
+            rows.append({&quot;name&quot;: wrapper, &quot;status&quot;: &quot;broken&quot;, &quot;error&quot;: str(e)})
+            overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;wrappers&quot;: rows}
+
+
+# ---------------- warm-cache ----------------
+
+def _have_tqdm():
+    try:
+        import tqdm  # type: ignore # noqa
+        return True
+    except ImportError:
+        return False
+
+
+def _download(url: str, dest: Path) -&gt; None:
+    &quot;&quot;&quot;Stream a URL to disk with stdlib. Used for models that ship a direct URL.&quot;&quot;&quot;
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + &quot;.part&quot;)
+    with urllib.request.urlopen(url) as resp, open(tmp, &quot;wb&quot;) as out:
+        shutil.copyfileobj(resp, out)
+    tmp.rename(dest)
+
+
+def warm_cache(manifest: dict, scope: set[str]) -&gt; dict:
+    &quot;&quot;&quot;Pre-download every model in scope that has a direct download URL.&quot;&quot;&quot;
+    rows: list[dict] = []
+    for model in manifest[&quot;models&quot;]:
+        if model[&quot;feature_set&quot;] not in scope:
+            continue
+        target = _expand(model[&quot;cache_dir&quot;]) / model[&quot;filename&quot;]
+        if target.exists():
+            rows.append({&quot;id&quot;: model[&quot;id&quot;], &quot;status&quot;: &quot;already_present&quot;})
+            continue
+        if not model[&quot;download_url&quot;]:
+            rows.append({
+                &quot;id&quot;: model[&quot;id&quot;],
+                &quot;status&quot;: &quot;skipped&quot;,
+                &quot;reason&quot;: f&quot;no direct URL; managed by {model[&#x27;managed_by&#x27;]} on first use&quot;,
+            })
+            continue
+        try:
+            print(f&quot;Downloading {model[&#x27;id&#x27;]} ({model[&#x27;size_mb&#x27;]} MB)…&quot;, file=sys.stderr)
+            _download(model[&quot;download_url&quot;], target)
+            rows.append({&quot;id&quot;: model[&quot;id&quot;], &quot;status&quot;: &quot;downloaded&quot;})
+        except Exception as e:  # network errors, permissions, etc.
+            rows.append({&quot;id&quot;: model[&quot;id&quot;], &quot;status&quot;: &quot;failed&quot;, &quot;error&quot;: str(e)})
+            if target.with_suffix(target.suffix + &quot;.part&quot;).exists():
+                target.with_suffix(target.suffix + &quot;.part&quot;).unlink()
+    return {&quot;results&quot;: rows}
+
+
+# ---------------- reporting ----------------
+
+def _emoji(status: str) -&gt; str:
+    return {
+        &quot;ok&quot;: &quot;✓&quot;,
+        &quot;warning&quot;: &quot;⚠&quot;,
+        &quot;critical&quot;: &quot;✗&quot;,
+        &quot;missing&quot;: &quot;⚠&quot;,
+        &quot;missing_optional&quot;: &quot;·&quot;,
+        &quot;partial&quot;: &quot;⚠&quot;,
+        &quot;broken&quot;: &quot;✗&quot;,
+        &quot;already_present&quot;: &quot;·&quot;,
+        &quot;downloaded&quot;: &quot;✓&quot;,
+        &quot;skipped&quot;: &quot;·&quot;,
+        &quot;failed&quot;: &quot;✗&quot;,
+    }.get(status, &quot;·&quot;)
+
+
+def _print_human(report: dict, scope: set[str]) -&gt; None:
+    print(&quot;Pipeline status check&quot;)
+    print(&quot;─&quot; * 21)
+    print()
+    if &quot;disk&quot; in report:
+        d = report[&quot;disk&quot;]
+        print(f&quot;Disk:           {_emoji(d[&#x27;status&#x27;])} {d[&#x27;free_gb&#x27;]} GB free&quot;)
+        print(f&quot;                Required for scope {sorted(scope)}: {d[&#x27;required_gb&#x27;]} GB&quot;)
+        for note in d[&quot;notes&quot;]:
+            print(f&quot;                ⚠ {note}&quot;)
+        if d[&quot;missing_components&quot;]:
+            for c in d[&quot;missing_components&quot;][:5]:
+                size = c.get(&#x27;size_mb&#x27;) or (c.get(&#x27;size_gb&#x27;, 0) * 1024)
+                print(f&quot;                  - missing: {c[&#x27;id&#x27;]} (~{size:.0f} MB)&quot;)
+    if &quot;venvs&quot; in report:
+        v = report[&quot;venvs&quot;]
+        print(f&quot;Venvs:          {_emoji(v[&#x27;status&#x27;])}&quot;)
+        for row in v[&quot;venvs&quot;]:
+            mark = _emoji(row[&quot;status&quot;])
+            scope_tag = &quot;&quot; if row[&quot;in_scope&quot;] else &quot;  (out of scope)&quot;
+            print(f&quot;                {mark} {row[&#x27;name&#x27;]}{scope_tag} — {row[&#x27;purpose&#x27;]}&quot;)
+    if &quot;models&quot; in report:
+        m = report[&quot;models&quot;]
+        print(f&quot;Models:         {_emoji(m[&#x27;status&#x27;])}&quot;)
+        for row in m[&quot;models&quot;]:
+            mark = _emoji(row[&quot;status&quot;])
+            tag = f&quot;[{row[&#x27;license_bucket&#x27;]}]&quot;
+            scope_tag = &quot;&quot; if row[&quot;in_scope&quot;] else &quot;  (out of scope)&quot;
+            print(f&quot;                {mark} {row[&#x27;id&#x27;]} {tag}{scope_tag}&quot;)
+    if &quot;wrappers&quot; in report:
+        w = report[&quot;wrappers&quot;]
+        print(f&quot;Wrappers:       {_emoji(w[&#x27;status&#x27;])}&quot;)
+        for row in w[&quot;wrappers&quot;]:
+            print(f&quot;                {_emoji(row[&#x27;status&#x27;])} {row[&#x27;name&#x27;]}&quot;)
+    if &quot;warm_cache&quot; in report:
+        c = report[&quot;warm_cache&quot;]
+        print(&quot;Warm-cache results:&quot;)
+        for row in c[&quot;results&quot;]:
+            extra = &quot;&quot;
+            if &quot;reason&quot; in row:
+                extra = f&quot; — {row[&#x27;reason&#x27;]}&quot;
+            elif &quot;error&quot; in row:
+                extra = f&quot; — {row[&#x27;error&#x27;]}&quot;
+            print(f&quot;  {_emoji(row[&#x27;status&#x27;])} {row[&#x27;id&#x27;]}: {row[&#x27;status&#x27;]}{extra}&quot;)
+    print()
+
+
+def main() -&gt; int:
+    parser = argparse.ArgumentParser(description=&quot;Pipeline doctor + cache manager&quot;)
+    parser.add_argument(&quot;--check&quot;,
+                        choices=[&quot;disk&quot;, &quot;models&quot;, &quot;venvs&quot;, &quot;wrappers&quot;, &quot;all&quot;],
+                        default=&quot;all&quot;,
+                        help=&quot;Which subset to run (default: all)&quot;)
+    parser.add_argument(&quot;--include&quot;, default=&quot;&quot;,
+                        help=&quot;Comma-separated opt-in feature sets (e.g. hunyuan3d-paint,comfyui)&quot;)
+    parser.add_argument(&quot;--warm-cache&quot;, action=&quot;store_true&quot;,
+                        help=&quot;Pre-download models with direct URLs for the chosen scope&quot;)
+    parser.add_argument(&quot;--fix&quot;, action=&quot;store_true&quot;,
+                        help=&quot;(Future) attempt to install missing components. Currently reports only.&quot;)
+    parser.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
+                        help=&quot;Emit structured JSON; suppresses human-readable output&quot;)
+    args = parser.parse_args()
+
+    manifest = _load_manifest()
+    include = [s.strip() for s in args.include.split(&quot;,&quot;) if s.strip()]
+    scope = _resolve_feature_sets(manifest, include)
+
+    report: dict = {&quot;scope&quot;: sorted(scope)}
+    if args.check in (&quot;disk&quot;, &quot;all&quot;):
+        report[&quot;disk&quot;] = check_disk(manifest, scope)
+    if args.check in (&quot;venvs&quot;, &quot;all&quot;):
+        report[&quot;venvs&quot;] = check_venvs(manifest, scope)
+    if args.check in (&quot;models&quot;, &quot;all&quot;):
+        report[&quot;models&quot;] = check_models(manifest, scope)
+    if args.check in (&quot;wrappers&quot;, &quot;all&quot;):
+        report[&quot;wrappers&quot;] = check_wrappers(manifest)
+    if args.warm_cache:
+        report[&quot;warm_cache&quot;] = warm_cache(manifest, scope)
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_human(report, scope)
+        if args.fix:
+            print(&quot;--fix is a future feature; currently report-only.\n&quot;, file=sys.stderr)
+
+    # Exit code reflects worst severity across checks
+    worst = &quot;ok&quot;
+    for k in (&quot;disk&quot;, &quot;venvs&quot;, &quot;models&quot;, &quot;wrappers&quot;):
+        if k in report:
+            s = report[k][&quot;status&quot;]
+            if s == &quot;critical&quot;:
+                worst = &quot;critical&quot;
+            elif s == &quot;warning&quot; and worst != &quot;critical&quot;:
+                worst = &quot;warning&quot;
+    return {&quot;ok&quot;: 0, &quot;warning&quot;: 0, &quot;critical&quot;: 1}[worst]
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>model_manifest.json</code>
+                <span class="script-summary-desc">v0.3 model catalog used by pipeline_doctor</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/model_manifest.json << 'PIPELINE_EOF'
+{
+  &quot;schema_version&quot;: 1,
+  &quot;description&quot;: &quot;Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping.&quot;,
+  &quot;feature_sets&quot;: {
+    &quot;tier1&quot;: {
+      &quot;description&quot;: &quot;Default v0.3 quality features (always recommended)&quot;,
+      &quot;components&quot;: [&quot;u2net&quot;, &quot;clip-vit-l-14&quot;]
+    },
+    &quot;hunyuan3d-paint&quot;: {
+      &quot;description&quot;: &quot;Item 7 — Hunyuan3D-Paint texture painting (commercial_threshold)&quot;,
+      &quot;components&quot;: [&quot;hunyuan3d-paint&quot;]
+    },
+    &quot;comfyui&quot;: {
+      &quot;description&quot;: &quot;Item 11 — ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)&quot;,
+      &quot;components&quot;: [&quot;sdxl-base&quot;, &quot;ip-adapter-faceid-sdxl&quot;, &quot;controlnet-openpose&quot;, &quot;controlnet-canny&quot;]
+    },
+    &quot;multiview&quot;: {
+      &quot;description&quot;: &quot;Item 12 — multi-view reconstruction backend (specific model TBD post-research)&quot;,
+      &quot;components&quot;: []
+    }
+  },
+  &quot;venvs&quot;: [
+    {
+      &quot;name&quot;: &quot;mflux-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/mflux-env&quot;,
+      &quot;required&quot;: true,
+      &quot;feature_set&quot;: &quot;tier1&quot;,
+      &quot;size_gb&quot;: 8,
+      &quot;purpose&quot;: &quot;2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)&quot;
+    },
+    {
+      &quot;name&quot;: &quot;pipeline-tools-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/pipeline-tools-env&quot;,
+      &quot;required&quot;: true,
+      &quot;feature_set&quot;: &quot;tier1&quot;,
+      &quot;size_gb&quot;: 6,
+      &quot;purpose&quot;: &quot;Quality-check scripts (trimesh, rembg, open_clip)&quot;,
+      &quot;import_check&quot;: &quot;trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests&quot;
+    },
+    {
+      &quot;name&quot;: &quot;hunyuan3d-paint-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/hunyuan3d-paint-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;hunyuan3d-paint&quot;,
+      &quot;size_gb&quot;: 6,
+      &quot;purpose&quot;: &quot;Hunyuan3D-Paint texture painting&quot;
+    },
+    {
+      &quot;name&quot;: &quot;comfyui-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/comfyui-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;size_gb&quot;: 10,
+      &quot;purpose&quot;: &quot;ComfyUI consistency mode (Item 11)&quot;
+    },
+    {
+      &quot;name&quot;: &quot;multiview-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/multiview-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;multiview&quot;,
+      &quot;size_gb&quot;: 6,
+      &quot;purpose&quot;: &quot;Multi-view reconstruction (Item 12)&quot;
+    }
+  ],
+  &quot;models&quot;: [
+    {
+      &quot;id&quot;: &quot;u2net&quot;,
+      &quot;filename&quot;: &quot;u2net.onnx&quot;,
+      &quot;feature_set&quot;: &quot;tier1&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 170,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/rembg&quot;,
+      &quot;env_var&quot;: &quot;U2NET_HOME&quot;,
+      &quot;download_url&quot;: &quot;https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;rembg&quot;,
+      &quot;notes&quot;: &quot;Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;clip-vit-l-14&quot;,
+      &quot;filename&quot;: &quot;ViT-L-14.pt&quot;,
+      &quot;feature_set&quot;: &quot;tier1&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 890,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/clip&quot;,
+      &quot;env_var&quot;: &quot;OPEN_CLIP_CACHE_DIR&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;open_clip&quot;,
+      &quot;notes&quot;: &quot;Downloaded automatically by open_clip on first use; the env var routes the cache.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;hunyuan3d-paint&quot;,
+      &quot;filename&quot;: &quot;hunyuan3d-paint.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;hunyuan3d-paint&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_threshold&quot;,
+      &quot;size_mb&quot;: 5000,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/hunyuan3d-paint&quot;,
+      &quot;env_var&quot;: &quot;HUNYUAN3D_HOME&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;hunyuan3d-paint&quot;,
+      &quot;notes&quot;: &quot;Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;sdxl-base&quot;,
+      &quot;filename&quot;: &quot;sd_xl_base_1.0.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_threshold&quot;,
+      &quot;size_mb&quot;: 7000,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/sdxl&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;CreativeML Open RAIL-M license.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;ip-adapter-faceid-sdxl&quot;,
+      &quot;filename&quot;: &quot;ip-adapter-faceid_sdxl.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 700,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/ip-adapter&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;controlnet-openpose&quot;,
+      &quot;filename&quot;: &quot;controlnet-openpose-sdxl.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 1300,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/controlnet&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;controlnet-canny&quot;,
+      &quot;filename&quot;: &quot;controlnet-canny-sdxl.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 700,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/controlnet&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+    }
+  ],
+  &quot;wrappers&quot;: [
+    &quot;concept.sh&quot;,
+    &quot;generate.sh&quot;,
+    &quot;print.sh&quot;,
+    &quot;texture.sh&quot;,
+    &quot;benchmark.sh&quot;
+  ]
+}
+PIPELINE_EOF</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
@@ -5425,6 +5996,44 @@ Drives the user&#x27;s local asset generation pipeline. The user runs this on
 two hardware tiers, both Apple Silicon. The wrappers and this skill are
 shared; the only thing that differs between tiers is the `.config` file
 and which experimental lanes are reasonable to recommend.
+
+## Pre-flight check (v0.3+)
+
+On a fresh install, before any asset work, ask the user to run:
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --check all
+```
+
+This reports disk space, expected venvs, expected model caches, and
+that each wrapper&#x27;s `--help` works. On a partial install, it lists
+what&#x27;s missing. To pre-download the v0.3 quality-feature models
+(~1 GB total: rembg&#x27;s u2net + OpenCLIP ViT-L/14):
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache
+```
+
+Opt-in heavy components (Hunyuan3D-Paint, ComfyUI stack, multi-view)
+are scoped behind `--include`:
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache --include hunyuan3d-paint
+~/3d-pipeline/workspace/pipeline_doctor.py --check all --include comfyui --json
+```
+
+Mention pipeline_doctor proactively when:
+
+- A user reports a generation that&#x27;s been stuck for minutes (likely a
+  first-run model download in progress with no progress indicator).
+- A wrapper fails with &quot;model not found&quot; or similar.
+- You&#x27;re walking through a v0.3 feature install and the related venv
+  or model isn&#x27;t present yet.
+
+The tool exits 0 on `ok` or `warning`; exits 1 only on `critical`
+(out of disk for the chosen scope). Safe to invoke in CI / scripts.
+
+---
 
 ## Hardware tiers
 

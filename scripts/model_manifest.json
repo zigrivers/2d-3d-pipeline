@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping.",
+  "feature_sets": {
+    "tier1": {
+      "description": "Default v0.3 quality features (always recommended)",
+      "components": ["u2net", "clip-vit-l-14"]
+    },
+    "hunyuan3d-paint": {
+      "description": "Item 7 — Hunyuan3D-Paint texture painting (commercial_threshold)",
+      "components": ["hunyuan3d-paint"]
+    },
+    "comfyui": {
+      "description": "Item 11 — ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)",
+      "components": ["sdxl-base", "ip-adapter-faceid-sdxl", "controlnet-openpose", "controlnet-canny"]
+    },
+    "multiview": {
+      "description": "Item 12 — multi-view reconstruction backend (specific model TBD post-research)",
+      "components": []
+    }
+  },
+  "venvs": [
+    {
+      "name": "mflux-env",
+      "path": "~/3d-pipeline/mflux-env",
+      "required": true,
+      "feature_set": "tier1",
+      "size_gb": 8,
+      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)"
+    },
+    {
+      "name": "pipeline-tools-env",
+      "path": "~/3d-pipeline/pipeline-tools-env",
+      "required": true,
+      "feature_set": "tier1",
+      "size_gb": 6,
+      "purpose": "Quality-check scripts (trimesh, rembg, open_clip)",
+      "import_check": "trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests"
+    },
+    {
+      "name": "hunyuan3d-paint-env",
+      "path": "~/3d-pipeline/hunyuan3d-paint-env",
+      "required": false,
+      "feature_set": "hunyuan3d-paint",
+      "size_gb": 6,
+      "purpose": "Hunyuan3D-Paint texture painting"
+    },
+    {
+      "name": "comfyui-env",
+      "path": "~/3d-pipeline/comfyui-env",
+      "required": false,
+      "feature_set": "comfyui",
+      "size_gb": 10,
+      "purpose": "ComfyUI consistency mode (Item 11)"
+    },
+    {
+      "name": "multiview-env",
+      "path": "~/3d-pipeline/multiview-env",
+      "required": false,
+      "feature_set": "multiview",
+      "size_gb": 6,
+      "purpose": "Multi-view reconstruction (Item 12)"
+    }
+  ],
+  "models": [
+    {
+      "id": "u2net",
+      "filename": "u2net.onnx",
+      "feature_set": "tier1",
+      "license_bucket": "commercial_safe",
+      "size_mb": 170,
+      "cache_dir": "~/3d-pipeline/models/rembg",
+      "env_var": "U2NET_HOME",
+      "download_url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+      "sha256": "",
+      "managed_by": "rembg",
+      "notes": "Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache."
+    },
+    {
+      "id": "clip-vit-l-14",
+      "filename": "ViT-L-14.pt",
+      "feature_set": "tier1",
+      "license_bucket": "commercial_safe",
+      "size_mb": 890,
+      "cache_dir": "~/3d-pipeline/models/clip",
+      "env_var": "OPEN_CLIP_CACHE_DIR",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "open_clip",
+      "notes": "Downloaded automatically by open_clip on first use; the env var routes the cache."
+    },
+    {
+      "id": "hunyuan3d-paint",
+      "filename": "hunyuan3d-paint.safetensors",
+      "feature_set": "hunyuan3d-paint",
+      "license_bucket": "commercial_threshold",
+      "size_mb": 5000,
+      "cache_dir": "~/3d-pipeline/models/hunyuan3d-paint",
+      "env_var": "HUNYUAN3D_HOME",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "hunyuan3d-paint",
+      "notes": "Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md."
+    },
+    {
+      "id": "sdxl-base",
+      "filename": "sd_xl_base_1.0.safetensors",
+      "feature_set": "comfyui",
+      "license_bucket": "commercial_threshold",
+      "size_mb": 7000,
+      "cache_dir": "~/3d-pipeline/models/sdxl",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "comfyui",
+      "notes": "CreativeML Open RAIL-M license."
+    },
+    {
+      "id": "ip-adapter-faceid-sdxl",
+      "filename": "ip-adapter-faceid_sdxl.safetensors",
+      "feature_set": "comfyui",
+      "license_bucket": "commercial_safe",
+      "size_mb": 700,
+      "cache_dir": "~/3d-pipeline/models/ip-adapter",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "comfyui",
+      "notes": "Apache 2.0."
+    },
+    {
+      "id": "controlnet-openpose",
+      "filename": "controlnet-openpose-sdxl.safetensors",
+      "feature_set": "comfyui",
+      "license_bucket": "commercial_safe",
+      "size_mb": 1300,
+      "cache_dir": "~/3d-pipeline/models/controlnet",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "comfyui",
+      "notes": "Apache 2.0."
+    },
+    {
+      "id": "controlnet-canny",
+      "filename": "controlnet-canny-sdxl.safetensors",
+      "feature_set": "comfyui",
+      "license_bucket": "commercial_safe",
+      "size_mb": 700,
+      "cache_dir": "~/3d-pipeline/models/controlnet",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "comfyui",
+      "notes": "Apache 2.0."
+    }
+  ],
+  "wrappers": [
+    "concept.sh",
+    "generate.sh",
+    "print.sh",
+    "texture.sh",
+    "benchmark.sh"
+  ]
+}

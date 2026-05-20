@@ -2,6 +2,27 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — P1.1: pipeline_doctor.py + model_manifest.json (Tier 1)
+
+First Tier 1 PR. Lands the install-and-cache doctor that every later
+v0.3 PR depends on for first-run UX.
+
+- `scripts/pipeline_doctor.py` — single CLI for disk / venv / model /
+  wrapper preflight + opt-in `--warm-cache`. Pure stdlib (Python 3.10+);
+  `tqdm` / `requests` are used opportunistically when available.
+  Dynamic disk threshold: sums uninstalled component sizes in scope +
+  5 GB margin. Hard floor 20 GB. Default scope is `tier1`; `--include`
+  adds opt-in feature sets (hunyuan3d-paint, comfyui, multiview).
+- `scripts/model_manifest.json` — catalog of expected venvs + models
+  per feature set, with declared sizes, license buckets, env-var routing
+  for caches. Source of truth for the doctor.
+- `skill/SKILL.md` — new "Pre-flight check (v0.3+)" section near the
+  top. Tells Claude when to recommend `pipeline_doctor.py` (stuck
+  generations, "model not found", v0.3 feature installs).
+
+Embeds: pipeline_doctor.py + model_manifest.json added to both setup
+guides; SKILL.md embed re-generated. `make verify` clean (20 blocks).
+
 ## 2026-05-20 — P0.3: update_manifest.py --meta-json flag
 
 Third foundation PR. Closes the loop from per-asset meta.json (P0.2)

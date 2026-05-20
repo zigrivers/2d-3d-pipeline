@@ -10,6 +10,44 @@ two hardware tiers, both Apple Silicon. The wrappers and this skill are
 shared; the only thing that differs between tiers is the `.config` file
 and which experimental lanes are reasonable to recommend.
 
+## Pre-flight check (v0.3+)
+
+On a fresh install, before any asset work, ask the user to run:
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --check all
+```
+
+This reports disk space, expected venvs, expected model caches, and
+that each wrapper's `--help` works. On a partial install, it lists
+what's missing. To pre-download the v0.3 quality-feature models
+(~1 GB total: rembg's u2net + OpenCLIP ViT-L/14):
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache
+```
+
+Opt-in heavy components (Hunyuan3D-Paint, ComfyUI stack, multi-view)
+are scoped behind `--include`:
+
+```bash
+~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache --include hunyuan3d-paint
+~/3d-pipeline/workspace/pipeline_doctor.py --check all --include comfyui --json
+```
+
+Mention pipeline_doctor proactively when:
+
+- A user reports a generation that's been stuck for minutes (likely a
+  first-run model download in progress with no progress indicator).
+- A wrapper fails with "model not found" or similar.
+- You're walking through a v0.3 feature install and the related venv
+  or model isn't present yet.
+
+The tool exits 0 on `ok` or `warning`; exits 1 only on `critical`
+(out of disk for the chosen scope). Safe to invoke in CI / scripts.
+
+---
+
 ## Hardware tiers
 
 | Tier         | Hardware                                | Defaults / what to recommend                     |
