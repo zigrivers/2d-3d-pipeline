@@ -8,7 +8,7 @@ and without this preflight a generation request can stall on a
 multi-GB download with no indication anything is happening.
 
 Usage:
-    pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}]
+    pipeline_doctor.py [--check {disk,models,venvs,wrappers,structure,all}]
                        [--include FEATURE,FEATURE,...]
                        [--warm-cache]
                        [--fix]
@@ -221,6 +221,32 @@ def check_wrappers(manifest: dict) -> dict:
     return {"status": overall, "wrappers": rows}
 
 
+# ---------------- structure check ----------------
+
+def check_structure(manifest: dict) -> dict:
+    """Validate catalog consistency without requiring any models/venvs installed.
+
+    Each rule appends a check dict to the returned list and elevates
+    status to 'critical' on any failure. Rules are added incrementally
+    (Tasks 3-6); this skeleton runs clean on a valid manifest.
+    """
+    checks: list[dict] = []
+    status = "ok"
+
+    def _fail(name: str, details: str) -> None:
+        nonlocal status
+        status = "critical"
+        checks.append({"name": name, "status": "critical", "details": details})
+
+    def _ok(name: str, details: str = "") -> None:
+        checks.append({"name": name, "status": "ok", "details": details})
+
+    # Rules populated in Tasks 3-6; skeleton returns ok with no checks.
+    # Inner key "structure" follows the existing file pattern:
+    # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
+    return {"status": status, "structure": checks}
+
+
 # ---------------- warm-cache ----------------
 
 def _have_tqdm():
@@ -320,6 +346,12 @@ def _print_human(report: dict, scope: set[str]) -> None:
         print(f"Wrappers:       {_emoji(w['status'])}")
         for row in w["wrappers"]:
             print(f"                {_emoji(row['status'])} {row['name']}")
+    if "structure" in report:
+        s = report["structure"]
+        print(f"Structure:      {_emoji(s['status'])}")
+        for row in s["structure"]:
+            detail = f": {row['details']}" if row['details'] else ""
+            print(f"                {_emoji(row['status'])} {row['name']}{detail}")
     if "warm_cache" in report:
         c = report["warm_cache"]
         print("Warm-cache results:")
@@ -336,7 +368,7 @@ def _print_human(report: dict, scope: set[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pipeline doctor + cache manager")
     parser.add_argument("--check",
-                        choices=["disk", "models", "venvs", "wrappers", "all"],
+                        choices=["disk", "models", "venvs", "wrappers", "structure", "all"],
                         default="all",
                         help="Which subset to run (default: all)")
     parser.add_argument("--include", default="",
@@ -362,6 +394,8 @@ def main() -> int:
         report["models"] = check_models(manifest, scope)
     if args.check in ("wrappers", "all"):
         report["wrappers"] = check_wrappers(manifest)
+    if args.check in ("structure", "all"):
+        report["structure"] = check_structure(manifest)
     if args.warm_cache:
         report["warm_cache"] = warm_cache(manifest, scope)
 
@@ -374,7 +408,7 @@ def main() -> int:
 
     # Exit code reflects worst severity across checks
     worst = "ok"
-    for k in ("disk", "venvs", "models", "wrappers"):
+    for k in ("disk", "venvs", "models", "wrappers", "structure"):
         if k in report:
             s = report[k]["status"]
             if s == "critical":
