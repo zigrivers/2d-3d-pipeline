@@ -8,7 +8,8 @@ and without this preflight a generation request can stall on a
 multi-GB download with no indication anything is happening.
 
 Usage:
-    pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}]
+    pipeline_doctor.py [--check {disk,models,venvs,wrappers,structure,all}]
+                       (note: "structure" requires a repo checkout; excluded from "all")
                        [--include FEATURE,FEATURE,...]
                        [--warm-cache]
                        [--fix]
@@ -49,6 +50,7 @@ from pathlib import Path
 
 PIPELINE_ROOT = Path(os.environ.get("PIPELINE_ROOT", os.path.expanduser("~/3d-pipeline")))
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 MANIFEST_PATH = SCRIPT_DIR / "model_manifest.json"
 
 # Disk thresholds
@@ -221,6 +223,127 @@ def check_wrappers(manifest: dict) -> dict:
     return {"status": overall, "wrappers": rows}
 
 
+# ---------------- structure check ----------------
+
+def check_structure(manifest: dict) -> dict:
+    """Validate catalog consistency without requiring any models/venvs installed.
+
+    Each rule appends a check dict to the returned list and elevates
+    status to 'critical' on any failure. Rules are added incrementally
+    (Tasks 3-6); this skeleton runs clean on a valid manifest.
+    """
+    checks: list[dict] = []
+    status = "ok"
+
+    def _fail(name: str, details: str) -> None:
+        nonlocal status
+        status = "critical"
+        checks.append({"name": name, "status": "critical", "details": details})
+
+    def _ok(name: str, details: str = "") -> None:
+        checks.append({"name": name, "status": "ok", "details": details})
+
+    # Rule 1 — every EMBEDS source path exists on disk.
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from tools._embed_lib import EMBEDS  # type: ignore
+        bad_paths, missing = [], []
+        for src in EMBEDS:
+            resolved = (REPO_ROOT / src).resolve()
+            if not resolved.is_relative_to(REPO_ROOT.resolve()):
+                bad_paths.append(src)
+            elif not resolved.exists():
+                missing.append(src)
+        for src in bad_paths:
+            _fail("embeds-file-exists", f"{src} resolves outside repo root")
+        for src in missing:
+            _fail("embeds-file-exists", f"{src} missing from repo")
+        if not bad_paths and not missing:
+            _ok("embeds-file-exists", f"all {len(EMBEDS)} EMBEDS source files present")
+    except ImportError:
+        _fail("embeds-file-exists", "could not import tools._embed_lib — EMBEDS check skipped")
+
+    # Rule 2 — every venv references a declared feature_set.
+    known_sets = set((manifest.get("feature_sets") or {}).keys())
+    all_venvs = manifest.get("venvs") or []
+    any_bad = False
+    for v in all_venvs:
+        name = v.get("name", "<unnamed>")
+        fs = v.get("feature_set")
+        if fs is None:
+            _fail("venv-feature-set", f"venv '{name}' is missing 'feature_set' field")
+            any_bad = True
+        elif not isinstance(fs, str):
+            _fail("venv-feature-set", f"venv '{name}' 'feature_set' must be a string, got {type(fs).__name__}")
+            any_bad = True
+        elif fs not in known_sets:
+            _fail("venv-feature-set", f"venv '{name}' references unknown feature_set '{fs}'")
+            any_bad = True
+    if not any_bad:
+        _ok("venv-feature-set", f"all {len(all_venvs)} venvs reference valid feature_sets")
+
+    # Rule 3 — every model references a valid feature_set AND has at least one venv for it.
+    venv_sets = {v.get("feature_set") for v in (manifest.get("venvs") or []) if isinstance(v.get("feature_set"), str)}
+    all_models = manifest.get("models") or []
+    any_bad_model = False
+    for m in all_models:
+        mid = m.get("id", "<unknown>")
+        fs = m.get("feature_set")
+        if fs is None:
+            _fail("model-feature-set", f"model '{mid}' is missing 'feature_set' field")
+            any_bad_model = True
+        elif not isinstance(fs, str):
+            _fail("model-feature-set", f"model '{mid}' 'feature_set' must be a string, got {type(fs).__name__}")
+            any_bad_model = True
+        elif fs not in known_sets:
+            _fail("model-feature-set", f"model '{mid}' references unknown feature_set '{fs}'")
+            any_bad_model = True
+        elif fs not in venv_sets:
+            _fail("model-feature-set",
+                  f"model '{mid}' has feature_set '{fs}' but no venv targets that set")
+            any_bad_model = True
+    if not any_bad_model:
+        _ok("model-feature-set", f"all {len(all_models)} models reference valid feature_sets with a venv")
+
+    # Rule 4 — wrappers list ↔ scripts/ parity.
+    # Every entry in manifest.wrappers must exist in scripts/ and be executable.
+    # Every scripts/*.sh must be in manifest.wrappers OR manifest.internal_scripts.
+    declared_wrappers = manifest.get("wrappers") or []
+    internal_scripts = manifest.get("internal_scripts") or []
+    accounted_for = set(declared_wrappers) | set(internal_scripts)
+    any_bad_wrapper = False
+    scripts_root = SCRIPT_DIR.resolve()
+
+    for wrapper in declared_wrappers:
+        if "/" in wrapper or wrapper.startswith("."):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' must be a plain filename, not a path")
+            any_bad_wrapper = True
+            continue
+        path = (SCRIPT_DIR / wrapper).resolve()
+        if not path.is_relative_to(scripts_root):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' resolves outside scripts/")
+            any_bad_wrapper = True
+        elif not path.is_file():
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' not found in scripts/")
+            any_bad_wrapper = True
+        elif not os.access(path, os.X_OK):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' is not executable")
+            any_bad_wrapper = True
+
+    all_sh = sorted(SCRIPT_DIR.glob("*.sh"))
+    unregistered = [p.name for p in all_sh if p.name not in accounted_for]
+    for name in unregistered:
+        _fail("wrapper-parity", f"scripts/{name} not in wrappers or internal_scripts — register it")
+        any_bad_wrapper = True
+
+    if not any_bad_wrapper:
+        _ok("wrapper-parity", f"all {len(all_sh)} .sh files accounted for; all {len(declared_wrappers)} wrappers executable")
+
+    # Inner key "structure" follows the existing file pattern:
+    # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
+    return {"status": status, "structure": checks}
+
+
 # ---------------- warm-cache ----------------
 
 def _have_tqdm():
@@ -320,6 +443,12 @@ def _print_human(report: dict, scope: set[str]) -> None:
         print(f"Wrappers:       {_emoji(w['status'])}")
         for row in w["wrappers"]:
             print(f"                {_emoji(row['status'])} {row['name']}")
+    if "structure" in report:
+        s = report["structure"]
+        print(f"Structure:      {_emoji(s['status'])}")
+        for row in s["structure"]:
+            detail = f": {row['details']}" if row['details'] else ""
+            print(f"                {_emoji(row['status'])} {row['name']}{detail}")
     if "warm_cache" in report:
         c = report["warm_cache"]
         print("Warm-cache results:")
@@ -336,7 +465,7 @@ def _print_human(report: dict, scope: set[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pipeline doctor + cache manager")
     parser.add_argument("--check",
-                        choices=["disk", "models", "venvs", "wrappers", "all"],
+                        choices=["disk", "models", "venvs", "wrappers", "structure", "all"],
                         default="all",
                         help="Which subset to run (default: all)")
     parser.add_argument("--include", default="",
@@ -362,6 +491,10 @@ def main() -> int:
         report["models"] = check_models(manifest, scope)
     if args.check in ("wrappers", "all"):
         report["wrappers"] = check_wrappers(manifest)
+    if args.check == "structure":
+        # structure is not included in "all" — it requires a repo checkout
+        # (tools._embed_lib) and is intended for CI, not user installs.
+        report["structure"] = check_structure(manifest)
     if args.warm_cache:
         report["warm_cache"] = warm_cache(manifest, scope)
 
@@ -374,7 +507,7 @@ def main() -> int:
 
     # Exit code reflects worst severity across checks
     worst = "ok"
-    for k in ("disk", "venvs", "models", "wrappers"):
+    for k in ("disk", "venvs", "models", "wrappers", "structure"):
         if k in report:
             s = report[k]["status"]
             if s == "critical":

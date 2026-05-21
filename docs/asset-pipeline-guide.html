@@ -5896,7 +5896,8 @@ and without this preflight a generation request can stall on a
 multi-GB download with no indication anything is happening.
 
 Usage:
-    pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}]
+    pipeline_doctor.py [--check {disk,models,venvs,wrappers,structure,all}]
+                       (note: &quot;structure&quot; requires a repo checkout; excluded from &quot;all&quot;)
                        [--include FEATURE,FEATURE,...]
                        [--warm-cache]
                        [--fix]
@@ -5937,6 +5938,7 @@ from pathlib import Path
 
 PIPELINE_ROOT = Path(os.environ.get(&quot;PIPELINE_ROOT&quot;, os.path.expanduser(&quot;~/3d-pipeline&quot;)))
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 MANIFEST_PATH = SCRIPT_DIR / &quot;model_manifest.json&quot;
 
 # Disk thresholds
@@ -6109,6 +6111,127 @@ def check_wrappers(manifest: dict) -&gt; dict:
     return {&quot;status&quot;: overall, &quot;wrappers&quot;: rows}
 
 
+# ---------------- structure check ----------------
+
+def check_structure(manifest: dict) -&gt; dict:
+    &quot;&quot;&quot;Validate catalog consistency without requiring any models/venvs installed.
+
+    Each rule appends a check dict to the returned list and elevates
+    status to &#x27;critical&#x27; on any failure. Rules are added incrementally
+    (Tasks 3-6); this skeleton runs clean on a valid manifest.
+    &quot;&quot;&quot;
+    checks: list[dict] = []
+    status = &quot;ok&quot;
+
+    def _fail(name: str, details: str) -&gt; None:
+        nonlocal status
+        status = &quot;critical&quot;
+        checks.append({&quot;name&quot;: name, &quot;status&quot;: &quot;critical&quot;, &quot;details&quot;: details})
+
+    def _ok(name: str, details: str = &quot;&quot;) -&gt; None:
+        checks.append({&quot;name&quot;: name, &quot;status&quot;: &quot;ok&quot;, &quot;details&quot;: details})
+
+    # Rule 1 — every EMBEDS source path exists on disk.
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from tools._embed_lib import EMBEDS  # type: ignore
+        bad_paths, missing = [], []
+        for src in EMBEDS:
+            resolved = (REPO_ROOT / src).resolve()
+            if not resolved.is_relative_to(REPO_ROOT.resolve()):
+                bad_paths.append(src)
+            elif not resolved.exists():
+                missing.append(src)
+        for src in bad_paths:
+            _fail(&quot;embeds-file-exists&quot;, f&quot;{src} resolves outside repo root&quot;)
+        for src in missing:
+            _fail(&quot;embeds-file-exists&quot;, f&quot;{src} missing from repo&quot;)
+        if not bad_paths and not missing:
+            _ok(&quot;embeds-file-exists&quot;, f&quot;all {len(EMBEDS)} EMBEDS source files present&quot;)
+    except ImportError:
+        _fail(&quot;embeds-file-exists&quot;, &quot;could not import tools._embed_lib — EMBEDS check skipped&quot;)
+
+    # Rule 2 — every venv references a declared feature_set.
+    known_sets = set((manifest.get(&quot;feature_sets&quot;) or {}).keys())
+    all_venvs = manifest.get(&quot;venvs&quot;) or []
+    any_bad = False
+    for v in all_venvs:
+        name = v.get(&quot;name&quot;, &quot;&lt;unnamed&gt;&quot;)
+        fs = v.get(&quot;feature_set&quot;)
+        if fs is None:
+            _fail(&quot;venv-feature-set&quot;, f&quot;venv &#x27;{name}&#x27; is missing &#x27;feature_set&#x27; field&quot;)
+            any_bad = True
+        elif not isinstance(fs, str):
+            _fail(&quot;venv-feature-set&quot;, f&quot;venv &#x27;{name}&#x27; &#x27;feature_set&#x27; must be a string, got {type(fs).__name__}&quot;)
+            any_bad = True
+        elif fs not in known_sets:
+            _fail(&quot;venv-feature-set&quot;, f&quot;venv &#x27;{name}&#x27; references unknown feature_set &#x27;{fs}&#x27;&quot;)
+            any_bad = True
+    if not any_bad:
+        _ok(&quot;venv-feature-set&quot;, f&quot;all {len(all_venvs)} venvs reference valid feature_sets&quot;)
+
+    # Rule 3 — every model references a valid feature_set AND has at least one venv for it.
+    venv_sets = {v.get(&quot;feature_set&quot;) for v in (manifest.get(&quot;venvs&quot;) or []) if isinstance(v.get(&quot;feature_set&quot;), str)}
+    all_models = manifest.get(&quot;models&quot;) or []
+    any_bad_model = False
+    for m in all_models:
+        mid = m.get(&quot;id&quot;, &quot;&lt;unknown&gt;&quot;)
+        fs = m.get(&quot;feature_set&quot;)
+        if fs is None:
+            _fail(&quot;model-feature-set&quot;, f&quot;model &#x27;{mid}&#x27; is missing &#x27;feature_set&#x27; field&quot;)
+            any_bad_model = True
+        elif not isinstance(fs, str):
+            _fail(&quot;model-feature-set&quot;, f&quot;model &#x27;{mid}&#x27; &#x27;feature_set&#x27; must be a string, got {type(fs).__name__}&quot;)
+            any_bad_model = True
+        elif fs not in known_sets:
+            _fail(&quot;model-feature-set&quot;, f&quot;model &#x27;{mid}&#x27; references unknown feature_set &#x27;{fs}&#x27;&quot;)
+            any_bad_model = True
+        elif fs not in venv_sets:
+            _fail(&quot;model-feature-set&quot;,
+                  f&quot;model &#x27;{mid}&#x27; has feature_set &#x27;{fs}&#x27; but no venv targets that set&quot;)
+            any_bad_model = True
+    if not any_bad_model:
+        _ok(&quot;model-feature-set&quot;, f&quot;all {len(all_models)} models reference valid feature_sets with a venv&quot;)
+
+    # Rule 4 — wrappers list ↔ scripts/ parity.
+    # Every entry in manifest.wrappers must exist in scripts/ and be executable.
+    # Every scripts/*.sh must be in manifest.wrappers OR manifest.internal_scripts.
+    declared_wrappers = manifest.get(&quot;wrappers&quot;) or []
+    internal_scripts = manifest.get(&quot;internal_scripts&quot;) or []
+    accounted_for = set(declared_wrappers) | set(internal_scripts)
+    any_bad_wrapper = False
+    scripts_root = SCRIPT_DIR.resolve()
+
+    for wrapper in declared_wrappers:
+        if &quot;/&quot; in wrapper or wrapper.startswith(&quot;.&quot;):
+            _fail(&quot;wrapper-parity&quot;, f&quot;wrappers entry &#x27;{wrapper}&#x27; must be a plain filename, not a path&quot;)
+            any_bad_wrapper = True
+            continue
+        path = (SCRIPT_DIR / wrapper).resolve()
+        if not path.is_relative_to(scripts_root):
+            _fail(&quot;wrapper-parity&quot;, f&quot;wrappers entry &#x27;{wrapper}&#x27; resolves outside scripts/&quot;)
+            any_bad_wrapper = True
+        elif not path.is_file():
+            _fail(&quot;wrapper-parity&quot;, f&quot;wrappers entry &#x27;{wrapper}&#x27; not found in scripts/&quot;)
+            any_bad_wrapper = True
+        elif not os.access(path, os.X_OK):
+            _fail(&quot;wrapper-parity&quot;, f&quot;wrappers entry &#x27;{wrapper}&#x27; is not executable&quot;)
+            any_bad_wrapper = True
+
+    all_sh = sorted(SCRIPT_DIR.glob(&quot;*.sh&quot;))
+    unregistered = [p.name for p in all_sh if p.name not in accounted_for]
+    for name in unregistered:
+        _fail(&quot;wrapper-parity&quot;, f&quot;scripts/{name} not in wrappers or internal_scripts — register it&quot;)
+        any_bad_wrapper = True
+
+    if not any_bad_wrapper:
+        _ok(&quot;wrapper-parity&quot;, f&quot;all {len(all_sh)} .sh files accounted for; all {len(declared_wrappers)} wrappers executable&quot;)
+
+    # Inner key &quot;structure&quot; follows the existing file pattern:
+    # report[&quot;wrappers&quot;][&quot;wrappers&quot;], report[&quot;venvs&quot;][&quot;venvs&quot;], etc.
+    return {&quot;status&quot;: status, &quot;structure&quot;: checks}
+
+
 # ---------------- warm-cache ----------------
 
 def _have_tqdm():
@@ -6208,6 +6331,12 @@ def _print_human(report: dict, scope: set[str]) -&gt; None:
         print(f&quot;Wrappers:       {_emoji(w[&#x27;status&#x27;])}&quot;)
         for row in w[&quot;wrappers&quot;]:
             print(f&quot;                {_emoji(row[&#x27;status&#x27;])} {row[&#x27;name&#x27;]}&quot;)
+    if &quot;structure&quot; in report:
+        s = report[&quot;structure&quot;]
+        print(f&quot;Structure:      {_emoji(s[&#x27;status&#x27;])}&quot;)
+        for row in s[&quot;structure&quot;]:
+            detail = f&quot;: {row[&#x27;details&#x27;]}&quot; if row[&#x27;details&#x27;] else &quot;&quot;
+            print(f&quot;                {_emoji(row[&#x27;status&#x27;])} {row[&#x27;name&#x27;]}{detail}&quot;)
     if &quot;warm_cache&quot; in report:
         c = report[&quot;warm_cache&quot;]
         print(&quot;Warm-cache results:&quot;)
@@ -6224,7 +6353,7 @@ def _print_human(report: dict, scope: set[str]) -&gt; None:
 def main() -&gt; int:
     parser = argparse.ArgumentParser(description=&quot;Pipeline doctor + cache manager&quot;)
     parser.add_argument(&quot;--check&quot;,
-                        choices=[&quot;disk&quot;, &quot;models&quot;, &quot;venvs&quot;, &quot;wrappers&quot;, &quot;all&quot;],
+                        choices=[&quot;disk&quot;, &quot;models&quot;, &quot;venvs&quot;, &quot;wrappers&quot;, &quot;structure&quot;, &quot;all&quot;],
                         default=&quot;all&quot;,
                         help=&quot;Which subset to run (default: all)&quot;)
     parser.add_argument(&quot;--include&quot;, default=&quot;&quot;,
@@ -6250,6 +6379,10 @@ def main() -&gt; int:
         report[&quot;models&quot;] = check_models(manifest, scope)
     if args.check in (&quot;wrappers&quot;, &quot;all&quot;):
         report[&quot;wrappers&quot;] = check_wrappers(manifest)
+    if args.check == &quot;structure&quot;:
+        # structure is not included in &quot;all&quot; — it requires a repo checkout
+        # (tools._embed_lib) and is intended for CI, not user installs.
+        report[&quot;structure&quot;] = check_structure(manifest)
     if args.warm_cache:
         report[&quot;warm_cache&quot;] = warm_cache(manifest, scope)
 
@@ -6262,7 +6395,7 @@ def main() -&gt; int:
 
     # Exit code reflects worst severity across checks
     worst = &quot;ok&quot;
-    for k in (&quot;disk&quot;, &quot;venvs&quot;, &quot;models&quot;, &quot;wrappers&quot;):
+    for k in (&quot;disk&quot;, &quot;venvs&quot;, &quot;models&quot;, &quot;wrappers&quot;, &quot;structure&quot;):
         if k in report:
             s = report[k][&quot;status&quot;]
             if s == &quot;critical&quot;:
@@ -6285,7 +6418,7 @@ PIPELINE_EOF</pre></div>
               <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/model_manifest.json << 'PIPELINE_EOF'
 {
   &quot;schema_version&quot;: 1,
-  &quot;description&quot;: &quot;Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping.&quot;,
+  &quot;description&quot;: &quot;Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.&quot;,
   &quot;feature_sets&quot;: {
     &quot;tier1&quot;: {
       &quot;description&quot;: &quot;Default v0.3 quality features (always recommended)&quot;,
@@ -6443,9 +6576,14 @@ PIPELINE_EOF</pre></div>
   &quot;wrappers&quot;: [
     &quot;concept.sh&quot;,
     &quot;generate.sh&quot;,
+    &quot;multiview.sh&quot;,
     &quot;print.sh&quot;,
     &quot;texture.sh&quot;,
     &quot;benchmark.sh&quot;
+  ],
+  &quot;internal_scripts&quot;: [
+    &quot;_pipeline_lib.sh&quot;,
+    &quot;migrate_assets.sh&quot;
   ]
 }
 PIPELINE_EOF</pre></div>

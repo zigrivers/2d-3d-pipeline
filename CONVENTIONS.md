@@ -41,6 +41,28 @@ A pre-commit hook in `.githooks/pre-commit` refuses commits that touch
 `/scripts` or `/skill` without a matching HTML regeneration. Opt in once
 per clone with `make install-hooks` (which sets `core.hooksPath`).
 
+## CI — pipeline-doctor
+
+`.github/workflows/pipeline-doctor.yml` runs on every PR and `main` push
+that touches `scripts/**` or `tools/_embed_lib.py`. It runs two checks:
+
+- `--check structure` — validates the catalog itself: EMBEDS source files
+  exist, every venv and model references a declared feature_set, every model's
+  feature_set has at least one venv that covers it, every wrappers entry is an
+  executable file in `scripts/`, and every `scripts/*.sh` is either in
+  `wrappers` or `internal_scripts`. Fails the job on any critical finding.
+- `--check wrappers` — runs `<wrapper> --help` for each declared wrapper and
+  fails the job if any wrapper's status is not `ok` (catches missing wrappers,
+  non-zero exits, timeouts, and OS errors).
+
+The workflow posts an idempotent JSON report as a PR comment (updated in
+place on subsequent pushes). It does **not** install models or venvs; for
+runtime checks run `pipeline_doctor.py --check all` locally.
+
+If the workflow fails: check the PR comment for the specific finding, fix
+the manifest or script, and push again. See `docs/spec-pipeline-doctor-ci.md`
+for the full design rationale.
+
 ## Visual register
 
 ### User-facing HTML guides (`/docs`)
