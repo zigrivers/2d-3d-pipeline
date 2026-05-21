@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping.",
+  "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.",
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",
@@ -161,5 +161,10 @@
     "print.sh",
     "texture.sh",
     "benchmark.sh"
+  ],
+  "internal_scripts": [
+    "_pipeline_lib.sh",
+    "migrate_assets.sh",
+    "multiview.sh"
   ]
 }
