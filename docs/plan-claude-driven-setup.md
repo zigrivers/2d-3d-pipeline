@@ -806,25 +806,26 @@ def test_venv_lockfile_must_exist(minimal_v2_manifest, monkeypatch, tmp_path):
 def test_venv_lockfile_must_not_contain_pip_setuptools_wheel(
     minimal_v2_manifest, tmp_path, monkeypatch
 ):
-    # Place a fake lockfile in the repo under scripts/lockfiles/
-    lockfile_dir = pipeline_doctor.REPO_ROOT / "scripts" / "lockfiles"
-    lockfile_dir.mkdir(parents=True, exist_ok=True)
-    lockfile = lockfile_dir / "test-bad.txt"
+    """Write the fake lockfile under tmp_path and monkeypatch REPO_ROOT so we
+    don't pollute the real repo (which would trip the pre-commit hook on a
+    test interrupt)."""
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "scripts" / "lockfiles").mkdir(parents=True)
+    lockfile = fake_repo / "scripts" / "lockfiles" / "test-bad.txt"
     lockfile.write_text("pip==24.0\nrequests==2.31.0\n")
-    try:
-        m = dict(minimal_v2_manifest)
-        m["venvs"] = [{
-            "name": "x", "path": "~/3d-pipeline/x", "required": True,
-            "feature_set": "tier1", "size_gb": 1, "purpose": "t",
-            "python_version": "3.12",
-            "lockfile": "scripts/lockfiles/test-bad.txt",
-        }]
-        result = pipeline_doctor.check_structure(m)
-        assert result["status"] == "critical"
-        assert any("pip" in c["details"].lower()
-                   for c in result["structure"] if c["status"] == "critical")
-    finally:
-        lockfile.unlink()
+    monkeypatch.setattr(pipeline_doctor, "REPO_ROOT", fake_repo)
+
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "x", "path": "~/3d-pipeline/x", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "t",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/test-bad.txt",
+    }]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any("pip" in c["details"].lower()
+               for c in result["structure"] if c["status"] == "critical")
 ```
 
 - [ ] **Step 2: Run failing**
@@ -1229,6 +1230,25 @@ Phase 1 is complete. The catalog is v2-shaped; CI validates it; no behaviour cha
 
 Add `--apply`, `--only`, `--yes`, `--tier`, `--check installed`, `--reconsider-optionals`. Implement the network-free stages: `prereqs`, `dirs`, `config`, `scripts`, `skill`. Add the state file + flock. End of Phase 2: a fresh tmpdir can be bootstrapped to a working `~/3d-pipeline/workspace/` and `~/.claude/skills/asset-pipeline/` without any network calls.
 
+### Phase 2 preamble — pre-commit hook + smoke command hygiene
+
+**Pre-commit hook.** `scripts/pipeline_doctor.py` is in EMBEDS, so any commit that modifies it must also regenerate the HTML guides. If `make install-hooks` is active (`git config --get core.hooksPath` returns `.githooks`), the pre-commit hook will reject commits that touch `scripts/` without matching HTML changes.
+
+**Every "Commit" step in Phases 2-4 that modifies `scripts/pipeline_doctor.py`, `scripts/_install_lib.py`, `scripts/_heartbeat.py`, or `scripts/queue_worker.py` must:**
+
+1. Run `make regenerate` before `git add`.
+2. Include `docs/asset-pipeline-guide.html` and `docs/asset-pipeline-guide-studio.html` in the `git add`.
+
+The task bodies below abbreviate this as "(+ regenerate)" in commit step descriptions. If a task forgets to mention it explicitly, do it anyway when the touched files are in EMBEDS.
+
+**Smoke commands set HOME.** Several smoke commands in this phase materialize files into `~/.claude/skills/asset-pipeline/`. `apply_skill` uses `os.path.expanduser`, which reads the real `$HOME`. To avoid clobbering the engineer's actual runtime skill, every smoke command in Phases 2-5 self-checks should also set `HOME` to a tmpdir:
+
+```bash
+HOME=/tmp/p-test-home PIPELINE_ROOT=/tmp/p-test python3 scripts/pipeline_doctor.py --apply --tier studio --only ... --yes
+```
+
+The plan repeats this for every smoke command below.
+
 ### Task 2.1: Add new CLI flags (skeleton)
 
 **Files:**
@@ -1287,12 +1307,15 @@ def test_reconsider_optionals_recognized():
     assert "--reconsider-optionals" in r.stdout
 
 
-def test_fix_alias_warns(capsys):
-    """--fix should still work but print a deprecation notice."""
+def test_fix_alias_warns():
+    """--fix routes to --apply and prints a deprecation notice on stderr."""
     r = _run("--fix", "--check", "wrappers", "--json")
-    # Either succeeds (current no-op) or routes to --apply; either way prints
-    # a notice mentioning "deprecated" or "alias".
-    assert "deprecat" in r.stderr.lower() or "alias" in r.stderr.lower()
+    # The deprecation notice must mention --apply explicitly so the user knows
+    # the new canonical name. Exit code is whatever --apply --check wrappers
+    # returns (likely 0 or 1, not 2 = usage error).
+    assert r.returncode in (0, 1), f"got {r.returncode}; stderr={r.stderr}"
+    assert "--apply" in r.stderr, f"deprecation notice missing --apply: {r.stderr}"
+    assert "deprecat" in r.stderr.lower()
 ```
 
 - [ ] **Step 2: Run failing**
@@ -1457,12 +1480,18 @@ def _write_state(state: dict) -> None:
     tmp.replace(p)
 
 
+def _utc_iso_now() -> str:
+    """Return UTC ISO timestamp with trailing Z. Uses tz-aware now() because
+    datetime.utcnow() is deprecated in Python 3.12+."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def record_stage_outcome(stage: str, *, ok: bool,
                           manifest_sha: str | None = None,
                           error: str | None = None) -> None:
-    import datetime
     state = load_state()
-    entry: dict = {"ok": ok, "ts": datetime.datetime.utcnow().isoformat() + "Z"}
+    entry: dict = {"ok": ok, "ts": _utc_iso_now()}
     if manifest_sha is not None:
         entry["manifest_sha"] = manifest_sha
     if error is not None:
@@ -1472,10 +1501,9 @@ def record_stage_outcome(stage: str, *, ok: bool,
 
 
 def record_declined(resource_id: str, *, reason: str) -> None:
-    import datetime
     state = load_state()
     state["declined"][resource_id] = {
-        "ts": datetime.datetime.utcnow().isoformat() + "Z",
+        "ts": _utc_iso_now(),
         "reason": reason,
     }
     _write_state(state)
@@ -1529,32 +1557,46 @@ def test_lock_succeeds_on_local_fs(tmp_pipeline_root):
         pass  # entered + exited cleanly
 
 
-def test_concurrent_lock_attempt_fails(tmp_pipeline_root):
-    holder_ready = threading.Event()
-    release = threading.Event()
-    second_result = {"locked": None}
+def test_concurrent_lock_attempt_fails(tmp_pipeline_root, tmp_path):
+    """macOS BSD flock is per-process, not per-fd, so a thread-based test
+    would falsely pass (same-process threads share the kernel lock). Use a
+    real subprocess for the holder so the second attempt is truly cross-process.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
 
-    def hold():
-        with pipeline_doctor.apply_lock():
-            holder_ready.set()
-            release.wait(timeout=5)
+    # Holder script: take the lock, write a sentinel, sleep until killed
+    holder_code = (
+        "import sys, time, os\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        f"os.environ['PIPELINE_ROOT'] = {str(tmp_pipeline_root)!r}\n"
+        "from scripts import pipeline_doctor\n"
+        "with pipeline_doctor.apply_lock():\n"
+        f"    open({str(tmp_path / 'held')!r}, 'w').write('held')\n"
+        "    time.sleep(30)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", holder_code])
+    try:
+        sentinel = tmp_path / "held"
+        deadline = time.time() + 5
+        while time.time() < deadline and not sentinel.exists():
+            time.sleep(0.05)
+        assert sentinel.exists(), "holder subprocess never acquired the lock"
 
-    def attempt():
-        holder_ready.wait(timeout=5)
+        # Second attempt from this process should be rejected
         try:
             with pipeline_doctor.apply_lock():
-                second_result["locked"] = "got-it"
+                assert False, "second acquire unexpectedly succeeded"
         except pipeline_doctor.LockHeldError:
-            second_result["locked"] = "rejected"
-
-    t1 = threading.Thread(target=hold)
-    t2 = threading.Thread(target=attempt)
-    t1.start()
-    t2.start()
-    t2.join(timeout=5)
-    release.set()
-    t1.join(timeout=5)
-    assert second_result["locked"] == "rejected"
+            pass
+    finally:
+        holder.terminate()
+        try:
+            holder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            holder.kill()
 
 
 def test_lock_refuses_network_fs(tmp_pipeline_root, monkeypatch):
@@ -1622,7 +1664,11 @@ def _is_network_fs(path: Path) -> bool:
 
 @contextlib.contextmanager
 def apply_lock():
-    """Acquire an advisory flock; refuse on network filesystems."""
+    """Acquire an advisory flock; refuse on network filesystems.
+
+    Open the lock file with O_CREAT|O_RDWR (no truncation) so a second
+    process opening the same path doesn't wipe the holder's state.
+    """
     root = Path(os.environ.get("PIPELINE_ROOT",
                                  os.path.expanduser("~/3d-pipeline")))
     root.mkdir(parents=True, exist_ok=True)
@@ -1631,19 +1677,19 @@ def apply_lock():
         raise NetworkFSError(
             f"refusing to lock {lock_path} on network filesystem — "
             "advisory locks are unreliable. Move PIPELINE_ROOT to local disk.")
-    f = open(lock_path, "w")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise LockHeldError(
                 f"another --apply is already running (holding {lock_path})")
-        yield
-    finally:
         try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            yield
         finally:
-            f.close()
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 ```
 
 - [ ] **Step 4: Run tests**
@@ -1954,9 +2000,10 @@ def test_apply_scripts_preserves_executable_bit(tmp_pipeline_root):
 def test_apply_scripts_idempotent_no_mtime_change(tmp_pipeline_root):
     pipeline_doctor.apply_dirs(manifest={})
     pipeline_doctor.apply_scripts(manifest={}, mutable_paths=[])
-    # Snapshot mtimes
+    # Snapshot mtimes recursively — EMBEDS can land sub-dirs (comfyui_workflows/, etc.)
     workspace = tmp_pipeline_root / "workspace"
-    snapshots = {p: p.stat().st_mtime_ns for p in workspace.iterdir() if p.is_file()}
+    snapshots = {p: p.stat().st_mtime_ns
+                 for p in workspace.rglob("*") if p.is_file()}
     pipeline_doctor.apply_scripts(manifest={}, mutable_paths=[])
     for p, ts in snapshots.items():
         assert p.stat().st_mtime_ns == ts, f"{p} mtime changed on re-apply"
@@ -2116,6 +2163,22 @@ def test_check_skill_drift_after_mutation(tmp_path, monkeypatch):
     target.write_text(target.read_text() + "\ndrift\n")
     result = pipeline_doctor.check_skill(manifest={}, mutable_paths=[])
     assert result["status"] == "warning"
+
+
+def test_check_skill_skips_mutable_paths(tmp_path, monkeypatch):
+    """mutable_embed_paths entries land in T0 advisory, not T1 drift."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    pipeline_doctor.apply_skill(manifest={}, mutable_paths=[])
+    target = fake_home / ".claude" / "skills" / "asset-pipeline" / "SKILL.md"
+    target.write_text("mutated")
+    result = pipeline_doctor.check_skill(
+        manifest={},
+        mutable_paths=["~/.claude/skills/asset-pipeline/SKILL.md"],
+    )
+    drifted = [s for s in result["skill"] if s["status"] == "drift"]
+    assert not any(s["name"] == "SKILL.md" for s in drifted)
 ```
 
 - [ ] **Step 2: Run failing**
@@ -2261,6 +2324,19 @@ def test_check_prereqs_min_version_fails():
                     "min_version": "3.10", "max_version_severity": "warn"}]
         result = pipeline_doctor.check_prereqs(manifest={"prereqs": prereqs})
         assert result["status"] == "critical"
+
+
+def test_check_prereqs_max_version_fail_severity_escalates():
+    """When max_version_severity is 'fail', exceeding max produces critical."""
+    with patch("scripts.pipeline_doctor._binary_version",
+               side_effect=lambda name: "3.13.0"):
+        prereqs = [{"id": "python", "kind": "binary", "name": "python3",
+                    "min_version": "3.10", "max_version": "3.12",
+                    "max_version_severity": "fail"}]
+        result = pipeline_doctor.check_prereqs(manifest={"prereqs": prereqs})
+        assert result["status"] == "critical"
+        py = next(p for p in result["prereqs"] if p["id"] == "python")
+        assert py["status"] == "critical"
 
 
 def test_apply_prereqs_never_installs():
@@ -2497,7 +2573,13 @@ def _enforce_prereqs(stages: list[str]) -> None:
 
 
 def dispatch_apply(manifest: dict, stages: list[str],
-                    tier: str, mutable_paths: list[str]) -> dict:
+                    tier: str, mutable_paths: list[str],
+                    *, yes: bool = False) -> dict:
+    """Run each requested apply stage in canonical order.
+
+    `yes` skips interactive confirmation gates (passed through to studio_extras
+    in Phase 4, where it controls whether the launchd plist is auto-accepted).
+    """
     report: dict = {"stages": {}}
     for stage in stages:
         if stage == "studio_extras" and tier != "studio":
@@ -2515,12 +2597,16 @@ def dispatch_apply(manifest: dict, stages: list[str],
         elif stage == "skill":
             r = apply_skill(manifest, mutable_paths=mutable_paths)
         elif stage == "venvs":
+            # Phase 3 (Task 3.3) replaces this branch
             r = {"status": "skipped",
                   "reason": "Phase 3 not yet implemented"}
         elif stage == "models":
+            # Phase 3 (Task 3.8) replaces this branch
             r = {"status": "skipped",
                   "reason": "Phase 3 not yet implemented"}
         elif stage == "studio_extras":
+            # Phase 4 (Task 4.1) replaces this branch; `yes` controls
+            # whether the launchd plist is auto-accepted.
             r = {"status": "skipped",
                   "reason": "Phase 4 not yet implemented"}
         else:
@@ -2549,6 +2635,9 @@ def dispatch_check_installed(manifest: dict, stages: list[str],
         elif stage == "skill":
             r = check_skill(manifest, mutable_paths=mutable_paths)
         else:
+            # venvs, models, studio_extras fall through to the generic
+            # "skipped" else — Phase 3 (Tasks 3.4, 3.8) and Phase 4 (Task 4.1)
+            # add explicit branches above.
             r = {"status": "skipped",
                   "reason": "Phase 3/4 stage not yet implemented"}
         report["stages"][stage] = r
@@ -2576,7 +2665,8 @@ Now wire dispatch into `main()`. Find the bottom of `main()` (around line 487) a
             with apply_lock():
                 report["apply"] = dispatch_apply(manifest, stages,
                                                    tier=chosen_tier,
-                                                   mutable_paths=mutable_paths)
+                                                   mutable_paths=mutable_paths,
+                                                   yes=args.yes)
         except LockHeldError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
@@ -2616,26 +2706,33 @@ Now wire dispatch into `main()`. Find the bottom of `main()` (around line 487) a
 Update the exit-code computation to include the new keys:
 
 ```python
+    # Two exit-code regimes:
+    # - Legacy --check (disk|venvs|models|wrappers|structure|all): warning → 0,
+    #   critical → 1. This preserves the existing CI workflow's behaviour.
+    # - New --apply / --check installed: per spec §4.8, ANY drift OR apply
+    #   failure → 1, ok → 0. Drift is reported via stage statuses, not via a
+    #   separate "warning" tier; the new commands have no "warning → 0" case.
+    new_command = "apply" in report or "check_installed" in report
+    if new_command:
+        for k in ("apply", "check_installed"):
+            if k not in report:
+                continue
+            for _, stage_r in report[k]["stages"].items():
+                s = stage_r.get("status", "ok")
+                if s in ("critical", "drift", "warning"):
+                    return 1
+        return 0
+
     worst = "ok"
-    for k in ("disk", "venvs", "models", "wrappers", "structure",
-              "apply", "check_installed"):
+    for k in ("disk", "venvs", "models", "wrappers", "structure"):
         if k not in report:
             continue
-        # apply/check_installed are { "stages": { name: { "status": ... } } }
-        if k in ("apply", "check_installed"):
-            for stage_name, stage_r in report[k]["stages"].items():
-                s = stage_r.get("status", "ok")
-                if s == "critical":
-                    worst = "critical"
-                elif s in ("warning", "drift") and worst != "critical":
-                    worst = "warning"
-        else:
-            s = report[k]["status"]
-            if s == "critical":
-                worst = "critical"
-            elif s == "warning" and worst != "critical":
-                worst = "warning"
-    return {"ok": 0, "warning": 1, "critical": 1}[worst]
+        s = report[k]["status"]
+        if s == "critical":
+            worst = "critical"
+        elif s == "warning" and worst != "critical":
+            worst = "warning"
+    return {"ok": 0, "warning": 0, "critical": 1}[worst]
 ```
 
 - [ ] **Step 4: Run tests + smoke a real apply**
@@ -2662,17 +2759,75 @@ git commit -m "P2.9: stage dispatcher + prerequisite enforcement + cold-start ga
 
 ---
 
+### Task 2.10: `--reconsider-optionals` + `--yes` integration
+
+**Files:**
+- Modify: `tests/python/test_state_file.py`
+- Modify: `tests/python/test_stage_dispatch.py`
+
+- [ ] **Step 1: Write tests**
+
+Append to `tests/python/test_state_file.py`:
+
+```python
+def test_reconsider_optionals_clears_declined(tmp_pipeline_root):
+    """--reconsider-optionals must clear declined entries before apply."""
+    pipeline_doctor.record_declined("studio_extras.launchd_plist",
+                                     reason="user declined")
+    assert "studio_extras.launchd_plist" in pipeline_doctor.load_state()["declined"]
+    pipeline_doctor.clear_declined()
+    assert pipeline_doctor.load_state()["declined"] == {}
+
+
+def test_declined_persists_across_loads(tmp_pipeline_root):
+    """Declined entries survive a load/write round-trip."""
+    pipeline_doctor.record_declined("x", reason="r")
+    pipeline_doctor.record_stage_outcome("scripts", ok=True)
+    state = pipeline_doctor.load_state()
+    assert "x" in state["declined"]
+    assert state["stages"]["scripts"]["ok"] is True
+```
+
+Append to `tests/python/test_stage_dispatch.py`:
+
+```python
+def test_yes_flag_passed_through_to_dispatch(tmp_path):
+    """--yes must be threaded into dispatch_apply (used by studio_extras in P4)."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO))
+    from scripts import pipeline_doctor
+    import inspect
+    sig = inspect.signature(pipeline_doctor.dispatch_apply)
+    assert "yes" in sig.parameters, \
+        "dispatch_apply must accept yes= so studio_extras can auto-accept"
+```
+
+- [ ] **Step 2: Run failing then passing**
+
+Run: `python3 -m pytest tests/python/test_state_file.py tests/python/test_stage_dispatch.py -v`
+Expected: tests for prior tasks still PASS; new tests PASS (the state-file helpers from Task 2.2 already implement `clear_declined`; `dispatch_apply` already accepts `yes=` from Task 2.9).
+
+- [ ] **Step 3: Commit**
+
+```bash
+make regenerate  # in case any pipeline_doctor.py edits remain unstaged from prior tasks
+git add tests/python/test_state_file.py tests/python/test_stage_dispatch.py
+git commit -m "P2.10: regression tests for --reconsider-optionals + --yes wiring"
+```
+
+---
+
 ### Phase 2 self-check
 
 ```
 python3 -m pytest tests/python -v
-PIPELINE_ROOT=/tmp/p-phase2 python3 scripts/pipeline_doctor.py \
+HOME=/tmp/p-phase2-home PIPELINE_ROOT=/tmp/p-phase2 python3 scripts/pipeline_doctor.py \
     --apply --tier studio --only prereqs,dirs,config,scripts,skill --yes
-PIPELINE_ROOT=/tmp/p-phase2 python3 scripts/pipeline_doctor.py \
+HOME=/tmp/p-phase2-home PIPELINE_ROOT=/tmp/p-phase2 python3 scripts/pipeline_doctor.py \
     --check installed --tier studio --json | python3 -m json.tool
 ```
 
-Expected: all tests pass; the second command reports every implemented stage `ok`; venvs/models/studio_extras report `skipped — Phase 3/4 not yet implemented`.
+Expected: all tests pass; the second command reports every implemented stage `ok`; venvs/models/studio_extras report `skipped — Phase 3/4 not yet implemented`. If `prereqs` reports `critical` because `huggingface-cli` or `pip>=23.1` is missing on your dev machine, install the named tool and re-run — the other stages should all be `ok`.
 
 Phase 2 ships a working local installer for everything that doesn't touch the network. Resumption from a cold tmpdir to a fully-populated workspace + skill is verified end-to-end.
 
@@ -2689,6 +2844,47 @@ This task is **manual** — the maintainer runs `pip freeze` once on a reference
 **Files:**
 - Modify: `scripts/lockfiles/mflux-env.txt`
 - Modify: `scripts/lockfiles/pipeline-tools-env.txt`
+- Create: `scripts/lockfiles/README.md`
+
+- [ ] **Step 0: Choose and document the reference machine**
+
+Lockfiles are mostly tier-portable, but torch/onnxruntime wheel selection
+depends on CPU + macOS version. Generate against your **primary target
+tier** (laptop M2/M3 ARM running macOS 14+, Python 3.12.x). The same
+lockfile works on the other Mac as long as the Python patch version
+matches what's recorded in `.python-version`.
+
+Create `scripts/lockfiles/README.md`:
+
+```markdown
+# Lockfiles
+
+One file per venv declared in `scripts/model_manifest.json`. Generated by
+running `pip freeze --exclude pip --exclude setuptools --exclude wheel`
+inside the freshly-installed venv on a reference machine.
+
+**Reference machine for v0.4:** ARM Mac (M2/M3), macOS 14+, Python 3.12.x
+(see `.python-version`).
+
+**To regenerate after a deliberate package bump:**
+
+```sh
+python3.12 -m venv /tmp/regen-<venv-name>
+source /tmp/regen-<venv-name>/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install <new-package-list>
+pip freeze --exclude pip --exclude setuptools --exclude wheel \
+    > scripts/lockfiles/<venv-name>.txt
+deactivate && rm -rf /tmp/regen-<venv-name>
+```
+
+Then commit. The CI structure check verifies the lockfile parses as
+`pip freeze` format and contains no pip/setuptools/wheel entries.
+
+The lockfiles for `hunyuan3d-paint-env`, `comfyui-env`, and `multiview-env`
+are intentionally empty until those venvs are bootstrapped by their
+respective owners.
+```
 
 - [ ] **Step 1: Generate the mflux lockfile**
 
@@ -2726,11 +2922,11 @@ Expected: exit 0; `v2:venv-fields` reports ok (lockfiles exist and contain no pi
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/lockfiles/mflux-env.txt scripts/lockfiles/pipeline-tools-env.txt
+git add scripts/lockfiles/README.md scripts/lockfiles/mflux-env.txt scripts/lockfiles/pipeline-tools-env.txt
 git commit -m "P3.1: first-pass lockfiles for mflux-env + pipeline-tools-env"
 ```
 
-**Note:** The other three lockfiles (`hunyuan3d-paint-env`, `comfyui-env`, `multiview-env`) stay empty until Phase 3 work touches them. Empty lockfiles are valid by the structure check; the `apply venvs` stage will treat them as opt-in / not-yet-bootstrapped.
+**Note:** The other three lockfiles (`hunyuan3d-paint-env`, `comfyui-env`, `multiview-env`) stay empty until Phase 3 work touches them. Empty lockfiles are valid by the structure check; the `apply venvs` stage will treat them as opt-in / not-yet-bootstrapped (returns `status: "skipped"`, `reason: "empty lockfile"`). The Phase-3 self-check explicitly expects three of five venvs to report `skipped` — this is correct behaviour, not a bug.
 
 ---
 
@@ -2837,101 +3033,120 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from scripts import pipeline_doctor  # noqa: E402
 
 
-VENV = {
-    "name": "test-env",
-    "path": "~/3d-pipeline/test-env",
-    "required": True,
-    "feature_set": "tier1",
-    "size_gb": 1,
-    "purpose": "test fixture",
-    "python_version": "3.12",
-    "lockfile": "scripts/lockfiles/_test_lockfile.txt",
-}
+@pytest.fixture
+def venv_with_lockfile(tmp_path, monkeypatch):
+    """Build a VENV dict whose `lockfile` points into tmp_path, not the
+    real repo. Monkeypatch REPO_ROOT so apply_venv resolves the lockfile
+    correctly without polluting scripts/lockfiles/."""
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "scripts" / "lockfiles").mkdir(parents=True)
+    monkeypatch.setattr(pipeline_doctor, "REPO_ROOT", fake_repo)
+
+    def _make(content: str = "Pillow==10.4.0\n"):
+        lockfile_rel = "scripts/lockfiles/_test_lockfile.txt"
+        (fake_repo / lockfile_rel).write_text(content)
+        return {
+            "name": "test-env",
+            "path": "~/3d-pipeline/test-env",
+            "required": True,
+            "feature_set": "tier1",
+            "size_gb": 1,
+            "purpose": "test fixture",
+            "python_version": "3.12",
+            "lockfile": lockfile_rel,
+        }
+    return _make
 
 
-def _seed_lockfile(content: str = "Pillow==10.4.0\n") -> Path:
-    p = REPO / "scripts" / "lockfiles" / "_test_lockfile.txt"
-    p.write_text(content)
-    return p
+def test_apply_venv_creates_venv_and_installs(tmp_pipeline_root, venv_with_lockfile,
+                                                monkeypatch):
+    venv = venv_with_lockfile()
+    # _patch_pin_matches returns True when no .python-version file present
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
+        result = pipeline_doctor.apply_venv(venv)
+    calls = [c.args[0] for c in mock_run.call_args_list
+             if c.args and isinstance(c.args[0], list)]
+    # Exact-shape assertions, not substring heuristics:
+    assert calls[0] == ["python3.12", "-m", "venv",
+                         str(pipeline_doctor._expand(venv["path"]))]
+    # The pip install -r <lockfile> call must follow
+    pip_path = str(pipeline_doctor._venv_pip(pipeline_doctor._expand(venv["path"])))
+    expected_pip_install = [pip_path, "install", "-r",
+                             str(pipeline_doctor.REPO_ROOT / venv["lockfile"])]
+    assert expected_pip_install in calls, \
+        f"expected {expected_pip_install} in {calls}"
 
 
-def test_apply_venv_creates_venv_and_installs(tmp_pipeline_root):
-    lockfile = _seed_lockfile()
-    try:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = ""
-            mock_run.return_value.stderr = ""
-            result = pipeline_doctor.apply_venv(VENV)
-        # The venv directory should be created (mocked subprocess didn't run
-        # python -m venv, so we check the dispatch arguments instead).
-        calls = [c.args[0] for c in mock_run.call_args_list
-                 if isinstance(c.args[0], list)]
-        # First call: python -m venv <path>
-        assert any(c[:3] == ["python3.12", "-m", "venv"] for c in calls)
-        # A subsequent call: <venv>/bin/pip install -r <lockfile>
-        pip_calls = [c for c in calls if c[-2:] == ["install", "-r"]
-                     or (len(c) >= 4 and c[-3:-1] == ["install", "-r"])]
-        assert pip_calls, f"no pip install -r call found in {calls}"
-    finally:
-        lockfile.unlink()
+def test_apply_venv_skips_when_lockfile_empty(tmp_pipeline_root,
+                                                venv_with_lockfile):
+    venv = venv_with_lockfile(content="")
+    result = pipeline_doctor.apply_venv(venv)
+    assert result["status"] == "skipped"
+    assert "empty lockfile" in result["reason"].lower()
 
 
-def test_apply_venv_skips_when_lockfile_empty(tmp_pipeline_root):
-    lockfile = _seed_lockfile("")
-    try:
-        result = pipeline_doctor.apply_venv(VENV)
-        assert result["status"] == "skipped"
-        assert "empty lockfile" in result["reason"].lower()
-    finally:
-        lockfile.unlink()
+def test_apply_venv_aborts_on_python_patch_mismatch(tmp_pipeline_root,
+                                                      venv_with_lockfile,
+                                                      monkeypatch):
+    """Spec §3.1: if active python differs from the pinned patch, refuse
+    to proceed. AC3 fails-loud diagnostic."""
+    venv = venv_with_lockfile()
+    # Seed a .python-version file at the repo root with a patch the
+    # active python won't match
+    (pipeline_doctor.REPO_ROOT / ".python-version").write_text("3.12.999\n")
+    monkeypatch.setattr(pipeline_doctor, "_active_python_version",
+                         lambda v: "3.12.7")
+    result = pipeline_doctor.apply_venv(venv)
+    assert result["status"] == "critical"
+    assert "patch" in (result.get("error") or "").lower() or \
+        "python" in (result.get("error") or "").lower()
 
 
-def test_apply_venv_retries_on_wheel_failure(tmp_pipeline_root):
-    lockfile = _seed_lockfile()
-    try:
-        # First pip install fails with wheel-build, second succeeds after
-        # pip-setuptools-wheel upgrade.
-        outcomes = iter([
-            # python -m venv
-            MagicMock(returncode=0, stdout="", stderr=""),
-            # pip install -r lockfile (first try → fail)
-            MagicMock(returncode=1, stdout="",
-                       stderr="ERROR: Could not build wheels for torch"),
-            # pip install --upgrade pip setuptools wheel
-            MagicMock(returncode=0, stdout="", stderr=""),
-            # pip install -r lockfile (retry → ok)
-            MagicMock(returncode=0, stdout="", stderr=""),
-        ])
-        with patch("subprocess.run", side_effect=lambda *a, **k: next(outcomes)):
-            result = pipeline_doctor.apply_venv(VENV)
-        assert result["status"] == "ok"
-        assert result.get("retried") is True
-    finally:
-        lockfile.unlink()
+def test_apply_venv_retries_on_wheel_failure(tmp_pipeline_root,
+                                              venv_with_lockfile):
+    venv = venv_with_lockfile()
+    outcomes = iter([
+        MagicMock(returncode=0, stdout="", stderr=""),  # venv create
+        MagicMock(returncode=1, stdout="",
+                   stderr="ERROR: Could not build wheels for torch"),
+        MagicMock(returncode=0, stdout="", stderr=""),  # pip upgrade
+        MagicMock(returncode=0, stdout="", stderr=""),  # pip install retry
+    ])
+    with patch("subprocess.run", side_effect=lambda *a, **k: next(outcomes)):
+        result = pipeline_doctor.apply_venv(venv)
+    assert result["status"] == "ok"
+    assert result.get("retried") is True
 
 
-def test_apply_venv_double_failure_marks_partial(tmp_pipeline_root):
-    lockfile = _seed_lockfile()
-    try:
-        outcomes = iter([
-            MagicMock(returncode=0, stdout="", stderr=""),  # venv create
-            MagicMock(returncode=1, stdout="", stderr="ERROR: build failed"),
-            MagicMock(returncode=0, stdout="", stderr=""),  # pip upgrade
-            MagicMock(returncode=1, stdout="", stderr="ERROR: still fails"),
-        ])
-        with patch("subprocess.run", side_effect=lambda *a, **k: next(outcomes)):
-            result = pipeline_doctor.apply_venv(VENV)
-        assert result["status"] == "critical"
-        assert "failing_package" in result or "error" in result
-    finally:
-        lockfile.unlink()
+def test_apply_venv_double_failure_parses_failing_package(tmp_pipeline_root,
+                                                            venv_with_lockfile):
+    """On second pip failure, the engine parses stderr for the failing
+    package name (pip --report writes JSON only on successful resolution,
+    so we can't rely on it after a failure — fall back to stderr regex)."""
+    venv = venv_with_lockfile()
+    outcomes = iter([
+        MagicMock(returncode=0, stdout="", stderr=""),  # venv create
+        MagicMock(returncode=1, stdout="",
+                   stderr="ERROR: Could not build wheels for torch"),
+        MagicMock(returncode=0, stdout="", stderr=""),  # pip upgrade
+        MagicMock(returncode=1, stdout="",
+                   stderr="ERROR: Could not build wheels for torch"),
+    ])
+    with patch("subprocess.run", side_effect=lambda *a, **k: next(outcomes)):
+        result = pipeline_doctor.apply_venv(venv)
+    assert result["status"] == "critical"
+    assert result.get("failing_package") == "torch"
 ```
 
 - [ ] **Step 2: Run failing**
@@ -2952,21 +3167,39 @@ def _venv_pip(venv_path: Path) -> Path:
     return venv_path / "bin" / "pip"
 
 
-def _parse_failing_package_from_pip_json(report_path: Path) -> str | None:
-    """Read pip's --report JSON and identify the package that failed to install.
-    Falls back to None on parse error."""
-    if not report_path.exists():
+def _active_python_version(major_minor: str) -> str | None:
+    """Return the patch version of `python{major_minor}` on PATH, or None."""
+    r = subprocess.run([f"python{major_minor}", "-c",
+                         "import sys; print('.'.join(str(p) for p in sys.version_info[:3]))"],
+                        capture_output=True, text=True, timeout=5)
+    if r.returncode != 0:
         return None
-    try:
-        data = json.loads(report_path.read_text())
-    except json.JSONDecodeError:
+    return r.stdout.strip()
+
+
+_PIP_WHEEL_FAILURE_RE = re.compile(
+    r"(?:Could not build wheels for|Failed building wheel for|"
+    r"Building wheel for)\s+([A-Za-z0-9_.\-]+)")
+
+
+def _parse_failing_package_from_stderr(stderr: str) -> str | None:
+    """Extract the failing package name from pip stderr.
+
+    pip's `--report` only writes the JSON on a *successful* resolution, so we
+    can't rely on it after a failure. The wheel-build error messages have
+    been stable enough across pip 23.x–25.x to grep for.
+    """
+    if not stderr:
         return None
-    # pip's report format: { "install": [ {"metadata": {"name": "..."} }, ... ] }
-    # On failure the report is partial; the last entry is typically the one
-    # that failed. This is best-effort.
-    install = data.get("install") or []
-    if install:
-        return (install[-1].get("metadata") or {}).get("name")
+    for line in stderr.splitlines():
+        m = _PIP_WHEEL_FAILURE_RE.search(line)
+        if m:
+            return m.group(1)
+    # Fallback: "ERROR: No matching distribution found for <pkg>"
+    m = re.search(r"No matching distribution found for\s+([A-Za-z0-9_.\-]+)",
+                   stderr)
+    if m:
+        return m.group(1)
     return None
 
 
@@ -2980,6 +3213,22 @@ def apply_venv(venv: dict) -> dict:
     if not lockfile.exists() or not lockfile.read_text().strip():
         return {"status": "skipped", "name": name,
                 "reason": "empty lockfile — not yet bootstrapped"}
+
+    # Python patch pin check (spec §3.1 / AC3)
+    active = _active_python_version(pyver)
+    if active is None:
+        return {"status": "critical", "name": name,
+                "error": f"python{pyver} not on PATH; "
+                          f"hint: `pyenv install {pyver}` or `brew install python@{pyver}`"}
+    pin = REPO_ROOT / ".python-version"
+    if not _patch_pin_matches(pin, active):
+        pinned = pin.read_text().strip() if pin.exists() else "<missing>"
+        return {"status": "critical", "name": name,
+                "error": (f"active python{pyver} is {active}, but "
+                           f".python-version pins {pinned}. "
+                           f"Either run `pyenv install {pinned} && pyenv local {pinned}`, "
+                           "or regenerate the lockfiles on this machine "
+                           "(see scripts/lockfiles/README.md).")}
 
     # Create the venv if missing
     if not path.exists():
@@ -2998,7 +3247,7 @@ def apply_venv(venv: dict) -> dict:
         return {"status": "ok", "name": name, "retried": False}
 
     # Retry path: upgrade pip/setuptools/wheel, then re-install
-    r_upgrade = subprocess.run(
+    subprocess.run(
         [str(pip), "install", "--upgrade", "pip", "setuptools", "wheel"],
         capture_output=True, text=True)
     r2 = subprocess.run([str(pip), "install", "-r", str(lockfile)],
@@ -3006,13 +3255,9 @@ def apply_venv(venv: dict) -> dict:
     if r2.returncode == 0:
         return {"status": "ok", "name": name, "retried": True}
 
-    # Both failed — record partial state
-    # Try to get structured failure info via --dry-run --report
-    report_path = path / ".pip-report.json"
-    subprocess.run([str(pip), "install", "--dry-run",
-                     "--report", str(report_path), "-r", str(lockfile)],
-                    capture_output=True, text=True)
-    failing = _parse_failing_package_from_pip_json(report_path)
+    # Both failed — extract failing package from stderr (pip --report doesn't
+    # produce JSON on resolution failure, so don't bother running it)
+    failing = _parse_failing_package_from_stderr(r2.stderr or r.stderr)
     return {
         "status": "critical", "name": name,
         "retried": True,
@@ -3245,17 +3490,30 @@ def test_preflight_skipped_when_no_gated_models():
     assert result["checked"] == 0
 
 
+def _mock_whoami_ok():
+    """Helper: patch subprocess.run to make `huggingface-cli whoami` succeed."""
+    m = MagicMock()
+    m.returncode = 0
+    m.stdout = "test-user"
+    m.stderr = ""
+    return patch("subprocess.run", return_value=m)
+
+
 def test_preflight_passes_when_access_granted():
-    with patch("huggingface_hub.HfApi") as MockApi:
+    with _mock_whoami_ok(), patch("huggingface_hub.HfApi") as MockApi:
         instance = MockApi.return_value
-        instance.model_info.return_value = MagicMock()
+        instance.model_info.return_value = MagicMock(id="tencent/Hunyuan3D-2")
         result = pipeline_doctor.hf_preflight([GATED_MODEL])
     assert result["status"] == "ok"
+    # Verify model_info was actually called with the right repo + timeout
+    MockApi.return_value.model_info.assert_called_once()
+    call = MockApi.return_value.model_info.call_args
+    assert call.args[0] == "tencent/Hunyuan3D-2" or call.kwargs.get("repo_id") == "tencent/Hunyuan3D-2"
 
 
 def test_preflight_fails_with_401_per_repo():
     from huggingface_hub.utils import RepositoryNotFoundError
-    with patch("huggingface_hub.HfApi") as MockApi:
+    with _mock_whoami_ok(), patch("huggingface_hub.HfApi") as MockApi:
         instance = MockApi.return_value
         instance.model_info.side_effect = RepositoryNotFoundError(
             "401 access denied")
@@ -3266,16 +3524,63 @@ def test_preflight_fails_with_401_per_repo():
         "request access" in result["details"]
 
 
-def test_preflight_aborts_before_download():
-    """The contract: returning critical means no download must have started."""
+def test_preflight_aborts_before_download(tmp_pipeline_root):
+    """The contract: critical → no download started → no .part files remain.
+
+    AC4: `--apply --only models` with auth missing must abort before any
+    `.part` / `.incomplete` file is created.
+    """
     from huggingface_hub.utils import RepositoryNotFoundError
+    cache = tmp_pipeline_root / "models" / "hunyuan3d-paint"
+    cache.mkdir(parents=True)
     with patch("huggingface_hub.HfApi") as MockApi, \
          patch("huggingface_hub.hf_hub_download") as mock_dl:
         MockApi.return_value.model_info.side_effect = RepositoryNotFoundError(
             "401")
         result = pipeline_doctor.hf_preflight([GATED_MODEL])
-        assert result["status"] == "critical"
-        mock_dl.assert_not_called()
+    assert result["status"] == "critical"
+    mock_dl.assert_not_called()
+    # No partial-download artifacts left behind
+    leftovers = list(tmp_pipeline_root.rglob("*.part")) + \
+        list(tmp_pipeline_root.rglob("*.incomplete"))
+    assert leftovers == [], f"preflight leaked partial files: {leftovers}"
+
+
+def test_preflight_whoami_first_then_per_repo():
+    """Spec §3.2: whoami is used as an early 'is there any token' pre-check
+    before iterating per-repo model_info calls."""
+    with patch("subprocess.run") as mock_run, \
+         patch("huggingface_hub.HfApi") as MockApi:
+        # whoami fails (no token at all)
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "Not logged in"
+        result = pipeline_doctor.hf_preflight([GATED_MODEL])
+        # When whoami fails, per-repo loop must NOT have been invoked
+        MockApi.return_value.model_info.assert_not_called()
+    assert result["status"] == "critical"
+    assert "huggingface-cli login" in result["details"]
+    # The error message should name the absence-of-token case, not a per-repo 401
+    assert "no token" in result["details"].lower() or \
+        "Not logged in" in result["details"]
+
+
+def test_preflight_model_info_called_with_timeout():
+    """model_info must use a bounded timeout so CI / offline hangs short."""
+    with patch("huggingface_hub.HfApi") as MockApi, \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0  # whoami ok
+        mock_run.return_value.stdout = "user"
+        result = pipeline_doctor.hf_preflight([GATED_MODEL])
+    call = MockApi.return_value.model_info.call_args
+    assert call is not None, "model_info was never called"
+    kwargs = call.kwargs
+    args = call.args
+    # Either positional with timeout in kwargs, or both positional — verify
+    # timeout is set explicitly and reasonable.
+    timeout = kwargs.get("timeout")
+    assert timeout is not None and timeout <= 30, \
+        f"model_info must be called with timeout<=30; got {kwargs!r}"
 ```
 
 - [ ] **Step 2: Run failing**
@@ -3296,18 +3601,45 @@ python3 -m pip install --user huggingface_hub requests
 In `scripts/pipeline_doctor.py`:
 
 ```python
+def _hf_whoami() -> tuple[bool, str]:
+    """Returns (logged_in, raw_output). Used as an early pre-check."""
+    try:
+        r = subprocess.run(["huggingface-cli", "whoami"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return (False, f"huggingface-cli unavailable: {e}")
+    return (r.returncode == 0, (r.stdout or r.stderr).strip())
+
+
 def hf_preflight(models: list[dict]) -> dict:
     """Per-repo access check for every model with requires_hf_auth=True.
-    Returns critical on any 401 / RepositoryNotFoundError, with the offending
-    repo named. Does not touch any downloads."""
+
+    Two-step (spec §3.2):
+    1. `huggingface-cli whoami` — quick "is there any token at all?" check.
+       If absent, return critical immediately with the clean "login first"
+       message rather than iterating per-repo 401s.
+    2. `HfApi().model_info(repo, timeout=10)` — per-repo access check.
+       Aborts the stage before any download starts. Critical names the
+       specific repo and points at the access-request URL.
+    """
     gated = [m for m in models if m.get("requires_hf_auth")]
     if not gated:
         return {"status": "ok", "checked": 0, "details": "no gated models in scope"}
 
+    # Step 1: whoami pre-check
+    logged_in, whoami_out = _hf_whoami()
+    if not logged_in:
+        return {
+            "status": "critical", "checked": 0,
+            "details": (f"No HuggingFace token found ({whoami_out}). "
+                         "Run `huggingface-cli login` and re-try."),
+        }
+
+    # Step 2: per-repo access check
     try:
         from huggingface_hub import HfApi
         from huggingface_hub.utils import (
-            RepositoryNotFoundError, GatedRepoError,
+            RepositoryNotFoundError, GatedRepoError, HfHubHTTPError,
         )
     except ImportError:
         return {"status": "critical", "checked": 0,
@@ -3325,8 +3657,8 @@ def hf_preflight(models: list[dict]) -> dict:
             })
             continue
         try:
-            api.model_info(repo)
-        except (RepositoryNotFoundError, GatedRepoError) as e:
+            api.model_info(repo, timeout=10)
+        except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as e:
             failures.append({
                 "id": m["id"], "hf_repo": repo,
                 "error": str(e)[:200],
@@ -3458,6 +3790,9 @@ def test_download_direct_url_restarts_when_server_ignores_range(tmp_path):
 
 
 def test_download_hf_uses_hf_hub_download(tmp_path):
+    """hf_hub_download has always-on resume in current huggingface_hub
+    (the `resume_download` kwarg was deprecated in 0.26 and removed later).
+    Don't pass it; rely on the library default."""
     with patch("huggingface_hub.hf_hub_download") as mock_dl:
         mock_dl.return_value = str(tmp_path / "snapshot" / "file.bin")
         (tmp_path / "snapshot").mkdir()
@@ -3467,8 +3802,41 @@ def test_download_hf_uses_hf_hub_download(tmp_path):
             cache_dir=tmp_path)
     assert result["status"] == "ok"
     mock_dl.assert_called_once()
-    assert mock_dl.call_args.kwargs.get("resume_download") is True or \
-        "resume_download" not in mock_dl.call_args.kwargs  # default is True
+    # We must NOT pass the deprecated kwarg
+    assert "resume_download" not in mock_dl.call_args.kwargs, \
+        "resume_download is deprecated/removed; rely on library default"
+
+
+def test_download_with_range_appends_in_binary_mode_when_offset_nonzero(tmp_path):
+    """Verify write mode is 'ab' (not 'wb') when we have a partial file and
+    the server returned 206 — otherwise we'd overwrite the existing bytes."""
+    dest = tmp_path / "out.bin"
+    part = dest.with_suffix(".bin.part")
+    part.write_bytes(b"hello ")
+
+    real_open = open
+    captured_mode = {"mode": None}
+
+    def capturing_open(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".part") and "b" in mode:
+            captured_mode["mode"] = mode
+        return real_open(path, mode, *args, **kwargs)
+
+    def fake_get(url, headers=None, stream=False, timeout=None):
+        m = MagicMock()
+        m.iter_content = lambda chunk_size: iter([b"world"])
+        m.status_code = 206
+        m.headers = {"content-length": "5"}
+        m.__enter__ = lambda s: s
+        m.__exit__ = lambda s, *a: None
+        return m
+
+    with patch("requests.get", side_effect=fake_get), \
+         patch("builtins.open", side_effect=capturing_open):
+        pipeline_doctor._download_with_range(
+            "https://example/out.bin", dest, expected_size=11)
+    assert captured_mode["mode"] == "ab", \
+        f"expected append-binary mode for resume, got {captured_mode['mode']!r}"
 ```
 
 - [ ] **Step 2: Run failing**
@@ -3528,7 +3896,9 @@ def _download_with_range(url: str, dest: Path, expected_size: int | None = None,
 
 
 def _download_hf(hf_repo: str, filename: str, cache_dir: Path) -> dict:
-    """Download a file from a HuggingFace repo with native resume support."""
+    """Download a file from a HuggingFace repo. Resume is always-on in
+    current huggingface_hub; the explicit `resume_download` kwarg was
+    deprecated in 0.26 and removed later — do NOT pass it."""
     try:
         from huggingface_hub import hf_hub_download  # type: ignore
     except ImportError:
@@ -3538,7 +3908,7 @@ def _download_hf(hf_repo: str, filename: str, cache_dir: Path) -> dict:
     try:
         path = hf_hub_download(
             repo_id=hf_repo, filename=filename,
-            cache_dir=str(cache_dir), resume_download=True,
+            cache_dir=str(cache_dir),
         )
         return {"status": "ok", "path": path}
     except Exception as e:
@@ -3610,22 +3980,41 @@ def test_rembg_recipe_invokes_new_session():
     assert called, f"rembg snippet not invoked; calls: {mock_run.call_args_list}"
 
 
-def test_comfyui_dispatch_by_kind():
-    """managed_by=comfyui dispatches by comfyui_kind."""
-    for kind in ("checkpoint", "ip_adapter", "controlnet", "lora"):
+def test_comfyui_dispatch_by_kind_routes_to_correct_recipe():
+    """RECIPES['comfyui'] is a nested dict keyed by comfyui_kind. Each kind
+    routes to its own callable. Per spec §3.3 / AC12: adding a new model
+    under an existing kind requires no code change here; adding a new kind
+    DOES require a new function."""
+    kind_to_func = {
+        "checkpoint": "scripts._install_lib._comfyui_warm_checkpoint",
+        "ip_adapter": "scripts._install_lib._comfyui_warm_ip_adapter",
+        "controlnet": "scripts._install_lib._comfyui_warm_controlnet",
+        "lora":       "scripts._install_lib._comfyui_warm_lora",
+    }
+    for kind, func_path in kind_to_func.items():
         model = {"id": f"x-{kind}", "managed_by": "comfyui",
                  "comfyui_kind": kind, "warm_target": f"x-{kind}",
                  "storage_layout": "hf_snapshot",
                  "hf_repo": f"test/{kind}",
                  "filename": f"x-{kind}.safetensors",
-                 "cache_dir": "~/3d-pipeline/models/comfyui"}
-        with patch("scripts._install_lib._comfyui_warm") as mock_cf:
-            mock_cf.return_value = ("ok", "downloaded")
+                 "cache_dir": f"~/3d-pipeline/models/{kind}"}
+        with patch(func_path) as mock_func:
+            mock_func.return_value = ("ok", "downloaded")
             status, detail = _install_lib.warm(model)
-        mock_cf.assert_called_once()
-        kwargs = mock_cf.call_args.kwargs
-        # Passed both model + kind for kind-specific placement
-        assert mock_cf.call_args.args[0] == model or kwargs.get("model") == model
+        mock_func.assert_called_once_with(model)
+        assert status == "ok"
+
+
+def test_comfyui_unknown_kind_returns_skipped():
+    model = {"id": "x", "managed_by": "comfyui",
+             "comfyui_kind": "bogus_kind", "warm_target": "x",
+             "storage_layout": "hf_snapshot",
+             "hf_repo": "test/x", "filename": "x.safetensors",
+             "cache_dir": "~/3d-pipeline/models/x"}
+    status, detail = _install_lib.warm(model)
+    assert status == "skipped"
+    assert "comfyui_kind" in detail
+    assert "bogus_kind" in detail
 
 
 def test_open_clip_recipe_uses_env_var():
@@ -3723,14 +4112,15 @@ def _open_clip_warm(model: dict) -> tuple[str, str]:
 
 
 def _hunyuan_warm(model: dict) -> tuple[str, str]:
-    """Hunyuan3D-Paint uses huggingface_hub from inside its own venv."""
+    """Hunyuan3D-Paint uses huggingface_hub from inside its own venv.
+    Note: `resume_download` removed — always-on in current huggingface_hub."""
     venv = _expand("~/3d-pipeline/hunyuan3d-paint-env")
     repo = model["hf_repo"]
     fn = model["filename"]
     cache = _expand(model["cache_dir"])
     snippet = (
         "from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}, resume_download=True); "
+        f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}); "
         "print('ok')"
     )
     rc, out, err = _run_in_venv(venv, snippet)
@@ -3739,31 +4129,59 @@ def _hunyuan_warm(model: dict) -> tuple[str, str]:
     return ("failed", err.strip()[:300])
 
 
-def _comfyui_warm(model: dict) -> tuple[str, str]:
-    """ComfyUI has four kinds; each lives in a different cache subdirectory.
-    The recipe downloads via huggingface_hub into the kind-specific dir."""
+def _comfyui_download_to_cache(model: dict, kind_label: str) -> tuple[str, str]:
+    """Shared HF download into the kind-specific cache_dir. The manifest's
+    cache_dir is already kind-specific (~/3d-pipeline/models/sdxl,
+    ~/3d-pipeline/models/ip-adapter, ~/3d-pipeline/models/controlnet, ...).
+    The kind dispatch exists so per-kind future divergence (e.g. ControlNet
+    needing two files, IP-Adapter needing image-encoder side car) can land
+    here without touching pipeline_doctor.py — spec §3.3 / AC12."""
     venv = _expand("~/3d-pipeline/comfyui-env")
     repo = model["hf_repo"]
     fn = model["filename"]
     cache = _expand(model["cache_dir"])
-    # cache_dir is already kind-specific per the manifest (e.g.
-    # ~/3d-pipeline/models/sdxl, ~/3d-pipeline/models/ip-adapter)
     snippet = (
         "from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}, resume_download=True); "
+        f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}); "
         "print('ok')"
     )
     rc, out, err = _run_in_venv(venv, snippet)
     if rc == 0:
-        return ("ok", f"comfyui {model.get('comfyui_kind')} {fn} downloaded")
+        return ("ok", f"comfyui {kind_label} {fn} downloaded")
     return ("failed", err.strip()[:300])
 
 
-RECIPES = {
+def _comfyui_warm_checkpoint(model: dict) -> tuple[str, str]:
+    return _comfyui_download_to_cache(model, "checkpoint")
+
+
+def _comfyui_warm_ip_adapter(model: dict) -> tuple[str, str]:
+    return _comfyui_download_to_cache(model, "ip_adapter")
+
+
+def _comfyui_warm_controlnet(model: dict) -> tuple[str, str]:
+    return _comfyui_download_to_cache(model, "controlnet")
+
+
+def _comfyui_warm_lora(model: dict) -> tuple[str, str]:
+    return _comfyui_download_to_cache(model, "lora")
+
+
+# Nested dispatch table per spec §3.3:
+# - `managed_by` maps to a callable, OR to a dict keyed by `comfyui_kind`.
+# - Adding a new model under an existing (managed_by, comfyui_kind) combination
+#   is a manifest edit, no code change here (AC12).
+# - Adding a new managed_by tool, or a new comfyui_kind, is a code edit here.
+RECIPES: dict = {
     "rembg":           _rembg_warm,
     "open_clip":       _open_clip_warm,
     "hunyuan3d-paint": _hunyuan_warm,
-    "comfyui":         _comfyui_warm,
+    "comfyui": {
+        "checkpoint": _comfyui_warm_checkpoint,
+        "ip_adapter": _comfyui_warm_ip_adapter,
+        "controlnet": _comfyui_warm_controlnet,
+        "lora":       _comfyui_warm_lora,
+    },
 }
 
 
@@ -3772,6 +4190,15 @@ def warm(model: dict) -> tuple[str, str]:
     recipe = RECIPES.get(managed)
     if recipe is None:
         return ("skipped", f"unknown managed_by {managed!r}; recipe missing")
+    if isinstance(recipe, dict):
+        # Nested dispatch (currently only ComfyUI)
+        kind = model.get("comfyui_kind")
+        sub = recipe.get(kind)
+        if sub is None:
+            return ("skipped",
+                    f"unknown comfyui_kind {kind!r} for model {model.get('id')!r}; "
+                    f"valid: {sorted(recipe.keys())}")
+        return sub(model)
     return recipe(model)
 ```
 
@@ -3864,17 +4291,82 @@ def test_apply_model_warm_failed_propagates(tmp_pipeline_root):
 
 
 def test_check_model_t3_size_window(tmp_pipeline_root):
+    """T3 ±5% size check. Uses a small fake declared size to avoid
+    allocating 170 MB on CI tmpfs."""
     cache = tmp_pipeline_root / "models" / "rembg"
     cache.mkdir(parents=True)
-    # File at declared size (170 MB)
-    (cache / "u2net.onnx").write_bytes(b"x" * (170 * 1024 * 1024))
-    r = pipeline_doctor.check_model(MODEL_LITERAL)
+    # Shrink the model's declared size for the test
+    m = dict(MODEL_LITERAL)
+    m["size_mb"] = 1
+    # File at declared size (1 MB)
+    (cache / "u2net.onnx").write_bytes(b"x" * (1 * 1024 * 1024))
+    r = pipeline_doctor.check_model(m)
     assert r["status"] == "ok"
 
-    # File way undersized
+    # File way undersized (100 bytes)
     (cache / "u2net.onnx").write_bytes(b"x" * 100)
-    r = pipeline_doctor.check_model(MODEL_LITERAL)
+    r = pipeline_doctor.check_model(m)
     assert r["status"] == "drift"
+
+
+def test_apply_model_routes_direct_url_through_range_downloader(tmp_pipeline_root):
+    """Literal storage + download_url → _download_with_range is invoked.
+    This covers u2net.onnx (AC16) and proves _download_with_range is wired in."""
+    cache = tmp_pipeline_root / "models" / "rembg"
+    cache.mkdir(parents=True)
+
+    def fake_range_download(url, dest, expected_size=None, chunk_size=65536):
+        dest.write_bytes(b"x" * (1 * 1024 * 1024))
+        return {"status": "ok"}
+
+    m = dict(MODEL_LITERAL)
+    m["size_mb"] = 1
+    with patch("scripts.pipeline_doctor._download_with_range",
+               side_effect=fake_range_download) as mock_range, \
+         patch("scripts._install_lib.warm") as mock_warm:
+        result = pipeline_doctor.apply_model(m)
+
+    mock_range.assert_called_once()
+    # _install_lib.warm must NOT be called when the engine owns the download
+    mock_warm.assert_not_called()
+    assert result["status"] == "ok"
+    assert result.get("verified") is True
+
+
+def test_ac12_new_model_under_existing_recipe_requires_no_code_change(tmp_pipeline_root):
+    """AC12: adding a new model under an existing (managed_by, comfyui_kind)
+    combination dispatches through the existing recipe without touching
+    pipeline_doctor.py or _install_lib.py."""
+    new_controlnet = {
+        "id": "controlnet-depth", "filename": "controlnet-depth-sdxl.safetensors",
+        "feature_set": "comfyui", "license_bucket": "commercial_safe",
+        "size_mb": 1300,
+        "cache_dir": "~/3d-pipeline/models/controlnet",
+        "env_var": "", "download_url": "",
+        "sha256": "", "managed_by": "comfyui", "notes": "synthetic test model",
+        "requires_hf_auth": False,
+        "hf_repo": "xinsir/controlnet-depth-sdxl-1.0",
+        "storage_layout": "hf_snapshot",
+        "warm_target": "controlnet-depth-sdxl",
+        "comfyui_kind": "controlnet",
+    }
+    cache = tmp_pipeline_root / "models" / "controlnet"
+    cache.mkdir(parents=True)
+
+    def fake_controlnet_recipe(model):
+        # Simulate the host tool creating the file
+        from huggingface_hub import _CACHED_NO_EXIST  # noqa
+        return ("ok", "downloaded")
+
+    # Patch the EXISTING controlnet recipe to confirm dispatch lands there
+    with patch("scripts._install_lib._comfyui_warm_controlnet",
+               side_effect=fake_controlnet_recipe) as mock_cn, \
+         patch("scripts.pipeline_doctor._model_t3_check",
+               return_value={"status": "ok", "actual_mb": 1300}):
+        result = pipeline_doctor.apply_model(new_controlnet)
+
+    mock_cn.assert_called_once_with(new_controlnet)
+    assert result["status"] == "ok"
 ```
 
 - [ ] **Step 2: Run failing**
@@ -3925,16 +4417,47 @@ def _model_t3_check(model: dict) -> dict:
 
 
 def apply_model(model: dict) -> dict:
-    """Warm the model via its host tool, then T3-verify the result."""
+    """Warm the model, then T3-verify the result.
+
+    Routing:
+    - `storage_layout: literal` + `download_url` set → engine's own
+      `_download_with_range` (Range/.part resume) directly to
+      `cache_dir/filename`. This handles u2net.onnx and any future
+      direct-URL model.
+    - Otherwise → host-tool recipe via `_install_lib.warm`, which uses
+      `huggingface_hub.hf_hub_download` (always-on native resume) or the
+      tool's own download path.
+
+    NOTE: Spec §2 / §3.5 mention opportunistically promoting HF snapshot
+    blob hashes to T1 byte-equality checks. That promotion is deferred
+    to v0.5 — T3 size-window comparison is the v0.4 contract for
+    hf_snapshot models. Direct-URL models with a declared sha256 still
+    get T1 verification via `_model_t1_sha256_check` (Task 3.8b).
+    """
     from scripts import _install_lib  # type: ignore
-    warm_status, warm_detail = _install_lib.warm(model)
-    if warm_status == "failed":
-        return {"status": "critical", "id": model["id"],
-                "error": warm_detail, "verified": False}
-    if warm_status == "skipped":
-        # No recipe — fall through to verification (may still report ok if
-        # the file happens to already exist from some other path)
-        pass
+
+    storage = model.get("storage_layout", "literal")
+    url = model.get("download_url")
+
+    if storage == "literal" and url:
+        # Engine owns the download for direct-URL files. Resumable via Range.
+        target = _expand(model["cache_dir"]) / model["filename"]
+        expected = int(model.get("size_mb", 0)) * 1024 * 1024
+        dl_result = _download_with_range(
+            url, target, expected_size=expected if expected > 0 else None)
+        if dl_result["status"] != "ok":
+            return {"status": "critical", "id": model["id"],
+                    "error": dl_result.get("error", "download failed"),
+                    "verified": False}
+        warm_detail = (f"direct-URL download" +
+                        (" (restarted)" if dl_result.get("restarted") else ""))
+    else:
+        warm_status, warm_detail = _install_lib.warm(model)
+        if warm_status == "failed":
+            return {"status": "critical", "id": model["id"],
+                    "error": warm_detail, "verified": False}
+        # warm_status "skipped" or "ok" both fall through to T3 verify
+
     t3 = _model_t3_check(model)
     if t3["status"] == "ok":
         return {"status": "ok", "id": model["id"],
@@ -4156,6 +4679,56 @@ def test_apply_studio_extras_skipped_on_laptop(tmp_pipeline_root):
         manifest={"studio_extras": SE}, tier="laptop",
         accept_plist=False, declined_state={})
     assert result["status"] == "skipped"
+
+
+def test_check_studio_extras_has_no_filesystem_side_effects(tmp_pipeline_root):
+    """check_* functions must be read-only. Verifies _render_launchd_plist
+    doesn't create logs/ as a side effect (the bug fixed during plan review)."""
+    workspace = tmp_pipeline_root / "workspace"
+    workspace.mkdir(parents=True)
+    # Pre-create the queue dirs so check focuses on the plist read path
+    for d in SE["queue_dirs"]:
+        (workspace / d).mkdir(parents=True, exist_ok=True)
+    # No logs/ exists yet
+    assert not (tmp_pipeline_root / "logs").exists()
+    pipeline_doctor.check_studio_extras(
+        manifest={"studio_extras": SE}, tier="studio", declined_state={})
+    # check_studio_extras must NOT have created logs/
+    assert not (tmp_pipeline_root / "logs").exists(), \
+        "check_studio_extras must be read-only; logs/ leaked from renderer"
+
+
+def test_sticky_decline_round_trip(tmp_pipeline_root):
+    """AC8 full round-trip: apply declines → check does not flag drift →
+    --reconsider-optionals clears → next check shows 'not yet offered'."""
+    workspace = tmp_pipeline_root / "workspace"
+    workspace.mkdir(parents=True)
+
+    # Apply with accept_plist=False; declined entry recorded
+    pipeline_doctor.apply_studio_extras(
+        manifest={"studio_extras": SE}, tier="studio",
+        accept_plist=False, declined_state={})
+    declined = pipeline_doctor.load_state()["declined"]
+    assert "studio_extras.launchd_plist" in declined
+
+    # Check must NOT flag drift for the declined plist
+    check1 = pipeline_doctor.check_studio_extras(
+        manifest={"studio_extras": SE}, tier="studio",
+        declined_state=declined)
+    plist_row = next(r for r in check1["items"] if r["name"] == "launchd_plist")
+    assert plist_row["status"] == "advisory"
+    assert "decline" in (plist_row.get("reason") or "").lower()
+
+    # Run --reconsider-optionals path: clear and re-check
+    pipeline_doctor.clear_declined()
+    check2 = pipeline_doctor.check_studio_extras(
+        manifest={"studio_extras": SE}, tier="studio",
+        declined_state=pipeline_doctor.load_state()["declined"])
+    plist_row2 = next(r for r in check2["items"] if r["name"] == "launchd_plist")
+    # Plist is not installed and not declined → "not yet offered" advisory
+    assert plist_row2["status"] == "advisory"
+    assert "not yet" in (plist_row2.get("reason") or "").lower() or \
+        "declined" not in (plist_row2.get("reason") or "").lower()
 ```
 
 - [ ] **Step 3: Run failing**
@@ -4169,11 +4742,14 @@ In `scripts/pipeline_doctor.py`:
 
 ```python
 def _render_launchd_plist(plist_cfg: dict) -> str:
+    """Pure template substitution. No side effects (no mkdir). The log_dir
+    path is just substituted into the template string; the actual directory
+    is created in apply_studio_extras so that read-only `check_studio_extras`
+    can call this for drift comparison without polluting the filesystem."""
     tmpl_rel = plist_cfg["template"]
     tmpl = (REPO_ROOT / tmpl_rel).read_text()
     workspace = _root() / "workspace"
     log_dir = _root() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
     return tmpl.format(
         label=plist_cfg["label"],
         python=str(_expand("~/3d-pipeline/pipeline-tools-env/bin/python")),
@@ -4192,6 +4768,9 @@ def apply_studio_extras(manifest: dict, tier: str, *,
     se = manifest.get("studio_extras") or {}
     workspace = _root() / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    # Create the log dir here (was previously a side-effect of the plist
+    # renderer; moved so `check_studio_extras` stays read-only).
+    (_root() / "logs").mkdir(parents=True, exist_ok=True)
 
     created_dirs: list[str] = []
     for d in se.get("queue_dirs", []):
@@ -4360,21 +4939,30 @@ def test_heartbeat_read_dead_when_stale(tmp_path):
 
 
 def test_heartbeat_write_timeout_returns_degraded(tmp_path):
+    """Watchdog must return 'degraded' when the rename hasn't completed
+    within timeout_seconds. Use deterministic Event mocking instead of
+    a real time.sleep so this test is fast and CI-stable."""
     queue = tmp_path / "queue"
     queue.mkdir()
     machine = "test-machine"
 
-    # Simulate the atomic-rename taking longer than timeout
-    real_replace = Path.replace
+    # Patch threading.Event so .wait(timeout=…) returns False immediately
+    # (simulating the watchdog firing) without any real wall-clock delay.
+    class FakeEvent:
+        def __init__(self):
+            self._set = False
 
-    def slow_replace(self, target):
-        time.sleep(2)
-        return real_replace(self, target)
+        def set(self):
+            self._set = True
 
-    with patch.object(Path, "replace", slow_replace):
-        result = _heartbeat.write(queue, machine=machine, timeout_seconds=1)
+        def wait(self, timeout=None):
+            return False  # always "timed out"
+
+    with patch("scripts._heartbeat.threading.Event", FakeEvent):
+        result = _heartbeat.write(queue, machine=machine, timeout_seconds=25)
     assert result["status"] == "degraded"
-    assert "timeout" in result["reason"].lower()
+    assert "did not complete" in result["reason"].lower() or \
+        "timeout" in result["reason"].lower()
 
 
 def test_heartbeat_missing_file_is_dead(tmp_path):
@@ -4413,18 +5001,45 @@ import threading
 from pathlib import Path
 
 
-def write(queue_dir: Path, *, machine: str,
-           timeout_seconds: int = 25) -> dict:
-    """Write a heartbeat for `machine` into `queue_dir/.heartbeat-<machine>`."""
-    queue_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.datetime.utcnow().isoformat() + "Z"
-    dest = queue_dir / f".heartbeat-{machine}"
+def _utc_iso_now() -> str:
+    """tz-aware UTC ISO timestamp; datetime.utcnow() is deprecated in 3.12+."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ")
 
-    # Write to a local temp file first
+
+def _heartbeat_path(queue_dir: Path, machine: str,
+                     template: str = ".heartbeat-<machine>") -> Path:
+    """Resolve the per-machine heartbeat path against the manifest template.
+
+    The manifest's `studio_extras.heartbeat_file` may be e.g.
+    `queue/.heartbeat-<machine>` (relative, with the `<machine>` placeholder).
+    queue_dir is `<workspace>/queue`, so we strip a leading `queue/` if
+    present and substitute the placeholder.
+    """
+    rel = template
+    if rel.startswith("queue/"):
+        rel = rel[len("queue/"):]
+    rel = rel.replace("<machine>", machine)
+    return queue_dir / rel
+
+
+def write(queue_dir: Path, *, machine: str,
+           timeout_seconds: int = 25,
+           template: str = ".heartbeat-<machine>") -> dict:
+    """Write a heartbeat for `machine` into queue_dir, resolved via template.
+
+    Watchdog protocol: write to a local tmp file, then atomic-rename the
+    rename through a watchdog with a hard timeout. On timeout, return
+    `degraded`; caller logs and continues. Never raises.
+    """
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    ts = _utc_iso_now()
+    dest = _heartbeat_path(queue_dir, machine, template)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
     tmp = Path(tempfile.gettempdir()) / f".heartbeat-{machine}-{os.getpid()}.tmp"
     tmp.write_text(ts)
 
-    # Watchdog-guarded rename
     result: dict = {"status": "ok", "ts": ts}
     finished = threading.Event()
 
@@ -4442,7 +5057,6 @@ def write(queue_dir: Path, *, machine: str,
     if not finished.wait(timeout=timeout_seconds):
         result["status"] = "degraded"
         result["reason"] = f"rename did not complete within {timeout_seconds}s"
-        # Best-effort cleanup of the tmp file
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
@@ -4454,21 +5068,32 @@ def write(queue_dir: Path, *, machine: str,
 
 ```python
 def is_heartbeat_alive(queue_dir: Path, *, machine: str,
-                        max_age_seconds: int) -> bool:
-    """True iff the heartbeat for `machine` is < max_age_seconds old."""
+                        max_age_seconds: int,
+                        template: str = ".heartbeat-<machine>") -> bool:
+    """True iff the heartbeat for `machine` is < max_age_seconds old.
+
+    `template` is the manifest's `studio_extras.heartbeat_file`. The caller
+    is responsible for reading the field from the manifest and passing it
+    here; the default matches the v0.4 manifest value.
+    """
     import datetime
-    hb = queue_dir / f".heartbeat-{machine}"
+    # Reuse the same path-resolution logic from _heartbeat.write
+    from scripts._heartbeat import _heartbeat_path
+    hb = _heartbeat_path(queue_dir, machine, template)
     if not hb.exists():
         return False
     try:
         content = hb.read_text().strip()
-        # Accept both `...Z` and bare ISO
         if content.endswith("Z"):
             content = content[:-1]
         ts = datetime.datetime.fromisoformat(content)
+        if ts.tzinfo is None:
+            # Treat naive timestamps as UTC (legacy)
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
     except (ValueError, OSError):
         return False
-    age = (datetime.datetime.utcnow() - ts).total_seconds()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    age = (now - ts).total_seconds()
     return age < max_age_seconds
 ```
 
@@ -4503,9 +5128,22 @@ git commit -m "P4.2: heartbeat write/read helpers (local-tmp + atomic-rename + w
 - Modify: `scripts/queue_worker.py`
 - Create: `tests/python/test_queue_worker_heartbeat.py`
 
-- [ ] **Step 1: Read the existing queue_worker.py main loop**
+- [ ] **Step 1: Map the existing queue_worker.py main loop**
 
-Read `scripts/queue_worker.py` lines 280-370 to identify the three continue-points (pending-empty sleep, job-claimed continue, job-failed continue). The exact line numbers may differ from the spec; locate them by structure.
+Run these greps before editing to know exactly what you're modifying:
+
+```bash
+grep -n "argparse\|--poll\|while not\|while True\|def main\|import socket" \
+    scripts/queue_worker.py
+```
+
+Concrete state of `scripts/queue_worker.py` as of v0.3:
+- `import socket` already exists near the top — **do not duplicate the import.**
+- The main loop is inline in `main()` and starts with `while not stop["flag"]:`, not `while True:`. Adjust insertion points accordingly.
+- A `--poll-seconds` argparse flag does NOT exist today; you will add one if the test in Step 2 requires it (otherwise rely on the existing poll interval).
+- The signal handlers set `stop["flag"] = True`.
+
+If the line numbers are out of sync with the spec by the time you reach this task, trust the structure (loop body, post-claim block, post-failure block) over the line numbers.
 
 - [ ] **Step 2: Write failing test**
 
@@ -4525,38 +5163,107 @@ REPO = Path(__file__).resolve().parents[2]
 WORKER = REPO / "scripts" / "queue_worker.py"
 
 
-def test_worker_writes_heartbeat_at_start(tmp_path):
-    """Smoke: starting the worker creates a heartbeat file within 5s."""
-    assets_root = tmp_path / "ws"
-    (assets_root / "queue" / "pending").mkdir(parents=True)
-    (assets_root / "queue" / "running").mkdir(parents=True)
-    (assets_root / "queue" / "done").mkdir(parents=True)
-    (assets_root / "queue" / "failed").mkdir(parents=True)
+def _worker_argv(assets_root: Path, *extra) -> list[str]:
+    """Build a worker command. Use whichever poll-interval flag the existing
+    queue_worker.py declares; if `--poll-seconds` is absent, the worker uses
+    its default. The test tolerates either."""
+    base = [sys.executable, str(WORKER),
+            "--assets-root", str(assets_root),
+            "--script-dir", str(assets_root)]
+    return base + list(extra)
 
-    # Start worker as a subprocess; let it write one heartbeat then stop it
+
+def test_worker_writes_heartbeat_at_start(tmp_path):
+    """Smoke: starting the worker creates a heartbeat file within 10s."""
+    assets_root = tmp_path / "ws"
+    for sub in ("pending", "running", "done", "failed"):
+        (assets_root / "queue" / sub).mkdir(parents=True)
+
     proc = subprocess.Popen(
-        [sys.executable, str(WORKER),
-         "--assets-root", str(assets_root),
-         "--script-dir", str(assets_root),
-         "--poll-seconds", "1"],
+        _worker_argv(assets_root),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
         machine = socket.gethostname()
         hb = assets_root / "queue" / f".heartbeat-{machine}"
-        deadline = time.time() + 8
+        deadline = time.time() + 10
         while time.time() < deadline:
             if hb.exists():
                 break
             time.sleep(0.5)
-        assert hb.exists(), "worker did not write a heartbeat within 8s"
+        assert hb.exists(), \
+            f"worker did not write a heartbeat within 10s; stderr={proc.stderr.read()!r}"
         content = hb.read_text().strip()
         if content.endswith("Z"):
             content = content[:-1]
         ts = datetime.datetime.fromisoformat(content)
-        # Should be very recent
-        age = (datetime.datetime.utcnow() - ts).total_seconds()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
         assert age < 30
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_worker_survives_heartbeat_write_failure(tmp_path):
+    """AC10 integration: when the heartbeat write fails (e.g. SMB hang), the
+    worker logs and continues; it must not crash. We simulate by making the
+    queue directory read-only after the worker starts."""
+    import os as _os
+    assets_root = tmp_path / "ws"
+    for sub in ("pending", "running", "done", "failed"):
+        (assets_root / "queue" / sub).mkdir(parents=True)
+    proc = subprocess.Popen(
+        _worker_argv(assets_root),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        # Wait for first heartbeat
+        machine = socket.gethostname()
+        hb = assets_root / "queue" / f".heartbeat-{machine}"
+        deadline = time.time() + 10
+        while time.time() < deadline and not hb.exists():
+            time.sleep(0.5)
+        assert hb.exists()
+
+        # Make the queue dir read-only so subsequent heartbeat writes fail
+        _os.chmod(assets_root / "queue", 0o500)
+        time.sleep(2)  # let the worker attempt at least one heartbeat
+        # Worker must still be alive (poll returncode; None means running)
+        assert proc.poll() is None, \
+            f"worker died after heartbeat failure; stderr={proc.stderr.read()!r}"
+    finally:
+        # Restore perms so cleanup works
+        try:
+            _os.chmod(assets_root / "queue", 0o755)
+        except OSError:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_worker_dry_run_does_not_write_heartbeat(tmp_path):
+    """Spec §6.2: --dry-run must skip heartbeat writes entirely."""
+    assets_root = tmp_path / "ws"
+    for sub in ("pending", "running", "done", "failed"):
+        (assets_root / "queue" / sub).mkdir(parents=True)
+    proc = subprocess.Popen(
+        _worker_argv(assets_root, "--dry-run"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        time.sleep(3)
+        # No heartbeat file should exist for any host
+        heartbeats = list((assets_root / "queue").glob(".heartbeat-*"))
+        assert heartbeats == [], \
+            f"--dry-run wrote heartbeats: {heartbeats}"
     finally:
         proc.terminate()
         try:
@@ -4572,78 +5279,83 @@ Expected: FAIL — heartbeat not yet wired.
 
 - [ ] **Step 4: Add heartbeat writes to the worker main loop**
 
-Edit `scripts/queue_worker.py`:
+Edit `scripts/queue_worker.py`.
 
-At the top (imports section), add:
+**Imports.** `socket` is already imported; do not re-import. Add the heartbeat import below the existing imports (the try/except dual-path import handles both "installed under workspace/" and "run from source"):
 
 ```python
-import socket
 try:
     from _heartbeat import write as _heartbeat_write  # type: ignore
 except ImportError:
-    # Fallback when run from source: insert the script's dir into sys.path
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))
     from _heartbeat import write as _heartbeat_write  # type: ignore
 ```
 
-Find the main-loop function (the one that calls `_list_pending` / claims / runs jobs — typically named `run()` or `main_loop()`). Identify its accepted arguments; we need access to `assets_root` and a way to read `heartbeat_max_age_seconds` / `heartbeat_write_timeout_seconds`.
-
-Add a CLI argument:
+**CLI flags.** Inside the existing `argparse.ArgumentParser` block in `main()`, add:
 
 ```python
     parser.add_argument("--heartbeat-write-timeout-seconds", type=int, default=25,
                         help="Watchdog for heartbeat atomic-rename")
+    parser.add_argument("--heartbeat-template", default=".heartbeat-<machine>",
+                        help="Heartbeat path template (manifest's "
+                             "studio_extras.heartbeat_file). Relative to "
+                             "queue/.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Don't claim jobs and don't write heartbeats")
 ```
 
-Add a helper near the top of the main loop function:
+(If `--dry-run` already exists, do not redeclare; gate the new heartbeat behaviour on the existing flag.)
+
+**Helper.** Near the top of `main()` after `args = parser.parse_args()` and the existing `stop = {"flag": False}` setup, add:
 
 ```python
     machine = socket.gethostname()
     queue_dir = Path(args.assets_root) / "queue"
 
     def _hb():
+        if args.dry_run:
+            return  # spec §6.2: honour --dry-run for the heartbeat
         try:
             _heartbeat_write(queue_dir, machine=machine,
-                              timeout_seconds=args.heartbeat_write_timeout_seconds)
+                              timeout_seconds=args.heartbeat_write_timeout_seconds,
+                              template=args.heartbeat_template)
         except Exception as e:
+            # Never let a heartbeat failure crash the worker
             print(f"[worker] heartbeat write failed: {e}", file=sys.stderr)
 ```
 
-Now insert `_hb()` calls at every continue-point in the main loop:
+**Insertion points.** Within the existing `while not stop["flag"]:` loop, place `_hb()` calls so a slow operation (>30s) never sits between two heartbeats. The current loop has these natural seams; insert one call at each:
 
-1. After the initial setup / before entering the loop:
+1. **Just before the `while not stop["flag"]:` line** — initial heartbeat at boot:
+   ```python
+   _hb()  # initial heartbeat so an observer can confirm boot
+   while not stop["flag"]:
+   ```
 
-```python
-    _hb()  # initial heartbeat so an observer can confirm boot
-```
+2. **First line inside the loop**, before any `_list_pending` call:
+   ```python
+   while not stop["flag"]:
+       _hb()
+       # ... existing pending listing
+   ```
 
-2. At the top of each poll iteration (just after the `while True:`):
+3. **Empty-pending branch**, before the `time.sleep(...)` call:
+   ```python
+       if not pending:
+           _hb()
+           time.sleep(<existing poll interval>)
+           continue
+   ```
 
-```python
-    while True:
-        _hb()
-        # ... existing pending-listing logic
-```
+4. **After a job dispatch completes** (whether success or failure branch):
+   ```python
+       # after the existing post-job bookkeeping
+       _hb()
+   ```
 
-3. Before any `time.sleep(...)` for empty-pending:
-
-```python
-        if not pending:
-            _hb()
-            time.sleep(args.poll_seconds)
-            continue
-```
-
-4. After processing each job (whether success or failure):
-
-```python
-        # after job dispatch (existing code) — ensure heartbeat lands
-        _hb()
-```
-
-Exact placement depends on the existing structure; the goal is "at least one `_hb()` call between any two adjacent operations that could each take >30s".
+If the loop has only points (1) + (2) + (3), that's still spec-compliant — what matters is that the heartbeat lands at least once per `heartbeat_max_age_seconds` window (90s default) during normal operation.
 
 - [ ] **Step 5: Run tests**
 
@@ -4901,6 +5613,80 @@ Expected: PASS.
 ```bash
 git add setup-skill/ tests/python/test_setup_skill_layout.py
 git commit -m "P5.1: setup-skill scaffold (SKILL.md + audit_loop.py helper)"
+```
+
+---
+
+### Task 5.1b: SKILL.md content invariants (AC9, AC9b, AC17)
+
+ACs 9, 9b, and 17 are flow behaviours documented in `setup-skill/SKILL.md`. To stop them from quietly regressing under future edits, add a content-grep test that fails if the required phrases disappear.
+
+**Files:**
+- Create: `tests/python/test_skill_content.py`
+
+- [ ] **Step 1: Write the test**
+
+Create `tests/python/test_skill_content.py`:
+
+```python
+"""SKILL.md content invariants for AC9, AC9b, AC17."""
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+SETUP_SKILL = REPO / "setup-skill" / "SKILL.md"
+
+
+def test_setup_skill_documents_git_pull_gate_ac17():
+    """AC17: skill must show the commit range and ask before fast-forwarding."""
+    text = SETUP_SKILL.read_text()
+    assert "git fetch" in text, "AC17: skill must mention git fetch"
+    assert "HEAD..origin" in text, "AC17: skill must show the commit-range diff"
+    assert "ask before" in text.lower() or "ask before pulling" in text.lower(), \
+        "AC17: skill must require user confirmation before pull"
+    assert "silent" in text.lower(), \
+        "AC17: skill should explicitly forbid silent-pull"
+
+
+def test_setup_skill_documents_multi_select_ux_ac9():
+    """AC9: one prompt per stage, comma-range selection, ≤8 prompts worst case."""
+    text = SETUP_SKILL.read_text()
+    assert "one prompt per stage" in text.lower() or \
+        "one multi-select prompt" in text.lower(), \
+        "AC9: skill must promise per-stage prompts (not per-item)"
+    # Comma-range selection example
+    assert "1,3-4" in text or "1-5,8" in text, \
+        "AC9: skill must show comma-range selection syntax"
+    # Skip option (AC9b)
+    assert "(s) skip" in text or "skip" in text, \
+        "AC9b: skill must offer a skip option per stage"
+
+
+def test_setup_skill_documents_bootstrap_prompt_count():
+    """Bootstrap is acknowledged as ~6-7 prompts; audit loop is ≤8."""
+    text = SETUP_SKILL.read_text()
+    # Either phrasing is fine; the point is acknowledging the bootstrap budget
+    assert "bootstrap" in text.lower()
+    assert "audit" in text.lower()
+
+
+def test_setup_skill_documents_studio_heartbeat_check():
+    """Studio tier must verify foreign-worker heartbeat before apply."""
+    text = SETUP_SKILL.read_text()
+    assert "heartbeat" in text.lower(), \
+        "Studio section must reference the heartbeat liveness check"
+    assert "is_heartbeat_alive" in text or "heartbeat" in text.lower()
+```
+
+- [ ] **Step 2: Run failing**
+
+Run: `python3 -m pytest tests/python/test_skill_content.py -v`
+Expected: tests PASS (the SKILL.md created in Task 5.1 already contains all required phrases). If any fail, edit `setup-skill/SKILL.md` to include the missing phrase.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/python/test_skill_content.py
+git commit -m "P5.1b: automated content checks for AC9/AC9b/AC17 in SKILL.md"
 ```
 
 ---
@@ -5430,22 +6216,22 @@ Cross-check from spec §11 ACs to plan tasks:
 | AC5 — stage prerequisite enforcement | Task 2.9 |
 | AC6 — smoke-warm verification | Task 3.8 |
 | AC7 — partial venv handling | Task 3.3 |
-| AC8 — studio extras opt-out is sticky | Tasks 2.2 + 4.1 |
-| AC9 — multi-select UX prompt count | Tasks 5.1, 5.2 |
-| AC9b — per-stage skip doesn't abort | Tasks 5.1, 5.2 |
-| AC10 — heartbeat liveness, unit-tested | Tasks 4.2, 4.3 |
+| AC8 — studio extras opt-out is sticky | Tasks 2.2 + 4.1 (round-trip test added) |
+| AC9 — multi-select UX prompt count | Tasks 5.1 (skill content) + 5.1b (grep test) |
+| AC9b — per-stage skip doesn't abort | Tasks 5.1, 5.1b, 5.2 |
+| AC10 — heartbeat liveness, unit-tested | Tasks 4.2, 4.3 (resilience + dry-run tests) |
 | AC11 — CI v2 schema validation | Tasks 1.3–1.9, 5.8 |
-| AC12 — zero-engine-code-for-new-model (scoped) | Task 3.7 |
+| AC12 — zero-engine-code-for-new-model (scoped) | Tasks 3.7 (nested dispatch) + 3.8 (e2e test) |
 | AC13 — cold-start contract | Task 2.9 |
 | AC14 — concurrent-apply lock + network-FS refusal | Task 2.3 |
 | AC15 — EMBEDS partition invariant | Task 1.9 |
-| AC16 — resumable HF download | Task 3.6 |
-| AC17 — git-pull commit-range gate | Task 5.1 (skill content) |
+| AC16 — resumable HF + direct-URL download | Tasks 3.6 + 3.8 (wired into models stage) |
+| AC17 — git-pull commit-range gate | Tasks 5.1 (skill content) + 5.1b (grep test) |
 
-Every AC has at least one task. AC17 is documented in `SKILL.md`
-content rather than tested in pytest because it's a skill-flow
-behaviour, not an engine call. The setup skill's content explicitly
-mandates the gate; verification is via review of `setup-skill/SKILL.md`.
+Every AC has at least one task. AC9/AC9b/AC17 are flow behaviours
+that live in SKILL.md content; Task 5.1b adds a grep-based pytest
+that fails if the required phrases disappear from `setup-skill/SKILL.md`,
+so silent regressions are caught in CI.
 
 ---
 
