@@ -263,6 +263,22 @@ def check_structure(manifest: dict) -> dict:
     except ImportError:
         _fail("embeds-file-exists", "could not import tools._embed_lib — EMBEDS check skipped")
 
+    # Rule 2 — every venv references a declared feature_set.
+    known_sets = set(manifest.get("feature_sets", {}).keys())
+    all_venvs = manifest.get("venvs", [])
+    any_bad = False
+    for v in all_venvs:
+        name = v.get("name", "<unnamed>")
+        fs = v.get("feature_set")
+        if fs is None:
+            _fail("venv-feature-set", f"venv '{name}' is missing 'feature_set' field")
+            any_bad = True
+        elif fs not in known_sets:
+            _fail("venv-feature-set", f"venv '{name}' references unknown feature_set '{fs}'")
+            any_bad = True
+    if not any_bad:
+        _ok("venv-feature-set", f"all {len(all_venvs)} venvs reference valid feature_sets")
+
     # Inner key "structure" follows the existing file pattern:
     # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
     return {"status": status, "structure": checks}
