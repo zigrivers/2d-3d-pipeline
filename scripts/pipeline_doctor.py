@@ -9,6 +9,7 @@ multi-GB download with no indication anything is happening.
 
 Usage:
     pipeline_doctor.py [--check {disk,models,venvs,wrappers,structure,all}]
+                       (note: "structure" requires a repo checkout; excluded from "all")
                        [--include FEATURE,FEATURE,...]
                        [--warm-cache]
                        [--fix]
@@ -49,6 +50,7 @@ from pathlib import Path
 
 PIPELINE_ROOT = Path(os.environ.get("PIPELINE_ROOT", os.path.expanduser("~/3d-pipeline")))
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 MANIFEST_PATH = SCRIPT_DIR / "model_manifest.json"
 
 # Disk thresholds
@@ -241,7 +243,26 @@ def check_structure(manifest: dict) -> dict:
     def _ok(name: str, details: str = "") -> None:
         checks.append({"name": name, "status": "ok", "details": details})
 
-    # Rules populated in Tasks 3-6; skeleton returns ok with no checks.
+    # Rule 1 — every EMBEDS source path exists on disk.
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from tools._embed_lib import EMBEDS  # type: ignore
+        bad_paths, missing = [], []
+        for src in EMBEDS:
+            resolved = (REPO_ROOT / src).resolve()
+            if not resolved.is_relative_to(REPO_ROOT.resolve()):
+                bad_paths.append(src)
+            elif not resolved.exists():
+                missing.append(src)
+        for src in bad_paths:
+            _fail("embeds-file-exists", f"{src} resolves outside repo root")
+        for src in missing:
+            _fail("embeds-file-exists", f"{src} missing from repo")
+        if not bad_paths and not missing:
+            _ok("embeds-file-exists", f"all {len(EMBEDS)} EMBEDS source files present")
+    except ImportError:
+        _fail("embeds-file-exists", "could not import tools._embed_lib — EMBEDS check skipped")
+
     # Inner key "structure" follows the existing file pattern:
     # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
     return {"status": status, "structure": checks}
@@ -394,7 +415,9 @@ def main() -> int:
         report["models"] = check_models(manifest, scope)
     if args.check in ("wrappers", "all"):
         report["wrappers"] = check_wrappers(manifest)
-    if args.check in ("structure", "all"):
+    if args.check == "structure":
+        # structure is not included in "all" — it requires a repo checkout
+        # (tools._embed_lib) and is intended for CI, not user installs.
         report["structure"] = check_structure(manifest)
     if args.warm_cache:
         report["warm_cache"] = warm_cache(manifest, scope)
