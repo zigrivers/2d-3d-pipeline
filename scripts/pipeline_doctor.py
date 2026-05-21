@@ -264,8 +264,8 @@ def check_structure(manifest: dict) -> dict:
         _fail("embeds-file-exists", "could not import tools._embed_lib — EMBEDS check skipped")
 
     # Rule 2 — every venv references a declared feature_set.
-    known_sets = set(manifest.get("feature_sets", {}).keys())
-    all_venvs = manifest.get("venvs", [])
+    known_sets = set((manifest.get("feature_sets") or {}).keys())
+    all_venvs = manifest.get("venvs") or []
     any_bad = False
     for v in all_venvs:
         name = v.get("name", "<unnamed>")
@@ -273,11 +273,37 @@ def check_structure(manifest: dict) -> dict:
         if fs is None:
             _fail("venv-feature-set", f"venv '{name}' is missing 'feature_set' field")
             any_bad = True
+        elif not isinstance(fs, str):
+            _fail("venv-feature-set", f"venv '{name}' 'feature_set' must be a string, got {type(fs).__name__}")
+            any_bad = True
         elif fs not in known_sets:
             _fail("venv-feature-set", f"venv '{name}' references unknown feature_set '{fs}'")
             any_bad = True
     if not any_bad:
         _ok("venv-feature-set", f"all {len(all_venvs)} venvs reference valid feature_sets")
+
+    # Rule 3 — every model references a valid feature_set AND has at least one venv for it.
+    venv_sets = {v.get("feature_set") for v in (manifest.get("venvs") or []) if isinstance(v.get("feature_set"), str)}
+    all_models = manifest.get("models") or []
+    any_bad_model = False
+    for m in all_models:
+        mid = m.get("id", "<unknown>")
+        fs = m.get("feature_set")
+        if fs is None:
+            _fail("model-feature-set", f"model '{mid}' is missing 'feature_set' field")
+            any_bad_model = True
+        elif not isinstance(fs, str):
+            _fail("model-feature-set", f"model '{mid}' 'feature_set' must be a string, got {type(fs).__name__}")
+            any_bad_model = True
+        elif fs not in known_sets:
+            _fail("model-feature-set", f"model '{mid}' references unknown feature_set '{fs}'")
+            any_bad_model = True
+        elif fs not in venv_sets:
+            _fail("model-feature-set",
+                  f"model '{mid}' has feature_set '{fs}' but no venv targets that set")
+            any_bad_model = True
+    if not any_bad_model:
+        _ok("model-feature-set", f"all {len(all_models)} models reference valid feature_sets with a venv")
 
     # Inner key "structure" follows the existing file pattern:
     # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
