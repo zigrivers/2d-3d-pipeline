@@ -1,159 +1,304 @@
 # Spec — Pipeline-doctor in CI
 
-**Status:** draft for review · **Q5 from `docs/improvement-spec.md`
-"Open questions"** · 2026-05-20
+**Status:** draft for review (rev 2 — MMR findings applied) ·
+**Q5 from `docs/improvement-spec.md` "Open questions"** · 2026-05-20
 
 ## What this is
 
 A proposal to run `scripts/pipeline_doctor.py` in CI on pull
 requests + pushes that touch the canonical scripts or model
 manifest. The goal is to catch the easiest-to-miss class of bug
-the doctor was designed to surface — stale `model_manifest.json`
-entries, missing venv references, wrappers whose `--help` broke
-recently — before a release goes out, not after a user reports it.
+the doctor was designed to surface — manifest drift, structural
+breakage of the script catalog, wrappers whose `--help` exits
+non-zero — before a release goes out, not after a user reports it.
 
 ## Why bother
 
-Today the doctor is a manual-run tool. Two failure modes nothing in
-CI catches:
+Today the doctor is a manual-run tool. Three failure modes nothing
+in CI catches:
 
-1. **Stale `model_manifest.json`.** Someone adds a new model to a
-   wrapper (e.g. a new generator), forgets to add the model to the
-   manifest. Pipeline-doctor's `--check models` would fail; CI
-   today wouldn't.
-2. **Drift between EMBEDS map and model_manifest.** A new script
-   gets embedded but isn't surfaced in pipeline-doctor's venv /
-   wrapper checks. Same shape of problem.
+1. **Drift between `scripts/` and `model_manifest.json::wrappers`.**
+   Someone adds a new user-facing wrapper, forgets to register it
+   in the manifest. The doctor's `--check wrappers` only iterates
+   what the manifest declares, so it silently skips the new
+   wrapper today. The new `--check structure` step (below) closes
+   this gap by validating in both directions.
+2. **Internal manifest inconsistency.** A new feature_set is
+   declared but no venv or model points at it; a venv references a
+   feature_set that doesn't exist; an EMBEDS entry points at a
+   file that's been deleted.
 3. **Wrapper `--help` regressions.** A bash syntax error or stale
-   arg parser slips past local testing and into a release.
-
-The doctor's `--check wrappers` runs `<script> --help` and checks
-the exit code. Trivial to run in CI; catches regressions early.
+   arg parser slips past local testing and into a release. The
+   doctor's existing `--check wrappers` catches this, but only
+   when run.
 
 ## What this proposal does NOT do
 
 - **Does not install models in CI.** Downloads are gigabytes and
-  CI runners can't host them sensibly. `--check models` instead
-  treats every model as "absent" in CI and just validates the
-  *manifest's structure* (no entries pointing at impossible paths,
-  no entries for files that don't have a corresponding wrapper or
-  EMBEDS entry).
-- **Does not gate releases.** PRs can land with doctor warnings;
-  warnings surface as inline PR comments via the existing GH
-  Actions setup, not as failures. The goal is visibility, not
-  enforcement.
-- **Does not change the doctor's CLI.** Existing flags are enough;
-  we run with `--check {wrappers,structure} --json` and parse the
-  output in the workflow.
+  CI runners can't host them sensibly. `--check models` and
+  `--check disk` are skipped in CI entirely.
+- **Does not detect "wrapper uses a generator/model that isn't in
+  the manifest".** That would require parsing every wrapper's
+  generator-selection logic, which the current doctor doesn't do
+  and which is out of scope for this proposal. Limited to internal
+  manifest + EMBEDS consistency.
+- **Does not gate releases (for non-wrapper warnings).** A failure
+  on `--check structure` (critical) blocks the PR. A non-`ok`
+  wrapper status — missing or `--help`-broken — also blocks the
+  PR; even though the doctor itself reports those as `warning`
+  and exits 0, the CI workflow parses the JSON and fails the job.
+  We chose the strict gate because a wrapper whose `--help` exits
+  non-zero is a real bug; see "Trade-offs" below. Other
+  `warning`-level findings (none today, but room for future
+  subchecks) would surface only as a PR comment.
+- **Does not change the doctor's existing CLI surface for `disk`,
+  `venvs`, `models`, `wrappers`.** Existing exit-code semantics
+  stay (`warning` → 0, `critical` → 1) so as not to break local
+  invocations. CI parses `--json` output to enforce stricter gates
+  instead of relying solely on exit codes (see workflow below).
 
 ## What changes
 
-### 1. New `--check structure` subcheck
+### 1. New `--check structure` subcheck in `pipeline_doctor.py`
 
-Add a `structure` choice to `pipeline_doctor.py --check`. Validates
-the **catalog itself** rather than the runtime state:
+Add `structure` to the `--check` choices. Validates the **catalog
+itself** rather than the runtime install state — runs without
+any models, venvs, or workspace symlink being present:
 
-- Every file in `tools/_embed_lib.py::EMBEDS` exists on disk.
-- Every model in `model_manifest.json` has a sensible feature_set
-  (one of the declared sets).
-- Every venv referenced by a model points at a venv declared in
-  `model_manifest.json::venvs`.
-- The wrappers list in `model_manifest.json::wrappers` matches the
-  set of `.sh` files under `scripts/` (allowing exceptions for
-  intentionally-internal scripts like `_pipeline_lib.sh`).
+- Every file in `tools/_embed_lib.py::EMBEDS` exists at the
+  declared source path on disk.
+- Every venv in `model_manifest.json::venvs` has a `feature_set`
+  that exists in `feature_sets`.
+- Every model in `model_manifest.json::models` has a `feature_set`
+  that exists in `feature_sets`, and at least one venv exists for
+  the same feature_set (so the model has somewhere to run from).
+- Every entry in `model_manifest.json::wrappers` exists as a file
+  in `scripts/` and is executable.
+- Every `scripts/*.sh` file is **either** declared in
+  `model_manifest.json::wrappers` **or** appears in a hard-coded
+  allow-list of intentionally-internal scripts (current
+  exceptions: `_pipeline_lib.sh`, `migrate_assets.sh`,
+  `multiview.sh`). The allow-list lives in
+  `pipeline_doctor.py` next to the check so adding a new
+  internal script is an obvious one-line change.
+- The doctor returns the structure result with `status:
+  "critical"` if any check fails (mapping to exit code 1, so CI's
+  default behavior fails the job).
 
-This subcheck is the one that CI actually exercises — it runs
-without any models or venvs being present.
+Pure-stdlib. Roughly 60 LOC including the allow-list and
+human-readable formatting.
 
-### 2. New `.github/workflows/pipeline-doctor.yml`
+### 2. CI runs the doctor against the repo, not an install
 
-Triggers:
-- Pull requests touching `scripts/**`, `skill/**`, or
-  `tools/_embed_lib.py`.
-- Pushes to `main` for the same paths.
+The existing `check_wrappers()` resolves wrapper paths via
+`PIPELINE_ROOT / "workspace"`, which doesn't exist on a fresh CI
+runner. Two options; we use option A:
 
-Steps:
-1. Check out repo
-2. Set up Python 3.12 (no pip installs needed — `pipeline_doctor.py`
-   is stdlib-only for structure + wrappers checks)
-3. Run `pipeline_doctor.py --check structure --json` — fail the job
-   if exit code = 1 (critical structural problem)
-4. Run `pipeline_doctor.py --check wrappers --json` — fail on
-   exit code = 1
-5. On warning (exit 0 with non-empty notes), post the JSON output
-   as a PR comment via `actions/github-script`. Doesn't fail the
-   build, but the comment makes drift visible at review time.
+- **(A — chosen) Stage a workspace in the runner.** The workflow
+  creates `$RUNNER_TEMP/workspace` (matches the path
+  `check_wrappers()` resolves: `PIPELINE_ROOT / "workspace"`),
+  symlinks every `scripts/*.sh` into it, then runs the doctor
+  with `PIPELINE_ROOT=$RUNNER_TEMP`. No doctor change required;
+  preserves the existing semantics for local users.
+- (B — rejected for now) Add a `--workspace PATH` flag to the
+  doctor so CI can point straight at `./scripts`. Cleaner, but
+  bigger surface change; revisit if multiple call sites need it.
 
-Approx workflow length: 30 lines of YAML.
+### 3. New `.github/workflows/pipeline-doctor.yml`
 
-### 3. Documentation
+```yaml
+name: pipeline-doctor
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tools/_embed_lib.py'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'tools/_embed_lib.py'
+
+permissions:
+  contents: read
+  pull-requests: write   # for the warning comment below
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # pipefail so `... | tee` propagates the doctor's exit code
+        # instead of masking it with tee's (always-zero) status.
+        shell: bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Stage workspace
+        run: |
+          mkdir -p "$RUNNER_TEMP/workspace"
+          for f in scripts/*.sh; do
+            ln -s "$PWD/$f" "$RUNNER_TEMP/workspace/$(basename "$f")"
+          done
+          echo "PIPELINE_ROOT=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Structure check (fail on critical)
+        run: |
+          python scripts/pipeline_doctor.py --check structure --json \
+            | tee structure.json
+          # pipefail (see defaults.run.shell) ensures doctor's
+          # exit code propagates: critical → exit 1 → step fails.
+
+      - name: Wrapper check (fail on any non-ok)
+        run: |
+          python scripts/pipeline_doctor.py --check wrappers --json \
+            | tee wrappers.json
+          # Existing exit-code semantics map warning→0. We want
+          # stricter gating in CI: parse JSON and fail on any
+          # wrapper whose status != "ok". The doctor emits
+          # report["wrappers"] = {"status": ..., "wrappers": [rows]}.
+          # Heredoc (rather than `python -c "..."`) keeps the
+          # Python source flush-left regardless of YAML indent.
+          python - <<'PY'
+          import json, sys
+          d = json.load(open('wrappers.json'))
+          rows = d.get('wrappers', {}).get('wrappers', [])
+          bad = [w for w in rows if w.get('status') != 'ok']
+          if bad:
+              print('Broken wrappers:', bad, file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Post warning comment on PR
+        # `always()` so the comment still posts when the structure
+        # or wrapper step failed — that's exactly when reviewers
+        # most need the JSON report inline on the PR.
+        if: |
+          always() &&
+          github.event_name == 'pull_request' &&
+          !cancelled()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- pipeline-doctor-comment -->';
+            const sections = [];
+            for (const f of ['structure.json', 'wrappers.json']) {
+              try {
+                const data = JSON.parse(fs.readFileSync(f, 'utf8'));
+                sections.push(`### ${f}\n\n<details>\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`\n\n</details>`);
+              } catch (e) { /* missing file = step failed earlier */ }
+            }
+            const body = `${marker}\n\n## pipeline-doctor report\n\n${sections.join('\n\n')}`;
+            const { owner, repo } = context.repo;
+            const pr = context.issue.number;
+            const existing = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number: pr });
+            const mine = existing.find(c => c.body && c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment(
+                { owner, repo, issue_number: pr, body });
+            }
+```
+
+Notes baked into the workflow above:
+- `if: github.event_name == 'pull_request'` on the comment step so
+  pushes to `main` don't try to comment on a non-existent PR.
+- `continue-on-error: true` on the comment step so a missing
+  `pull-requests: write` permission (e.g., a fork PR with the
+  default token scope) doesn't fail the build.
+- Idempotent: looks up an existing comment by marker and updates
+  it in place rather than spamming on every push.
+
+### 4. Documentation
 
 - Mention the CI workflow in `CONVENTIONS.md` so new contributors
-  know it'll catch model-manifest drift.
-- Add a sentence to `model_manifest.json`'s top-level
-  `_schema_note` explaining "this file is structurally validated
-  in CI".
+  know it catches manifest drift.
+- Add a sentence to `model_manifest.json`'s top-level `description`
+  field explaining "structurally validated in CI on PR".
 
 ## What this catches
 
-- Adding a new wrapper to `/scripts/` without adding it to
-  `model_manifest.json::wrappers` → CI fails on `--check structure`.
-- Adding a model to `model_manifest.json` referencing a venv that
-  doesn't exist in the same file → fails on `--check structure`.
-- A bash syntax error in any `.sh` wrapper that breaks `--help` →
-  fails on `--check wrappers`.
-- Removing a file from `/scripts/` without removing its EMBEDS
-  entry → fails on `--check structure`.
+- Adding a new user-facing wrapper to `scripts/` without
+  registering it in `model_manifest.json::wrappers` (and without
+  adding it to the internal-script allow-list) → fails on
+  `--check structure`.
+- Adding a venv referencing a non-existent feature_set → fails on
+  `--check structure`.
+- Adding a model whose feature_set has no venv to run it → fails
+  on `--check structure`.
+- Removing a file from `scripts/` (or anywhere referenced by
+  EMBEDS) without removing its EMBEDS entry → fails on
+  `--check structure`.
+- A bash syntax error or stale arg parser breaking any wrapper's
+  `--help` → fails on `--check wrappers` (via the JSON parse,
+  even though the doctor's own exit code is 0).
 
 ## What this doesn't catch
 
 - Anything that requires a model or venv actually being present.
   The doctor's `disk` / `models` / `venvs` checks need a real
-  install and CI doesn't have one. That's fine — the manual run on
-  developer machines covers it.
+  install. CI doesn't have one; manual `pipeline_doctor.py
+  --check all` on developer machines covers it.
+- A wrapper that picks a generator/model not declared in the
+  manifest — see "What this proposal does NOT do" above.
 - Bugs in the model inference itself. The wrappers run; whether
-  the models do the right thing is a different test (the
-  benchmark harness in `tests/multiview-bench/`).
+  the models do the right thing is the benchmark harness's job
+  (`tests/multiview-bench/`).
 
 ## Trade-offs
 
-- **Pro:** zero extra dependencies; structure check runs in seconds;
-  catches a real class of drift bug.
-- **Pro:** stays out of the critical path — warnings comment on PRs,
-  don't block.
-- **Con:** small surface increase — one more thing to keep working.
-  Trivially mitigated since the structure check is pure-Python
-  stdlib and lives in the same repo as the script it validates.
-- **Con:** the `--check structure` subcheck doesn't exist yet;
-  shipping CI requires writing it first. Small (~50 LOC).
+- **Pro:** zero extra dependencies; structure + wrappers check
+  runs in seconds; catches a real class of drift bug.
+- **Pro:** PR-warning comments are idempotent (updated in place)
+  and tolerant of fork/permission edge cases via
+  `continue-on-error`.
+- **Con:** small surface increase — one more workflow + one more
+  doctor subcheck to keep working.
+- **Con:** CI's strict wrapper gate (JSON parse) duplicates exit-
+  code interpretation outside the doctor. If we end up with three
+  call sites doing this, promote it to a `--fail-on-warning` flag
+  in the doctor. Premature today.
 
 ## Effort
 
 | Item | Estimate |
 |---|---|
-| Implement `--check structure` in `pipeline_doctor.py` | ~1 hour |
-| Write `.github/workflows/pipeline-doctor.yml` | ~30 min |
+| Implement `--check structure` in `pipeline_doctor.py` (+ allow-list) | ~1.5 hours |
+| Write `.github/workflows/pipeline-doctor.yml` | ~45 min |
 | Update `CONVENTIONS.md` + `model_manifest.json` notes | ~15 min |
-| Smoke-test on this branch + an intentionally-broken branch | ~30 min |
-| **Total** | **~2.5 hours** |
+| Smoke-test on this branch + an intentionally-broken branch (each fail mode) | ~45 min |
+| **Total** | **~3.25 hours** |
 
 ## Open questions for review
 
-1. **Should the workflow fail or warn on `--check wrappers`
-   regressions?** I'd argue fail — a wrapper whose `--help` exits
-   non-zero is a real bug that should block the merge. But that
-   means tighter loop on contributors. (My recommendation: fail.)
-2. **Should we run the doctor on a schedule too** (e.g., nightly
-   `cron`) to catch issues where the manifest references a model
-   whose download URL silently changed upstream? Cheap; might be
-   over-engineering today. (My recommendation: skip until we hit
-   the case once.)
-3. **PR comment format** — single comment with the full JSON, or
-   one comment per finding? Single is less noisy. (My
-   recommendation: single comment, collapsed `<details>` block.)
+1. **Internal-script allow-list location.** Hard-coded in
+   `pipeline_doctor.py`, or a new array in `model_manifest.json`
+   (e.g., `internal_scripts: [...]`)? Manifest is more discoverable
+   and keeps all catalog truth in one file. (My recommendation:
+   put it in the manifest as `internal_scripts`, validated by the
+   structure check the same way `wrappers` is.)
+2. **Nightly scheduled run.** Cron the doctor against `main` to
+   catch upstream model-URL changes? Cheap; might be
+   over-engineering before we hit the case once. (My
+   recommendation: skip until we hit the case.)
+3. **Should `--check structure` also lint `skill/SKILL.md`** (e.g.,
+   ensure every embed marker has a matching EMBEDS entry)? The
+   `make verify` target already does this on `make verify` /
+   pre-commit. Duplicating in the doctor is redundant unless we
+   want a single source of truth in CI. (My recommendation: leave
+   `make verify` as the SKILL-parity gate; doctor stays focused
+   on manifest + scripts.)
 
 ---
 
-Awaiting your review before implementing. Quick green-light or
-ask for changes; once approved I'll ship the `--check structure`
-subcheck + the workflow file as a small follow-up PR.
+Awaiting your review. Quick green-light or ask for changes; once
+approved I'll ship the `--check structure` subcheck + the
+workflow file as a small follow-up PR.
