@@ -305,6 +305,40 @@ def check_structure(manifest: dict) -> dict:
     if not any_bad_model:
         _ok("model-feature-set", f"all {len(all_models)} models reference valid feature_sets with a venv")
 
+    # Rule 4 — wrappers list ↔ scripts/ parity.
+    # Every entry in manifest.wrappers must exist in scripts/ and be executable.
+    # Every scripts/*.sh must be in manifest.wrappers OR manifest.internal_scripts.
+    declared_wrappers = manifest.get("wrappers") or []
+    internal_scripts = manifest.get("internal_scripts") or []
+    accounted_for = set(declared_wrappers) | set(internal_scripts)
+    any_bad_wrapper = False
+    scripts_root = SCRIPT_DIR.resolve()
+
+    for wrapper in declared_wrappers:
+        if "/" in wrapper or wrapper.startswith("."):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' must be a plain filename, not a path")
+            any_bad_wrapper = True
+            continue
+        path = (SCRIPT_DIR / wrapper).resolve()
+        if not path.is_relative_to(scripts_root):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' resolves outside scripts/")
+            any_bad_wrapper = True
+        elif not path.is_file():
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' not found in scripts/")
+            any_bad_wrapper = True
+        elif not os.access(path, os.X_OK):
+            _fail("wrapper-parity", f"wrappers entry '{wrapper}' is not executable")
+            any_bad_wrapper = True
+
+    all_sh = sorted(SCRIPT_DIR.glob("*.sh"))
+    unregistered = [p.name for p in all_sh if p.name not in accounted_for]
+    for name in unregistered:
+        _fail("wrapper-parity", f"scripts/{name} not in wrappers or internal_scripts — register it")
+        any_bad_wrapper = True
+
+    if not any_bad_wrapper:
+        _ok("wrapper-parity", f"all {len(all_sh)} .sh files accounted for; all {len(declared_wrappers)} wrappers executable")
+
     # Inner key "structure" follows the existing file pattern:
     # report["wrappers"]["wrappers"], report["venvs"]["venvs"], etc.
     return {"status": status, "structure": checks}
