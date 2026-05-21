@@ -158,13 +158,13 @@
   "wrappers": [
     "concept.sh",
     "generate.sh",
+    "multiview.sh",
     "print.sh",
     "texture.sh",
     "benchmark.sh"
   ],
   "internal_scripts": [
     "_pipeline_lib.sh",
-    "migrate_assets.sh",
-    "multiview.sh"
+    "migrate_assets.sh"
   ]
 }

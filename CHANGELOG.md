@@ -2,6 +2,25 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-05-20 — Q5: pipeline-doctor CI integration
+
+- `scripts/pipeline_doctor.py` — new `--check structure` subcheck (CI-only,
+  excluded from `--check all`). Four rules: EMBEDS source files exist on disk;
+  every venv references a declared feature_set; every model references a
+  declared feature_set with at least one matching venv; wrappers list ↔
+  scripts/ parity (each entry is a plain executable file in scripts/; every
+  .sh is in wrappers or internal_scripts).
+- `scripts/model_manifest.json` — added `internal_scripts` array listing
+  intentionally-non-public .sh files (_pipeline_lib.sh, migrate_assets.sh).
+  Added `multiview.sh` to `wrappers` (user-facing; was omitted from P3.1).
+  Updated description to note CI structural validation.
+- `.github/workflows/pipeline-doctor.yml` — new workflow triggered on PRs and
+  main pushes touching scripts/ or tools/_embed_lib.py. Fails on critical
+  structure findings and any non-ok wrapper status. Posts an idempotent JSON
+  report as a PR comment.
+- `CONVENTIONS.md` — new CI / pipeline-doctor section documenting the workflow
+  and how to fix failures.
+
 ## 2026-05-20 — P3.2: ComfyUI consistency mode (item 11)
 
 Five sub-deliverables shipped:
