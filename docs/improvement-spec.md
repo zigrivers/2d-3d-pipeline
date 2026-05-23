@@ -983,7 +983,8 @@ This item makes installation, caching, and runtime checks first-class.
 New CLI `scripts/pipeline_doctor.py` invoked as:
 
 ```bash
-pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}] [--fix] [--json]
+pipeline_doctor.py [--check {disk,models,venvs,wrappers,all}] [--apply] [--json]
+# (v0.4: `--fix` is kept as a deprecated alias for `--apply`; removal in v0.5.)
 ```
 
 Behaviours per check:
@@ -1010,7 +1011,7 @@ Behaviours per check:
   recent edits that broke arg parsing).
 - **all**: runs every check.
 
-`--fix` mode:
+`--apply` mode (historically `--fix`, kept as a deprecated alias):
 
 - Creates missing venvs (calls the relevant setup commands from
   the setup guides).
@@ -1096,7 +1097,7 @@ Models:         ✓ sf3d, u2net, ViT-L-14, real-esrgan
                 ⚠ sdxl, ip-adapter, controlnet missing (needed for consistency mode; ~10 GB)
 Wrappers:       ✓ concept.sh, generate.sh, print.sh, texture.sh, benchmark.sh
 
-Run with --fix to install missing optional components.
+Run with --apply to install missing optional components.
 Run --warm-cache --include hunyuan3d-paint to pre-download paint model.
 ```
 
@@ -1126,7 +1127,7 @@ Skill change — new section near the top of `SKILL.md`:
   downloads; can be re-run later.
 - Disk full mid-download → cleanup partial file; report disk pressure.
 - Sha256 mismatch on a model → flag as `partial/corrupt`; suggest
-  `--fix` to redownload.
+  `--apply` to redownload.
 
 ### Test strategy
 
