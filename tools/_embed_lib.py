@@ -65,6 +65,7 @@ EMBEDS: dict[str, str] = {
     "scripts/comfyui_dispatch.py":          "~/3d-pipeline/workspace/comfyui_dispatch.py",
     "scripts/comfyui_workflows/consistency_sdxl.json": "~/3d-pipeline/workspace/comfyui_workflows/consistency_sdxl.json",
     "scripts/_install_lib.py":              "~/3d-pipeline/workspace/_install_lib.py",
+    "scripts/_heartbeat.py":                "~/3d-pipeline/workspace/_heartbeat.py",
 }
 
 EMBEDS_SCRIPTS: dict[str, str] = {

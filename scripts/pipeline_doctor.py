@@ -1044,6 +1044,34 @@ def check_studio_extras(manifest: dict, tier: str, declined_state: dict) -> dict
     return {"status": overall, "items": rows}
 
 
+def is_heartbeat_alive(queue_dir: Path, *, machine: str,
+                        max_age_seconds: int,
+                        template: str = ".heartbeat-<machine>") -> bool:
+    """True iff the heartbeat for `machine` is < max_age_seconds old.
+
+    `template` is the manifest's `studio_extras.heartbeat_file`. Caller is
+    responsible for reading the field from the manifest and passing it here;
+    the default matches the v0.4 manifest value.
+    """
+    from scripts._heartbeat import _heartbeat_path
+    hb = _heartbeat_path(queue_dir, machine, template)
+    if not hb.exists():
+        return False
+    try:
+        content = hb.read_text().strip()
+        if content.endswith("Z"):
+            content = content[:-1]
+        ts = datetime.datetime.fromisoformat(content)
+        if ts.tzinfo is None:
+            # Treat naive timestamps as UTC (legacy)
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, OSError):
+        return False
+    now = datetime.datetime.now(datetime.timezone.utc)
+    age = (now - ts).total_seconds()
+    return age < max_age_seconds
+
+
 def _resolve_only(arg: str) -> list[str]:
     if not arg:
         return list(STAGES_ORDER)
