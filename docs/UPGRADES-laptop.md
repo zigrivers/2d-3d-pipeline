@@ -10,6 +10,36 @@ just works.
 
 ---
 
+## v0.4 — Claude-Code-driven setup + audit/fix loop
+
+A new `asset-pipeline-setup` Claude Code skill drives install and
+drift-detection workflows from the catalog repo. The existing
+copy-paste [`asset-pipeline-guide.html`](asset-pipeline-guide.html)
+remains supported.
+
+What's new (laptop tier):
+
+- `pipeline_doctor.py` gains `--apply`, `--check installed`, and
+  `--only STAGE` flags. Same code drives install and audit; same
+  catalog drives both.
+- Manifest schema bumps to v2 with a strict additive contract.
+  Existing deployed manifests keep working.
+- Venvs install from committed `pip freeze` lockfiles
+  (`scripts/lockfiles/`), making `--apply` reproducible across runs.
+- Models download with resume support — HuggingFace via
+  `huggingface_hub.hf_hub_download`, direct URLs via `Range:` headers.
+- New `docs/setup-via-claude.md` documents the Claude-driven flow.
+
+What's deliberately unchanged:
+
+- 2D default still Z-Image Turbo, 3D default still SF3D.
+- The HTML guide still works as a manual install path.
+- All v0.3 quality-check scripts are still invoked the same way.
+
+Last updated: 2026-05-23
+
+---
+
 ## What's new on the laptop tier
 
 ### `--json` on every wrapper
