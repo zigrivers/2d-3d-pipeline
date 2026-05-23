@@ -40,6 +40,9 @@ urllib + no-op progress.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import datetime
+import fcntl
 import json
 import os
 import shutil
@@ -56,6 +59,124 @@ MANIFEST_PATH = SCRIPT_DIR / "model_manifest.json"
 # Disk thresholds
 HARD_FLOOR_GB = 20.0
 WORKING_MARGIN_GB = 5.0
+
+
+# ---------------- state file ----------------
+
+def _state_path() -> Path:
+    root = Path(os.environ.get("PIPELINE_ROOT", os.path.expanduser("~/3d-pipeline")))
+    return root / ".install_state.json"
+
+
+def load_state() -> dict:
+    p = _state_path()
+    if not p.exists():
+        return {"stages": {}, "declined": {}}
+    try:
+        data = json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return {"stages": {}, "declined": {}}
+    data.setdefault("stages", {})
+    data.setdefault("declined", {})
+    return data
+
+
+def _write_state(state: dict) -> None:
+    p = _state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(p)
+
+
+def _utc_iso_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def record_stage_outcome(stage: str, *, ok: bool,
+                          manifest_sha: str | None = None,
+                          error: str | None = None) -> None:
+    state = load_state()
+    entry: dict = {"ok": ok, "ts": _utc_iso_now()}
+    if manifest_sha is not None:
+        entry["manifest_sha"] = manifest_sha
+    if error is not None:
+        entry["error"] = error
+    state["stages"][stage] = entry
+    _write_state(state)
+
+
+def record_declined(resource_id: str, *, reason: str) -> None:
+    state = load_state()
+    state["declined"][resource_id] = {"ts": _utc_iso_now(), "reason": reason}
+    _write_state(state)
+
+
+def clear_declined() -> None:
+    state = load_state()
+    state["declined"] = {}
+    _write_state(state)
+
+
+# ---------------- lock ----------------
+
+class LockHeldError(RuntimeError):
+    pass
+
+
+class NetworkFSError(RuntimeError):
+    pass
+
+
+_NETWORK_FS_TYPES = {"smbfs", "nfs", "afpfs", "fuse.sshfs", "webdav"}
+
+
+def _is_network_fs(path: Path) -> bool:
+    try:
+        out = subprocess.run(["mount"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    p = path.resolve()
+    best_match_type = ""
+    best_match_len = -1
+    for line in out.splitlines():
+        try:
+            _, mountpoint_part = line.split(" on ", 1)
+            mountpoint, rest = mountpoint_part.split(" (", 1)
+            fstype = rest.split(",", 1)[0].strip()
+        except ValueError:
+            continue
+        if str(p).startswith(mountpoint) and len(mountpoint) > best_match_len:
+            best_match_len = len(mountpoint)
+            best_match_type = fstype
+    return best_match_type in _NETWORK_FS_TYPES
+
+
+@contextlib.contextmanager
+def apply_lock():
+    """Acquire an advisory flock; refuse on network filesystems."""
+    root = Path(os.environ.get("PIPELINE_ROOT",
+                                os.path.expanduser("~/3d-pipeline")))
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".install.lock"
+    if _is_network_fs(lock_path):
+        raise NetworkFSError(
+            f"refusing to lock {lock_path} on network filesystem — "
+            "advisory locks are unreliable. Move PIPELINE_ROOT to local disk.")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LockHeldError(
+                f"another --apply is already running (holding {lock_path})")
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _expand(path_str: str) -> Path:
@@ -675,18 +796,40 @@ def _print_human(report: dict, scope: set[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pipeline doctor + cache manager")
     parser.add_argument("--check",
-                        choices=["disk", "models", "venvs", "wrappers", "structure", "all"],
+                        choices=["disk", "models", "venvs", "wrappers",
+                                 "structure", "installed", "all"],
                         default="all",
-                        help="Which subset to run (default: all)")
+                        help="Which subset to run (default: all). "
+                             "'installed' walks every stage in read-only "
+                             "drift-detection mode.")
     parser.add_argument("--include", default="",
                         help="Comma-separated opt-in feature sets (e.g. hunyuan3d-paint,comfyui)")
     parser.add_argument("--warm-cache", action="store_true",
                         help="Pre-download models with direct URLs for the chosen scope")
     parser.add_argument("--fix", action="store_true",
-                        help="(Future) attempt to install missing components. Currently reports only.")
+                        help="(deprecated) alias for --apply; will be removed in v0.5")
     parser.add_argument("--json", action="store_true",
                         help="Emit structured JSON; suppresses human-readable output")
+
+    # v0.4 flags
+    parser.add_argument("--apply", action="store_true",
+                        help="Reconcile disk state to the catalog (opposite of --check)")
+    parser.add_argument("--only", default="",
+                        help="Comma-separated stage list to restrict --check or --apply to "
+                             "(prereqs,dirs,config,scripts,skill,venvs,models,studio_extras)")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip interactive confirmation gates (for CI / re-runs)")
+    parser.add_argument("--tier", choices=["laptop", "studio"], default=None,
+                        help="Hardware tier; required when ~/3d-pipeline/.config is absent")
+    parser.add_argument("--reconsider-optionals", action="store_true",
+                        help="Clear declined-optional state for this run")
     args = parser.parse_args()
+
+    if args.fix and not args.apply:
+        print("warning: --fix is a deprecated alias for --apply; "
+              "use --apply directly. Removal scheduled for v0.5.",
+              file=sys.stderr)
+        args.apply = True
 
     manifest = _load_manifest()
     include = [s.strip() for s in args.include.split(",") if s.strip()]
@@ -712,8 +855,8 @@ def main() -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         _print_human(report, scope)
-        if args.fix:
-            print("--fix is a future feature; currently report-only.\n", file=sys.stderr)
+        if args.apply:
+            print("--apply: no stages implemented yet (coming in Phase 2).\n", file=sys.stderr)
 
     # Exit code reflects worst severity across checks
     worst = "ok"

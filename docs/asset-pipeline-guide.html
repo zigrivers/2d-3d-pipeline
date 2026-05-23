@@ -5928,6 +5928,9 @@ urllib + no-op progress.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import datetime
+import fcntl
 import json
 import os
 import shutil
@@ -5944,6 +5947,124 @@ MANIFEST_PATH = SCRIPT_DIR / &quot;model_manifest.json&quot;
 # Disk thresholds
 HARD_FLOOR_GB = 20.0
 WORKING_MARGIN_GB = 5.0
+
+
+# ---------------- state file ----------------
+
+def _state_path() -&gt; Path:
+    root = Path(os.environ.get(&quot;PIPELINE_ROOT&quot;, os.path.expanduser(&quot;~/3d-pipeline&quot;)))
+    return root / &quot;.install_state.json&quot;
+
+
+def load_state() -&gt; dict:
+    p = _state_path()
+    if not p.exists():
+        return {&quot;stages&quot;: {}, &quot;declined&quot;: {}}
+    try:
+        data = json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return {&quot;stages&quot;: {}, &quot;declined&quot;: {}}
+    data.setdefault(&quot;stages&quot;, {})
+    data.setdefault(&quot;declined&quot;, {})
+    return data
+
+
+def _write_state(state: dict) -&gt; None:
+    p = _state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + &quot;.tmp&quot;)
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(p)
+
+
+def _utc_iso_now() -&gt; str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime(&quot;%Y-%m-%dT%H:%M:%S.%fZ&quot;)
+
+
+def record_stage_outcome(stage: str, *, ok: bool,
+                          manifest_sha: str | None = None,
+                          error: str | None = None) -&gt; None:
+    state = load_state()
+    entry: dict = {&quot;ok&quot;: ok, &quot;ts&quot;: _utc_iso_now()}
+    if manifest_sha is not None:
+        entry[&quot;manifest_sha&quot;] = manifest_sha
+    if error is not None:
+        entry[&quot;error&quot;] = error
+    state[&quot;stages&quot;][stage] = entry
+    _write_state(state)
+
+
+def record_declined(resource_id: str, *, reason: str) -&gt; None:
+    state = load_state()
+    state[&quot;declined&quot;][resource_id] = {&quot;ts&quot;: _utc_iso_now(), &quot;reason&quot;: reason}
+    _write_state(state)
+
+
+def clear_declined() -&gt; None:
+    state = load_state()
+    state[&quot;declined&quot;] = {}
+    _write_state(state)
+
+
+# ---------------- lock ----------------
+
+class LockHeldError(RuntimeError):
+    pass
+
+
+class NetworkFSError(RuntimeError):
+    pass
+
+
+_NETWORK_FS_TYPES = {&quot;smbfs&quot;, &quot;nfs&quot;, &quot;afpfs&quot;, &quot;fuse.sshfs&quot;, &quot;webdav&quot;}
+
+
+def _is_network_fs(path: Path) -&gt; bool:
+    try:
+        out = subprocess.run([&quot;mount&quot;], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    p = path.resolve()
+    best_match_type = &quot;&quot;
+    best_match_len = -1
+    for line in out.splitlines():
+        try:
+            _, mountpoint_part = line.split(&quot; on &quot;, 1)
+            mountpoint, rest = mountpoint_part.split(&quot; (&quot;, 1)
+            fstype = rest.split(&quot;,&quot;, 1)[0].strip()
+        except ValueError:
+            continue
+        if str(p).startswith(mountpoint) and len(mountpoint) &gt; best_match_len:
+            best_match_len = len(mountpoint)
+            best_match_type = fstype
+    return best_match_type in _NETWORK_FS_TYPES
+
+
+@contextlib.contextmanager
+def apply_lock():
+    &quot;&quot;&quot;Acquire an advisory flock; refuse on network filesystems.&quot;&quot;&quot;
+    root = Path(os.environ.get(&quot;PIPELINE_ROOT&quot;,
+                                os.path.expanduser(&quot;~/3d-pipeline&quot;)))
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / &quot;.install.lock&quot;
+    if _is_network_fs(lock_path):
+        raise NetworkFSError(
+            f&quot;refusing to lock {lock_path} on network filesystem — &quot;
+            &quot;advisory locks are unreliable. Move PIPELINE_ROOT to local disk.&quot;)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise LockHeldError(
+                f&quot;another --apply is already running (holding {lock_path})&quot;)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _expand(path_str: str) -&gt; Path:
@@ -6563,18 +6684,40 @@ def _print_human(report: dict, scope: set[str]) -&gt; None:
 def main() -&gt; int:
     parser = argparse.ArgumentParser(description=&quot;Pipeline doctor + cache manager&quot;)
     parser.add_argument(&quot;--check&quot;,
-                        choices=[&quot;disk&quot;, &quot;models&quot;, &quot;venvs&quot;, &quot;wrappers&quot;, &quot;structure&quot;, &quot;all&quot;],
+                        choices=[&quot;disk&quot;, &quot;models&quot;, &quot;venvs&quot;, &quot;wrappers&quot;,
+                                 &quot;structure&quot;, &quot;installed&quot;, &quot;all&quot;],
                         default=&quot;all&quot;,
-                        help=&quot;Which subset to run (default: all)&quot;)
+                        help=&quot;Which subset to run (default: all). &quot;
+                             &quot;&#x27;installed&#x27; walks every stage in read-only &quot;
+                             &quot;drift-detection mode.&quot;)
     parser.add_argument(&quot;--include&quot;, default=&quot;&quot;,
                         help=&quot;Comma-separated opt-in feature sets (e.g. hunyuan3d-paint,comfyui)&quot;)
     parser.add_argument(&quot;--warm-cache&quot;, action=&quot;store_true&quot;,
                         help=&quot;Pre-download models with direct URLs for the chosen scope&quot;)
     parser.add_argument(&quot;--fix&quot;, action=&quot;store_true&quot;,
-                        help=&quot;(Future) attempt to install missing components. Currently reports only.&quot;)
+                        help=&quot;(deprecated) alias for --apply; will be removed in v0.5&quot;)
     parser.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
                         help=&quot;Emit structured JSON; suppresses human-readable output&quot;)
+
+    # v0.4 flags
+    parser.add_argument(&quot;--apply&quot;, action=&quot;store_true&quot;,
+                        help=&quot;Reconcile disk state to the catalog (opposite of --check)&quot;)
+    parser.add_argument(&quot;--only&quot;, default=&quot;&quot;,
+                        help=&quot;Comma-separated stage list to restrict --check or --apply to &quot;
+                             &quot;(prereqs,dirs,config,scripts,skill,venvs,models,studio_extras)&quot;)
+    parser.add_argument(&quot;--yes&quot;, action=&quot;store_true&quot;,
+                        help=&quot;Skip interactive confirmation gates (for CI / re-runs)&quot;)
+    parser.add_argument(&quot;--tier&quot;, choices=[&quot;laptop&quot;, &quot;studio&quot;], default=None,
+                        help=&quot;Hardware tier; required when ~/3d-pipeline/.config is absent&quot;)
+    parser.add_argument(&quot;--reconsider-optionals&quot;, action=&quot;store_true&quot;,
+                        help=&quot;Clear declined-optional state for this run&quot;)
     args = parser.parse_args()
+
+    if args.fix and not args.apply:
+        print(&quot;warning: --fix is a deprecated alias for --apply; &quot;
+              &quot;use --apply directly. Removal scheduled for v0.5.&quot;,
+              file=sys.stderr)
+        args.apply = True
 
     manifest = _load_manifest()
     include = [s.strip() for s in args.include.split(&quot;,&quot;) if s.strip()]
@@ -6600,8 +6743,8 @@ def main() -&gt; int:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         _print_human(report, scope)
-        if args.fix:
-            print(&quot;--fix is a future feature; currently report-only.\n&quot;, file=sys.stderr)
+        if args.apply:
+            print(&quot;--apply: no stages implemented yet (coming in Phase 2).\n&quot;, file=sys.stderr)
 
     # Exit code reflects worst severity across checks
     worst = &quot;ok&quot;
