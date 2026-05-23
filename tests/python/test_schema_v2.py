@@ -55,3 +55,47 @@ def test_tier_defaults_include_must_be_list_of_known_feature_sets(minimal_v2_man
     }
     result = pipeline_doctor.check_structure(m)
     assert result["status"] == "critical"
+
+
+def test_prereqs_required_in_v2(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m.pop("prereqs")
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any(c["name"] == "v2:prereqs" for c in result["structure"])
+
+
+def test_prereqs_must_be_list_of_objects(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["prereqs"] = "not-a-list"
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_prereq_entry_requires_id_kind_name(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["prereqs"] = [{"id": "python"}]  # missing kind, name
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_prereq_max_version_severity_must_be_warn_or_fail(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["prereqs"] = [{
+        "id": "python", "kind": "binary", "name": "python3",
+        "max_version": "3.12", "max_version_severity": "explode",
+    }]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_well_formed_prereqs_pass(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["prereqs"] = [
+        {"id": "python", "kind": "binary", "name": "python3",
+         "min_version": "3.10", "max_version": "3.12",
+         "max_version_severity": "warn"},
+        {"id": "git", "kind": "binary", "name": "git"},
+    ]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "ok"

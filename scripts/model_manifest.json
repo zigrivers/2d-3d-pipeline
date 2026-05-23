@@ -5,6 +5,20 @@
     "laptop": { "include": [] },
     "studio": { "include": ["hunyuan3d-paint"] }
   },
+  "prereqs": [
+    { "id": "python", "kind": "binary", "name": "python3",
+      "min_version": "3.10", "max_version": "3.12",
+      "max_version_severity": "warn",
+      "install_hint": "brew install python@3.12" },
+    { "id": "brew", "kind": "binary", "name": "brew",
+      "install_hint": "see https://brew.sh" },
+    { "id": "git", "kind": "binary", "name": "git" },
+    { "id": "huggingface-cli", "kind": "binary", "name": "huggingface-cli",
+      "install_hint": "pip install huggingface_hub[cli]" },
+    { "id": "pip", "kind": "python_package", "name": "pip",
+      "min_version": "23.1",
+      "install_hint": "python3 -m pip install --upgrade pip" }
+  ],
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",

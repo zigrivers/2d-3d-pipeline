@@ -278,6 +278,31 @@ def check_structure(manifest: dict) -> dict:
                 if not any_bad:
                     _ok("v2:tier-defaults", "both tiers declared with valid feature_sets")
 
+    if v2:
+        prereqs = manifest.get("prereqs")
+        if prereqs is None:
+            _fail("v2:prereqs", "missing 'prereqs' block")
+        elif not isinstance(prereqs, list):
+            _fail("v2:prereqs", f"'prereqs' must be a list, got {type(prereqs).__name__}")
+        else:
+            any_bad = False
+            for i, p in enumerate(prereqs):
+                if not isinstance(p, dict):
+                    _fail("v2:prereqs", f"prereqs[{i}] must be an object")
+                    any_bad = True
+                    continue
+                for required in ("id", "kind", "name"):
+                    if required not in p:
+                        _fail("v2:prereqs", f"prereqs[{i}] missing field '{required}'")
+                        any_bad = True
+                sev = p.get("max_version_severity", "warn")
+                if sev not in ("warn", "fail"):
+                    _fail("v2:prereqs",
+                          f"prereqs[{i}] max_version_severity must be 'warn' or 'fail', got {sev!r}")
+                    any_bad = True
+            if not any_bad:
+                _ok("v2:prereqs", f"{len(prereqs)} prereq(s) well-formed")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

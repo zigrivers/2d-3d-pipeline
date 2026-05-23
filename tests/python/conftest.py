@@ -26,8 +26,11 @@ def minimal_v2_manifest():
         },
         "venvs": [],
         "models": [],
-        "wrappers": [],
-        "internal_scripts": [],
+        "wrappers": [
+            "concept.sh", "generate.sh", "multiview.sh",
+            "print.sh", "texture.sh", "benchmark.sh",
+        ],
+        "internal_scripts": ["_pipeline_lib.sh", "migrate_assets.sh"],
         "tier_defaults": {"laptop": {"include": []}, "studio": {"include": []}},
         "prereqs": [],
         "mutable_embed_paths": [],
