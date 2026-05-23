@@ -187,6 +187,11 @@ def apply_lock():
 
 
 def _expand(path_str: str) -> Path:
+    """Expand `~/3d-pipeline/...` through PIPELINE_ROOT (so tests can
+    redirect), and fall back to `os.path.expanduser` for everything else."""
+    pipeline_root = os.environ.get("PIPELINE_ROOT")
+    if pipeline_root and path_str.startswith("~/3d-pipeline"):
+        return Path(path_str.replace("~/3d-pipeline", pipeline_root, 1))
     return Path(os.path.expanduser(path_str))
 
 
@@ -494,6 +499,454 @@ def apply_prereqs(manifest: dict) -> dict:
     return check_prereqs(manifest)
 
 
+# ---------------- Python pin + venvs stage ----------------
+
+def _patch_pin_matches(pin_path: Path, actual: str) -> bool:
+    """Compare `actual` (e.g. '3.12.7') against the version recorded in
+    `pin_path` (a `.python-version` file). If the file is missing, return
+    True (no constraint). If the pin has no patch (e.g. '3.12'), compare
+    only major.minor."""
+    if not pin_path.exists():
+        return True
+    pinned = pin_path.read_text().strip()
+    if not pinned:
+        return True
+    pinned_parts = pinned.split(".")
+    actual_parts = actual.split(".")
+    if len(pinned_parts) == 2:
+        return pinned_parts == actual_parts[:2]
+    return pinned == actual
+
+
+def _venv_python(venv_path: Path) -> Path:
+    return venv_path / "bin" / "python"
+
+
+def _venv_pip(venv_path: Path) -> Path:
+    return venv_path / "bin" / "pip"
+
+
+def _active_python_version(major_minor: str) -> str | None:
+    """Return the patch version of `python{major_minor}` on PATH, or None."""
+    try:
+        r = subprocess.run([f"python{major_minor}", "-c",
+                             "import sys; print('.'.join(str(p) for p in sys.version_info[:3]))"],
+                            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    stdout = r.stdout if isinstance(r.stdout, str) else ""
+    return stdout.strip() or None
+
+
+_PIP_WHEEL_FAILURE_RE = re.compile(
+    r"(?:Could not build wheels for|Failed building wheel for|"
+    r"Building wheel for)\s+([A-Za-z0-9_.\-]+)")
+
+
+def _parse_failing_package_from_stderr(stderr: str) -> str | None:
+    """Extract the failing package name from pip stderr."""
+    if not stderr:
+        return None
+    for line in stderr.splitlines():
+        m = _PIP_WHEEL_FAILURE_RE.search(line)
+        if m:
+            return m.group(1)
+    m = re.search(r"No matching distribution found for\s+([A-Za-z0-9_.\-]+)",
+                   stderr)
+    if m:
+        return m.group(1)
+    return None
+
+
+def apply_venv(venv: dict) -> dict:
+    """Create or update one venv against its lockfile."""
+    name = venv["name"]
+    path = _expand(venv["path"])
+    pyver = venv["python_version"]
+    lockfile = REPO_ROOT / venv["lockfile"]
+
+    if not lockfile.exists() or not lockfile.read_text().strip():
+        return {"status": "skipped", "name": name,
+                "reason": "empty lockfile — not yet bootstrapped"}
+
+    # Python patch pin check (spec §3.1 / AC3)
+    active = _active_python_version(pyver)
+    if active is None:
+        return {"status": "critical", "name": name,
+                "error": f"python{pyver} not on PATH; "
+                          f"hint: `pyenv install {pyver}` or `brew install python@{pyver}`"}
+    pin = REPO_ROOT / ".python-version"
+    if not _patch_pin_matches(pin, active):
+        pinned = pin.read_text().strip() if pin.exists() else "<missing>"
+        return {"status": "critical", "name": name,
+                "error": (f"active python{pyver} is {active}, but "
+                           f".python-version pins {pinned}. "
+                           f"Either run `pyenv install {pinned} && pyenv local {pinned}`, "
+                           "or regenerate the lockfiles on this machine "
+                           "(see scripts/lockfiles/README.md).")}
+
+    # Create the venv if missing
+    if not path.exists():
+        r = subprocess.run([f"python{pyver}", "-m", "venv", str(path)],
+                            capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"status": "critical", "name": name,
+                    "stage": "venv-create", "error": (r.stderr or "").strip()}
+
+    pip = _venv_pip(path)
+
+    # First install attempt
+    r = subprocess.run([str(pip), "install", "-r", str(lockfile)],
+                        capture_output=True, text=True)
+    if r.returncode == 0:
+        return {"status": "ok", "name": name, "retried": False}
+
+    # Retry path: upgrade pip/setuptools/wheel, then re-install
+    subprocess.run(
+        [str(pip), "install", "--upgrade", "pip", "setuptools", "wheel"],
+        capture_output=True, text=True)
+    r2 = subprocess.run([str(pip), "install", "-r", str(lockfile)],
+                         capture_output=True, text=True)
+    if r2.returncode == 0:
+        return {"status": "ok", "name": name, "retried": True}
+
+    failing = _parse_failing_package_from_stderr(r2.stderr or r.stderr or "")
+    return {
+        "status": "critical", "name": name,
+        "retried": True,
+        "failing_package": failing,
+        "error": ((r2.stderr or "").strip())[:500],
+        "manual_fix": (f"Try: source {path}/bin/activate && "
+                       f"pip install {failing or '<package>'} "
+                       f"(then `pipeline_doctor.py --apply --only venvs`)"),
+    }
+
+
+def apply_venvs(manifest: dict, scope: set[str]) -> dict:
+    rows: list[dict] = []
+    overall = "ok"
+    for v in (manifest.get("venvs") or []):
+        if v.get("feature_set") not in scope:
+            continue
+        r = apply_venv(v)
+        rows.append(r)
+        if r["status"] == "critical":
+            overall = "critical"
+    return {"status": overall, "venvs": rows}
+
+
+def _venv_pip_freeze(venv_path: Path) -> str:
+    """Return `pip freeze --exclude pip --exclude setuptools --exclude wheel`
+    for a venv. Returns empty string if the venv is missing or pip fails."""
+    pip = _venv_pip(venv_path)
+    if not pip.exists():
+        return ""
+    r = subprocess.run(
+        [str(pip), "freeze",
+         "--exclude", "pip", "--exclude", "setuptools", "--exclude", "wheel"],
+        capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def check_venv(venv: dict) -> dict:
+    name = venv["name"]
+    path = _expand(venv["path"])
+    lockfile = REPO_ROOT / venv["lockfile"]
+
+    if not lockfile.exists() or not lockfile.read_text().strip():
+        return {"status": "skipped", "name": name,
+                "reason": "empty lockfile"}
+    if not path.exists():
+        return {"status": "drift", "name": name, "reason": "missing",
+                "fix_command": "pipeline_doctor.py --apply --only venvs"}
+
+    expected = lockfile.read_text()
+    actual = _venv_pip_freeze(path)
+    if expected == actual:
+        return {"status": "ok", "name": name}
+    return {
+        "status": "drift", "name": name, "reason": "lockfile-mismatch",
+        "fix_command": "pipeline_doctor.py --apply --only venvs",
+    }
+
+
+def check_venvs_installed(manifest: dict, scope: set[str]) -> dict:
+    rows: list[dict] = []
+    overall = "ok"
+    for v in (manifest.get("venvs") or []):
+        if v.get("feature_set") not in scope:
+            continue
+        r = check_venv(v)
+        rows.append(r)
+        if r["status"] == "drift":
+            overall = "warning"
+    return {"status": overall, "venvs": rows}
+
+
+# ---------------- HF preflight + downloads + models stage ----------------
+
+def _hf_whoami() -> tuple[bool, str]:
+    """Returns (logged_in, raw_output). Used as an early pre-check."""
+    try:
+        r = subprocess.run(["huggingface-cli", "whoami"],
+                            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return (False, f"huggingface-cli unavailable: {e}")
+    stdout = r.stdout if isinstance(r.stdout, str) else ""
+    stderr = r.stderr if isinstance(r.stderr, str) else ""
+    return (r.returncode == 0, (stdout or stderr).strip())
+
+
+def hf_preflight(models: list[dict]) -> dict:
+    """Per-repo access check for every model with requires_hf_auth=True."""
+    gated = [m for m in models if m.get("requires_hf_auth")]
+    if not gated:
+        return {"status": "ok", "checked": 0, "details": "no gated models in scope"}
+
+    # Step 1: whoami pre-check
+    logged_in, whoami_out = _hf_whoami()
+    if not logged_in:
+        return {
+            "status": "critical", "checked": 0,
+            "details": (f"No HuggingFace token found ({whoami_out}). "
+                         "Run `huggingface-cli login` and re-try."),
+        }
+
+    # Step 2: per-repo access check
+    try:
+        from huggingface_hub import HfApi
+        from huggingface_hub.utils import (
+            RepositoryNotFoundError, GatedRepoError, HfHubHTTPError,
+        )
+    except ImportError:
+        return {"status": "critical", "checked": 0,
+                "details": "huggingface_hub not installed — "
+                           "pip install huggingface_hub[cli]"}
+
+    api = HfApi()
+    failures: list[dict] = []
+    for m in gated:
+        repo = m.get("hf_repo")
+        if not repo:
+            failures.append({
+                "id": m["id"],
+                "error": "requires_hf_auth=true but no hf_repo declared",
+            })
+            continue
+        try:
+            api.model_info(repo, timeout=10)
+        except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as e:
+            failures.append({
+                "id": m["id"], "hf_repo": repo,
+                "error": str(e)[:200],
+                "remediation": (
+                    f"huggingface-cli login  (and if needed, "
+                    f"request access at https://huggingface.co/{repo})"),
+            })
+        except Exception as e:
+            failures.append({
+                "id": m["id"], "hf_repo": repo,
+                "error": f"{type(e).__name__}: {str(e)[:200]}",
+            })
+
+    if failures:
+        details_lines = [
+            f"- {f['id']} ({f.get('hf_repo','?')}): {f['error']}"
+            + (f"\n  fix: {f['remediation']}" if 'remediation' in f else "")
+            for f in failures
+        ]
+        return {
+            "status": "critical",
+            "checked": len(gated),
+            "failures": failures,
+            "details": "HuggingFace access denied for:\n" + "\n".join(details_lines),
+        }
+    return {"status": "ok", "checked": len(gated),
+            "details": f"{len(gated)} gated repo(s) accessible"}
+
+
+def _download_with_range(url: str, dest: Path, expected_size: int | None = None,
+                          chunk_size: int = 65536) -> dict:
+    """Resumable streaming download via HTTP Range header."""
+    try:
+        import requests  # type: ignore
+    except ImportError:
+        return {"status": "critical",
+                "error": "requests not installed; pip install requests"}
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    offset = part.stat().st_size if part.exists() else 0
+    headers = {"Range": f"bytes={offset}-"} if offset > 0 else {}
+
+    result_extra: dict = {}
+    try:
+        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+            if offset > 0 and r.status_code == 200:
+                # Server ignored Range; restart from scratch
+                part.unlink(missing_ok=True)
+                offset = 0
+                result_extra["restarted"] = True
+            mode = "ab" if offset > 0 else "wb"
+            with open(part, mode) as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+    except Exception as e:
+        return {"status": "critical", "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    if expected_size is not None:
+        actual = part.stat().st_size
+        if abs(actual - expected_size) > expected_size * 0.05 + 1024:
+            return {"status": "critical",
+                    "error": f"size mismatch: got {actual}, expected {expected_size}"}
+
+    part.replace(dest)
+    return {"status": "ok", **result_extra}
+
+
+def _download_hf(hf_repo: str, filename: str, cache_dir: Path) -> dict:
+    """Download a file from a HuggingFace repo (resume is always-on)."""
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+    except ImportError:
+        return {"status": "critical",
+                "error": "huggingface_hub not installed"}
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        path = hf_hub_download(
+            repo_id=hf_repo, filename=filename,
+            cache_dir=str(cache_dir),
+        )
+        return {"status": "ok", "path": path}
+    except Exception as e:
+        return {"status": "critical",
+                "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
+def _model_t3_check(model: dict) -> dict:
+    """Presence + size ±5% check at the declared storage layout."""
+    storage = model.get("storage_layout", "literal")
+    expected_mb = model.get("size_mb", 0)
+    if storage == "literal":
+        target = _expand(model["cache_dir"]) / model["filename"]
+        if not target.exists():
+            return {"status": "drift", "reason": "missing",
+                    "path": str(target)}
+        actual_mb = target.stat().st_size / (1024 * 1024)
+    elif storage == "hf_snapshot":
+        cache = _expand(model["cache_dir"])
+        try:
+            from huggingface_hub import try_to_load_from_cache  # type: ignore
+            cached = try_to_load_from_cache(
+                repo_id=model["hf_repo"], filename=model["filename"],
+                cache_dir=str(cache),
+            )
+        except ImportError:
+            cached = None
+        if not cached or not Path(cached).exists():
+            return {"status": "drift", "reason": "missing",
+                    "path": f"{cache}/<snapshot>/{model['filename']}"}
+        actual_mb = Path(cached).stat().st_size / (1024 * 1024)
+    else:
+        return {"status": "critical",
+                "reason": f"unknown storage_layout {storage!r}"}
+
+    # 5% relative tolerance + 10 KB absolute floor (covers timestamp/header
+    # variation in HF snapshot blobs without masking genuinely truncated files).
+    tolerance = max(expected_mb * 0.05, 0.01)
+    if abs(actual_mb - expected_mb) > tolerance:
+        return {"status": "drift",
+                "reason": f"size {actual_mb:.1f} MB outside ±5% of {expected_mb} MB",
+                "actual_mb": round(actual_mb, 1)}
+    return {"status": "ok", "actual_mb": round(actual_mb, 1)}
+
+
+def apply_model(model: dict) -> dict:
+    """Warm the model, then T3-verify the result."""
+    from scripts import _install_lib  # type: ignore
+
+    storage = model.get("storage_layout", "literal")
+    url = model.get("download_url")
+
+    if storage == "literal" and url:
+        target = _expand(model["cache_dir"]) / model["filename"]
+        expected = int(model.get("size_mb", 0)) * 1024 * 1024
+        dl_result = _download_with_range(
+            url, target, expected_size=expected if expected > 0 else None)
+        if dl_result["status"] != "ok":
+            return {"status": "critical", "id": model["id"],
+                    "error": dl_result.get("error", "download failed"),
+                    "verified": False}
+        warm_detail = (f"direct-URL download" +
+                        (" (restarted)" if dl_result.get("restarted") else ""))
+    else:
+        warm_status, warm_detail = _install_lib.warm(model)
+        if warm_status == "failed":
+            return {"status": "critical", "id": model["id"],
+                    "error": warm_detail, "verified": False}
+
+    t3 = _model_t3_check(model)
+    if t3["status"] == "ok":
+        return {"status": "ok", "id": model["id"],
+                "warm_detail": warm_detail, "verified": True,
+                "actual_mb": t3.get("actual_mb")}
+    return {"status": "critical", "id": model["id"],
+            "error": f"post-warm verify failed: {t3.get('reason','?')}",
+            "verified": False}
+
+
+def check_model(model: dict) -> dict:
+    t3 = _model_t3_check(model)
+    if t3["status"] == "ok":
+        return {"status": "ok", "id": model["id"], **t3}
+    return {"status": "drift", "id": model["id"],
+            "fix_command": "pipeline_doctor.py --apply --only models",
+            **t3}
+
+
+def apply_models(manifest: dict, scope: set[str]) -> dict:
+    in_scope = [m for m in (manifest.get("models") or [])
+                if m.get("feature_set") in scope]
+
+    # HF auth preflight FIRST — must abort before any download
+    preflight = hf_preflight(in_scope)
+    if preflight["status"] == "critical":
+        return {"status": "critical",
+                "preflight": preflight,
+                "models": [],
+                "error": preflight["details"]}
+
+    rows: list[dict] = []
+    overall = "ok"
+    for m in in_scope:
+        r = apply_model(m)
+        rows.append(r)
+        if r["status"] == "critical":
+            overall = "critical"
+    return {"status": overall, "preflight": preflight, "models": rows}
+
+
+def check_models_installed(manifest: dict, scope: set[str]) -> dict:
+    rows: list[dict] = []
+    overall = "ok"
+    for m in (manifest.get("models") or []):
+        if m.get("feature_set") not in scope:
+            continue
+        r = check_model(m)
+        rows.append(r)
+        if r["status"] == "drift":
+            overall = "warning"
+    return {"status": overall, "models": rows}
+
+
+def tier_includes(manifest: dict, tier: str) -> list[str]:
+    td = (manifest.get("tier_defaults") or {}).get(tier) or {}
+    return list(td.get("include") or [])
+
+
 def _resolve_only(arg: str) -> list[str]:
     if not arg:
         return list(STAGES_ORDER)
@@ -537,9 +990,11 @@ def dispatch_apply(manifest: dict, stages: list[str],
         elif stage == "skill":
             r = apply_skill(manifest, mutable_paths=mutable_paths)
         elif stage == "venvs":
-            r = {"status": "skipped", "reason": "Phase 3 not yet implemented"}
+            scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
+            r = apply_venvs(manifest, scope)
         elif stage == "models":
-            r = {"status": "skipped", "reason": "Phase 3 not yet implemented"}
+            scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
+            r = apply_models(manifest, scope)
         elif stage == "studio_extras":
             r = {"status": "skipped", "reason": "Phase 4 not yet implemented"}
         else:
@@ -567,9 +1022,15 @@ def dispatch_check_installed(manifest: dict, stages: list[str],
             r = check_scripts(manifest, mutable_paths=mutable_paths)
         elif stage == "skill":
             r = check_skill(manifest, mutable_paths=mutable_paths)
+        elif stage == "venvs":
+            scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
+            r = check_venvs_installed(manifest, scope)
+        elif stage == "models":
+            scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
+            r = check_models_installed(manifest, scope)
         else:
             r = {"status": "skipped",
-                  "reason": "Phase 3/4 stage not yet implemented"}
+                  "reason": "Phase 4 stage not yet implemented"}
         report["stages"][stage] = r
     return report
 
