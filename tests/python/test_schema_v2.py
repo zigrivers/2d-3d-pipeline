@@ -129,3 +129,76 @@ def test_mutable_embed_paths_empty_list_passes(minimal_v2_manifest):
     result = pipeline_doctor.check_structure(minimal_v2_manifest)
     assert any(c["name"] == "v2:mutable-embed-paths" and c["status"] == "ok"
                for c in result["structure"])
+
+
+def _model_with(**overrides):
+    base = {
+        "id": "u2net", "filename": "u2net.onnx",
+        "feature_set": "tier1", "license_bucket": "commercial_safe",
+        "size_mb": 170, "cache_dir": "~/3d-pipeline/models/rembg",
+        "env_var": "U2NET_HOME", "download_url": "https://example/u2net.onnx",
+        "sha256": "", "managed_by": "rembg", "notes": "",
+        "requires_hf_auth": False, "hf_repo": None,
+        "storage_layout": "literal", "warm_target": "u2net",
+        "comfyui_kind": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_model_storage_layout_must_be_literal_or_hf_snapshot(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "rembg-env", "path": "~/3d-pipeline/rembg-env", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "test",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/rembg-env.txt",
+    }]
+    m["models"] = [_model_with(storage_layout="other")]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_model_comfyui_kind_must_match_managed_by(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["feature_sets"]["comfyui"] = {"description": "t", "components": []}
+    m["venvs"] = [{
+        "name": "comfyui-env", "path": "~/3d-pipeline/comfyui-env", "required": False,
+        "feature_set": "comfyui", "size_gb": 10, "purpose": "test",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/comfyui-env.txt",
+    }]
+    # comfyui_kind set but managed_by != comfyui → invalid
+    m["models"] = [_model_with(managed_by="rembg", comfyui_kind="checkpoint",
+                                feature_set="tier1")]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_model_comfyui_kind_required_when_managed_by_comfyui(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["feature_sets"]["comfyui"] = {"description": "t", "components": []}
+    m["venvs"] = [{
+        "name": "comfyui-env", "path": "~/3d-pipeline/comfyui-env", "required": False,
+        "feature_set": "comfyui", "size_gb": 10, "purpose": "test",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/comfyui-env.txt",
+    }]
+    # managed_by=comfyui but kind is None → invalid
+    m["models"] = [_model_with(managed_by="comfyui", comfyui_kind=None,
+                                feature_set="comfyui")]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_requires_hf_auth_implies_hf_repo(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "rembg-env", "path": "~/3d-pipeline/rembg-env", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "t",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/rembg-env.txt",
+    }]
+    m["models"] = [_model_with(requires_hf_auth=True, hf_repo=None)]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"

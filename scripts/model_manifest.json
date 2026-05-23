@@ -93,7 +93,12 @@
       "download_url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
       "sha256": "",
       "managed_by": "rembg",
-      "notes": "Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache."
+      "notes": "Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache.",
+      "requires_hf_auth": false,
+      "hf_repo": null,
+      "storage_layout": "literal",
+      "warm_target": "u2net",
+      "comfyui_kind": null
     },
     {
       "id": "clip-vit-l-14",
@@ -106,7 +111,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "open_clip",
-      "notes": "Downloaded automatically by open_clip on first use; the env var routes the cache."
+      "notes": "Downloaded automatically by open_clip on first use; the env var routes the cache.",
+      "requires_hf_auth": false,
+      "hf_repo": null,
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ViT-L-14",
+      "comfyui_kind": null
     },
     {
       "id": "hunyuan3d-paint",
@@ -119,7 +129,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "hunyuan3d-paint",
-      "notes": "Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md."
+      "notes": "Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md.",
+      "requires_hf_auth": true,
+      "hf_repo": "tencent/Hunyuan3D-2",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "hunyuan3d-paint",
+      "comfyui_kind": null
     },
     {
       "id": "sdxl-base",
@@ -132,7 +147,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "CreativeML Open RAIL-M license."
+      "notes": "CreativeML Open RAIL-M license.",
+      "requires_hf_auth": false,
+      "hf_repo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "sd_xl_base_1.0",
+      "comfyui_kind": "checkpoint"
     },
     {
       "id": "ip-adapter-sdxl",
@@ -145,7 +165,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/."
+      "notes": "Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ip-adapter_sdxl",
+      "comfyui_kind": "ip_adapter"
     },
     {
       "id": "clip-vit-bigg-14",
@@ -158,7 +183,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors."
+      "notes": "Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "clip-vit-bigg-14",
+      "comfyui_kind": "clip_vision"
     },
     {
       "id": "ip-adapter-faceid-sdxl",
@@ -171,7 +201,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet."
+      "notes": "Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter-FaceID",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ip-adapter-faceid_sdxl",
+      "comfyui_kind": "ip_adapter"
     },
     {
       "id": "controlnet-openpose",
@@ -184,7 +219,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0."
+      "notes": "Apache 2.0.",
+      "requires_hf_auth": false,
+      "hf_repo": "xinsir/controlnet-openpose-sdxl-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "controlnet-openpose-sdxl",
+      "comfyui_kind": "controlnet"
     },
     {
       "id": "controlnet-canny",
@@ -197,7 +237,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0."
+      "notes": "Apache 2.0.",
+      "requires_hf_auth": false,
+      "hf_repo": "xinsir/controlnet-canny-sdxl-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "controlnet-canny-sdxl",
+      "comfyui_kind": "controlnet"
     }
   ],
   "wrappers": [

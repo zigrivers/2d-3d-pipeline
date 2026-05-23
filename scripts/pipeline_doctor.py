@@ -315,6 +315,37 @@ def check_structure(manifest: dict) -> dict:
         else:
             _ok("v2:mutable-embed-paths", f"{len(mep)} entry/entries")
 
+    if v2:
+        any_bad_model_v2 = False
+        for m in (manifest.get("models") or []):
+            mid = m.get("id", "<unknown>")
+            layout = m.get("storage_layout")
+            if layout not in ("literal", "hf_snapshot"):
+                _fail("v2:model-storage-layout",
+                      f"model '{mid}' storage_layout must be 'literal' or 'hf_snapshot', got {layout!r}")
+                any_bad_model_v2 = True
+
+            managed = m.get("managed_by")
+            kind = m.get("comfyui_kind")
+            if managed == "comfyui":
+                if kind not in ("checkpoint", "ip_adapter", "controlnet", "lora", "clip_vision"):
+                    _fail("v2:model-comfyui-kind",
+                          f"model '{mid}' managed_by=comfyui requires comfyui_kind in "
+                          "{checkpoint, ip_adapter, controlnet, lora, clip_vision}")
+                    any_bad_model_v2 = True
+            elif kind is not None:
+                _fail("v2:model-comfyui-kind",
+                      f"model '{mid}' has comfyui_kind={kind!r} but managed_by={managed!r}")
+                any_bad_model_v2 = True
+
+            if m.get("requires_hf_auth") and not m.get("hf_repo"):
+                _fail("v2:model-hf-auth",
+                      f"model '{mid}' requires_hf_auth=true but no hf_repo declared")
+                any_bad_model_v2 = True
+
+        if not any_bad_model_v2:
+            _ok("v2:model-fields", "all models have valid v2 fields")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))
