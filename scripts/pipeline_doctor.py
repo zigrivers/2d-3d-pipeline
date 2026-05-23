@@ -251,6 +251,33 @@ def check_structure(manifest: dict) -> dict:
     if v2:
         _v2_ok("schema-version", "manifest is v2; v2 rules active")
 
+    if v2:
+        td = manifest.get("tier_defaults")
+        known_sets = set((manifest.get("feature_sets") or {}).keys())
+        if td is None:
+            _fail("v2:tier-defaults", "missing 'tier_defaults' block")
+        elif not isinstance(td, dict):
+            _fail("v2:tier-defaults", f"'tier_defaults' must be an object, got {type(td).__name__}")
+        else:
+            missing_tiers = {"laptop", "studio"} - set(td.keys())
+            if missing_tiers:
+                _fail("v2:tier-defaults", f"missing tier(s): {sorted(missing_tiers)}")
+            else:
+                any_bad = False
+                for tier, body in td.items():
+                    inc = (body or {}).get("include", [])
+                    if not isinstance(inc, list):
+                        _fail("v2:tier-defaults", f"tier '{tier}' include must be a list")
+                        any_bad = True
+                        continue
+                    unknown = [s for s in inc if s not in known_sets]
+                    if unknown:
+                        _fail("v2:tier-defaults",
+                              f"tier '{tier}' includes unknown feature_set(s): {unknown}")
+                        any_bad = True
+                if not any_bad:
+                    _ok("v2:tier-defaults", "both tiers declared with valid feature_sets")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

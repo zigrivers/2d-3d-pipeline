@@ -27,3 +27,31 @@ def test_v2_manifest_runs_v2_rules(minimal_v2_manifest):
     # Existence of v2-named checks proves the gate fired
     names = {c["name"] for c in result["structure"]}
     assert any(n.startswith("v2:") for n in names)
+
+
+def test_tier_defaults_required_in_v2(minimal_v2_manifest):
+    """v2 manifest without tier_defaults block fails structure check."""
+    m = dict(minimal_v2_manifest)
+    m.pop("tier_defaults")
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any(c["name"] == "v2:tier-defaults" and c["status"] == "critical"
+               for c in result["structure"])
+
+
+def test_tier_defaults_must_have_laptop_and_studio(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["tier_defaults"] = {"laptop": {"include": []}}  # missing studio
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any(c["name"] == "v2:tier-defaults" for c in result["structure"])
+
+
+def test_tier_defaults_include_must_be_list_of_known_feature_sets(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["tier_defaults"] = {
+        "laptop": {"include": ["does-not-exist"]},
+        "studio": {"include": []},
+    }
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"

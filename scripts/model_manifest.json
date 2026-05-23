@@ -1,6 +1,10 @@
 {
   "schema_version": 2,
   "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.",
+  "tier_defaults": {
+    "laptop": { "include": [] },
+    "studio": { "include": ["hunyuan3d-paint"] }
+  },
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",
