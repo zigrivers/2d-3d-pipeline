@@ -20,6 +20,18 @@
       "install_hint": "python3 -m pip install --upgrade pip" }
   ],
   "mutable_embed_paths": [],
+  "studio_extras": {
+    "queue_dirs": ["queue/pending", "queue/running", "queue/done", "queue/failed"],
+    "launchd_plist": {
+      "label": "com.kenallred.3dpipeline.queue-worker",
+      "template": "scripts/launchd/queue-worker.plist.tmpl",
+      "dest_path": "~/Library/LaunchAgents/com.kenallred.3dpipeline.queue-worker.plist",
+      "optional": true
+    },
+    "heartbeat_file": "queue/.heartbeat-<machine>",
+    "heartbeat_max_age_seconds": 90,
+    "heartbeat_write_timeout_seconds": 25
+  },
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",

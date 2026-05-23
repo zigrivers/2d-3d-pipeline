@@ -386,6 +386,45 @@ def check_structure(manifest: dict) -> dict:
         if not any_bad_venv_v2:
             _ok("v2:venv-fields", "all venvs have valid python_version + lockfile")
 
+    if v2:
+        se = manifest.get("studio_extras")
+        if se is None:
+            _fail("v2:studio-extras", "missing 'studio_extras' block")
+        elif not isinstance(se, dict):
+            _fail("v2:studio-extras",
+                  f"'studio_extras' must be an object, got {type(se).__name__}")
+        else:
+            any_bad_se = False
+            for required in ("queue_dirs", "launchd_plist", "heartbeat_file",
+                             "heartbeat_max_age_seconds",
+                             "heartbeat_write_timeout_seconds"):
+                if required not in se:
+                    _fail("v2:studio-extras", f"studio_extras missing '{required}'")
+                    any_bad_se = True
+            if not any_bad_se:
+                max_age = se["heartbeat_max_age_seconds"]
+                timeout = se["heartbeat_write_timeout_seconds"]
+                if not (isinstance(max_age, int) and isinstance(timeout, int)):
+                    _fail("v2:studio-extras",
+                          "heartbeat_*_seconds must be integers")
+                    any_bad_se = True
+                elif timeout >= max_age / 3:
+                    _fail("v2:studio-extras",
+                          f"heartbeat_write_timeout_seconds ({timeout}) must be "
+                          f"strictly less than heartbeat_max_age_seconds/3 "
+                          f"({max_age/3}) to avoid races")
+                    any_bad_se = True
+                plist = se.get("launchd_plist") or {}
+                label = plist.get("label", "")
+                if not (label.count(".") >= 2 and
+                        label.split(".")[0] in ("com", "org", "net", "io", "dev")):
+                    _fail("v2:studio-extras",
+                          f"launchd_plist.label {label!r} must be reverse-DNS "
+                          "(e.g. com.kenallred.3dpipeline.queue-worker)")
+                    any_bad_se = True
+            if not any_bad_se:
+                _ok("v2:studio-extras", "studio_extras well-formed")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

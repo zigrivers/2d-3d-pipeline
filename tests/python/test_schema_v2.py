@@ -251,3 +251,27 @@ def test_venv_lockfile_must_not_contain_pip_setuptools_wheel(
     assert result["status"] == "critical"
     assert any("pip" in c["details"].lower()
                for c in result["structure"] if c["status"] == "critical")
+
+
+def test_studio_extras_required(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m.pop("studio_extras")
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_studio_extras_heartbeat_timeout_must_be_under_third_of_max_age(
+    minimal_v2_manifest
+):
+    m = dict(minimal_v2_manifest)
+    m["studio_extras"]["heartbeat_max_age_seconds"] = 30
+    m["studio_extras"]["heartbeat_write_timeout_seconds"] = 25  # > 30/3
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_studio_extras_launchd_label_must_be_reverse_dns(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["studio_extras"]["launchd_plist"]["label"] = "not-reverse-dns"
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
