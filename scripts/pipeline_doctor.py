@@ -947,6 +947,103 @@ def tier_includes(manifest: dict, tier: str) -> list[str]:
     return list(td.get("include") or [])
 
 
+# ---------------- studio_extras stage ----------------
+
+def _render_launchd_plist(plist_cfg: dict) -> str:
+    """Pure template substitution. No side effects (no mkdir) so that the
+    read-only check_studio_extras can call this for drift comparison without
+    polluting the filesystem; apply_studio_extras creates the log_dir."""
+    tmpl_rel = plist_cfg["template"]
+    tmpl = (REPO_ROOT / tmpl_rel).read_text()
+    workspace = _root() / "workspace"
+    log_dir = _root() / "logs"
+    return tmpl.format(
+        label=plist_cfg["label"],
+        python=str(_expand("~/3d-pipeline/pipeline-tools-env/bin/python")),
+        worker_script=str(workspace / "queue_worker.py"),
+        assets_root=str(workspace),
+        script_dir=str(workspace),
+        log_dir=str(log_dir),
+    )
+
+
+def apply_studio_extras(manifest: dict, tier: str, *,
+                         accept_plist: bool,
+                         declined_state: dict) -> dict:
+    if tier != "studio":
+        return {"status": "skipped", "reason": "laptop tier"}
+    se = manifest.get("studio_extras") or {}
+    workspace = _root() / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (_root() / "logs").mkdir(parents=True, exist_ok=True)
+
+    created_dirs: list[str] = []
+    for d in se.get("queue_dirs", []):
+        p = workspace / d
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            created_dirs.append(d)
+
+    plist_cfg = se.get("launchd_plist") or {}
+    plist_optional = plist_cfg.get("optional", True)
+    plist_status: dict = {"installed": False, "skipped": False}
+
+    if "studio_extras.launchd_plist" in declined_state and plist_optional:
+        plist_status["skipped"] = True
+        plist_status["reason"] = "previously declined"
+    elif accept_plist:
+        dest = _expand_skill(plist_cfg["dest_path"])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        rendered = _render_launchd_plist(plist_cfg)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_text(rendered)
+        tmp.replace(dest)
+        plist_status["installed"] = True
+        plist_status["path"] = str(dest)
+    else:
+        record_declined("studio_extras.launchd_plist",
+                         reason="user declined during apply")
+        plist_status["skipped"] = True
+        plist_status["reason"] = "user declined"
+
+    return {"status": "ok", "created_dirs": created_dirs,
+            "launchd_plist": plist_status}
+
+
+def check_studio_extras(manifest: dict, tier: str, declined_state: dict) -> dict:
+    if tier != "studio":
+        return {"status": "skipped", "reason": "laptop tier"}
+    se = manifest.get("studio_extras") or {}
+    workspace = _root() / "workspace"
+    rows: list[dict] = []
+    overall = "ok"
+    for d in se.get("queue_dirs", []):
+        p = workspace / d
+        rows.append({"name": d,
+                      "status": "ok" if p.is_dir() else "drift"})
+        if not p.is_dir():
+            overall = "warning"
+    plist_cfg = se.get("launchd_plist") or {}
+    dest = _expand_skill(plist_cfg["dest_path"])
+    if "studio_extras.launchd_plist" in declined_state:
+        rows.append({"name": "launchd_plist", "status": "advisory",
+                      "reason": "previously declined"})
+    elif dest.exists():
+        expected = _render_launchd_plist(plist_cfg)
+        actual = dest.read_text()
+        if expected == actual:
+            rows.append({"name": "launchd_plist", "status": "ok"})
+        else:
+            rows.append({"name": "launchd_plist", "status": "drift",
+                          "fix_command":
+                              "pipeline_doctor.py --apply --only studio_extras"})
+            overall = "warning"
+    else:
+        rows.append({"name": "launchd_plist", "status": "advisory",
+                      "reason": "not yet offered or declined"})
+    return {"status": overall, "items": rows}
+
+
 def _resolve_only(arg: str) -> list[str]:
     if not arg:
         return list(STAGES_ORDER)
@@ -996,7 +1093,13 @@ def dispatch_apply(manifest: dict, stages: list[str],
             scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
             r = apply_models(manifest, scope)
         elif stage == "studio_extras":
-            r = {"status": "skipped", "reason": "Phase 4 not yet implemented"}
+            declined = load_state().get("declined", {})
+            # In automated mode, default to declining the plist offer; the
+            # skill prompts the user and re-runs with --reconsider-optionals.
+            accept_plist = False
+            r = apply_studio_extras(manifest, tier=tier,
+                                     accept_plist=accept_plist,
+                                     declined_state=declined)
         else:
             r = {"status": "critical", "error": f"unknown stage {stage!r}"}
         report["stages"][stage] = r
@@ -1028,9 +1131,12 @@ def dispatch_check_installed(manifest: dict, stages: list[str],
         elif stage == "models":
             scope = _resolve_feature_sets(manifest, tier_includes(manifest, tier))
             r = check_models_installed(manifest, scope)
+        elif stage == "studio_extras":
+            declined = load_state().get("declined", {})
+            r = check_studio_extras(manifest, tier=tier, declined_state=declined)
         else:
             r = {"status": "skipped",
-                  "reason": "Phase 4 stage not yet implemented"}
+                  "reason": "unknown stage"}
         report["stages"][stage] = r
     return report
 
