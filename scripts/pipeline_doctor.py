@@ -346,6 +346,46 @@ def check_structure(manifest: dict) -> dict:
         if not any_bad_model_v2:
             _ok("v2:model-fields", "all models have valid v2 fields")
 
+    if v2:
+        any_bad_venv_v2 = False
+        for v in (manifest.get("venvs") or []):
+            name = v.get("name", "<unnamed>")
+            pyver = v.get("python_version")
+            if not isinstance(pyver, str) or not pyver:
+                _fail("v2:venv-python-version",
+                      f"venv '{name}' missing 'python_version' (e.g. '3.12')")
+                any_bad_venv_v2 = True
+            lockfile_rel = v.get("lockfile")
+            if not isinstance(lockfile_rel, str) or not lockfile_rel:
+                _fail("v2:venv-lockfile",
+                      f"venv '{name}' missing 'lockfile' path")
+                any_bad_venv_v2 = True
+                continue
+            lockfile_abs = (REPO_ROOT / lockfile_rel).resolve()
+            if not lockfile_abs.is_relative_to(REPO_ROOT.resolve()):
+                _fail("v2:venv-lockfile",
+                      f"venv '{name}' lockfile {lockfile_rel!r} resolves outside repo")
+                any_bad_venv_v2 = True
+                continue
+            if not lockfile_abs.exists():
+                _fail("v2:venv-lockfile",
+                      f"venv '{name}' lockfile not found at {lockfile_rel}")
+                any_bad_venv_v2 = True
+                continue
+            content = lockfile_abs.read_text()
+            forbidden = []
+            for line in content.splitlines():
+                pkg = line.split("==")[0].strip().lower()
+                if pkg in ("pip", "setuptools", "wheel"):
+                    forbidden.append(pkg)
+            if forbidden:
+                _fail("v2:venv-lockfile",
+                      f"venv '{name}' lockfile contains {forbidden} — regenerate with "
+                      "`pip freeze --exclude pip --exclude setuptools --exclude wheel`")
+                any_bad_venv_v2 = True
+        if not any_bad_venv_v2:
+            _ok("v2:venv-fields", "all venvs have valid python_version + lockfile")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

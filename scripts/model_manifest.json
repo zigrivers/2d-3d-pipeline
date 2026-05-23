@@ -45,7 +45,9 @@
       "required": true,
       "feature_set": "tier1",
       "size_gb": 8,
-      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)"
+      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/mflux-env.txt"
     },
     {
       "name": "pipeline-tools-env",
@@ -54,7 +56,9 @@
       "feature_set": "tier1",
       "size_gb": 6,
       "purpose": "Quality-check scripts (trimesh, rembg, open_clip)",
-      "import_check": "trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests"
+      "import_check": "trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/pipeline-tools-env.txt"
     },
     {
       "name": "hunyuan3d-paint-env",
@@ -62,7 +66,9 @@
       "required": false,
       "feature_set": "hunyuan3d-paint",
       "size_gb": 6,
-      "purpose": "Hunyuan3D-Paint texture painting"
+      "purpose": "Hunyuan3D-Paint texture painting",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/hunyuan3d-paint-env.txt"
     },
     {
       "name": "comfyui-env",
@@ -70,7 +76,9 @@
       "required": false,
       "feature_set": "comfyui",
       "size_gb": 10,
-      "purpose": "ComfyUI consistency mode (Item 11)"
+      "purpose": "ComfyUI consistency mode (Item 11)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/comfyui-env.txt"
     },
     {
       "name": "multiview-env",
@@ -78,7 +86,9 @@
       "required": false,
       "feature_set": "multiview",
       "size_gb": 6,
-      "purpose": "Multi-view reconstruction (Item 12)"
+      "purpose": "Multi-view reconstruction (Item 12)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/multiview-env.txt"
     }
   ],
   "models": [

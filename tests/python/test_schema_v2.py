@@ -202,3 +202,52 @@ def test_requires_hf_auth_implies_hf_repo(minimal_v2_manifest):
     m["models"] = [_model_with(requires_hf_auth=True, hf_repo=None)]
     result = pipeline_doctor.check_structure(m)
     assert result["status"] == "critical"
+
+
+def test_venv_python_version_required(minimal_v2_manifest, tmp_path):
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "x", "path": "~/3d-pipeline/x", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "t",
+        # missing python_version
+        "lockfile": "scripts/lockfiles/x.txt",
+    }]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_venv_lockfile_must_exist(minimal_v2_manifest, monkeypatch, tmp_path):
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "x", "path": "~/3d-pipeline/x", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "t",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/does-not-exist.txt",
+    }]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_venv_lockfile_must_not_contain_pip_setuptools_wheel(
+    minimal_v2_manifest, tmp_path, monkeypatch
+):
+    """Write the fake lockfile under tmp_path and monkeypatch REPO_ROOT so we
+    don't pollute the real repo (which would trip the pre-commit hook on a
+    test interrupt)."""
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "scripts" / "lockfiles").mkdir(parents=True)
+    lockfile = fake_repo / "scripts" / "lockfiles" / "test-bad.txt"
+    lockfile.write_text("pip==24.0\nrequests==2.31.0\n")
+    monkeypatch.setattr(pipeline_doctor, "REPO_ROOT", fake_repo)
+
+    m = dict(minimal_v2_manifest)
+    m["venvs"] = [{
+        "name": "x", "path": "~/3d-pipeline/x", "required": True,
+        "feature_set": "tier1", "size_gb": 1, "purpose": "t",
+        "python_version": "3.12",
+        "lockfile": "scripts/lockfiles/test-bad.txt",
+    }]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any("pip" in c["details"].lower()
+               for c in result["structure"] if c["status"] == "critical")
