@@ -302,3 +302,20 @@ Notes baked into the workflow above:
 Awaiting your review. Quick green-light or ask for changes; once
 approved I'll ship the `--check structure` subcheck + the
 workflow file as a small follow-up PR.
+
+---
+
+## v0.4 — additional structure rules
+
+The pipeline-doctor structure check gained eight v2-gated rules
+(named `v2:*`) covering: schema version, tier_defaults, prereqs,
+mutable_embed_paths, model storage_layout/comfyui_kind/hf_auth,
+venv python_version/lockfile, studio_extras heartbeat math, and
+EMBEDS_SCRIPTS/EMBEDS_SKILL partition.
+
+The CI workflow file is **unchanged**. The new rules execute as part
+of the existing `--check structure` invocation; if a future v1
+manifest is encountered (e.g. a long-lived branch), the v2 rules
+silently skip via `schema_version >= 2` gating, so v1 PRs still pass.
+
+Reference: `docs/spec-claude-driven-setup.md` rev 3 (§3, §1.1).
