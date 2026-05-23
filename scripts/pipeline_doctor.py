@@ -58,6 +58,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 MANIFEST_PATH = SCRIPT_DIR / "model_manifest.json"
 
+# Ensure the repo root is on sys.path so `tools._embed_lib` is importable
+# whether the script is run directly or imported as a module.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # Disk thresholds
 HARD_FLOOR_GB = 20.0
 WORKING_MARGIN_GB = 5.0
