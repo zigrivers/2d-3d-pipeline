@@ -99,3 +99,33 @@ def test_well_formed_prereqs_pass(minimal_v2_manifest):
     ]
     result = pipeline_doctor.check_structure(m)
     assert result["status"] == "ok"
+
+
+def test_mutable_embed_paths_default_empty(minimal_v2_manifest):
+    """Field is required in v2, default is empty list."""
+    m = dict(minimal_v2_manifest)
+    m.pop("mutable_embed_paths")
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+    assert any(c["name"] == "v2:mutable-embed-paths" for c in result["structure"])
+
+
+def test_mutable_embed_paths_must_be_list(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["mutable_embed_paths"] = "not-a-list"
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_mutable_embed_paths_entries_must_be_strings(minimal_v2_manifest):
+    m = dict(minimal_v2_manifest)
+    m["mutable_embed_paths"] = [123]
+    result = pipeline_doctor.check_structure(m)
+    assert result["status"] == "critical"
+
+
+def test_mutable_embed_paths_empty_list_passes(minimal_v2_manifest):
+    """Empty list is the documented default and should pass."""
+    result = pipeline_doctor.check_structure(minimal_v2_manifest)
+    assert any(c["name"] == "v2:mutable-embed-paths" and c["status"] == "ok"
+               for c in result["structure"])

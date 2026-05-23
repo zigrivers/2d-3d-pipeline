@@ -303,6 +303,18 @@ def check_structure(manifest: dict) -> dict:
             if not any_bad:
                 _ok("v2:prereqs", f"{len(prereqs)} prereq(s) well-formed")
 
+    if v2:
+        mep = manifest.get("mutable_embed_paths")
+        if mep is None:
+            _fail("v2:mutable-embed-paths", "missing 'mutable_embed_paths' field (use [] for default)")
+        elif not isinstance(mep, list):
+            _fail("v2:mutable-embed-paths",
+                  f"'mutable_embed_paths' must be a list, got {type(mep).__name__}")
+        elif any(not isinstance(p, str) for p in mep):
+            _fail("v2:mutable-embed-paths", "all entries must be strings (embed destination paths)")
+        else:
+            _ok("v2:mutable-embed-paths", f"{len(mep)} entry/entries")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

@@ -19,6 +19,7 @@
       "min_version": "23.1",
       "install_hint": "python3 -m pip install --upgrade pip" }
   ],
+  "mutable_embed_paths": [],
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",
