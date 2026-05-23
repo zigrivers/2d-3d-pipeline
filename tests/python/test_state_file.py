@@ -43,3 +43,21 @@ def test_clear_declined(tmp_pipeline_root):
     pipeline_doctor.clear_declined()
     s = pipeline_doctor.load_state()
     assert s["declined"] == {}
+
+
+def test_reconsider_optionals_clears_declined(tmp_pipeline_root):
+    """--reconsider-optionals must clear declined entries before apply."""
+    pipeline_doctor.record_declined("studio_extras.launchd_plist",
+                                     reason="user declined")
+    assert "studio_extras.launchd_plist" in pipeline_doctor.load_state()["declined"]
+    pipeline_doctor.clear_declined()
+    assert pipeline_doctor.load_state()["declined"] == {}
+
+
+def test_declined_persists_across_loads(tmp_pipeline_root):
+    """Declined entries survive a load/write round-trip."""
+    pipeline_doctor.record_declined("x", reason="r")
+    pipeline_doctor.record_stage_outcome("scripts", ok=True)
+    state = pipeline_doctor.load_state()
+    assert "x" in state["declined"]
+    assert state["stages"]["scripts"]["ok"] is True

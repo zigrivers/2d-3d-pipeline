@@ -5931,8 +5931,10 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -6071,6 +6073,14 @@ def _expand(path_str: str) -&gt; Path:
     return Path(os.path.expanduser(path_str))
 
 
+def _file_sha256(path: Path) -&gt; str:
+    h = hashlib.sha256()
+    with open(path, &quot;rb&quot;) as f:
+        for chunk in iter(lambda: f.read(65536), b&quot;&quot;):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _free_space_gb(path: Path) -&gt; float:
     &quot;&quot;&quot;Free space (GB) on the volume containing `path`. Walks up to find it.&quot;&quot;&quot;
     p = path
@@ -6100,6 +6110,351 @@ def _resolve_feature_sets(manifest: dict, include: list[str]) -&gt; set[str]:
               file=sys.stderr)
         sets -= unknown
     return sets
+
+
+# ---------------- stage runners ----------------
+
+STAGES_ORDER = [&quot;prereqs&quot;, &quot;dirs&quot;, &quot;config&quot;, &quot;scripts&quot;, &quot;skill&quot;,
+                &quot;venvs&quot;, &quot;models&quot;, &quot;studio_extras&quot;]
+
+STAGE_PREREQUISITES: dict[str, list[str]] = {
+    &quot;prereqs&quot;: [],
+    &quot;dirs&quot;: [&quot;prereqs&quot;],
+    &quot;config&quot;: [&quot;prereqs&quot;, &quot;dirs&quot;],
+    &quot;scripts&quot;: [&quot;dirs&quot;],
+    &quot;skill&quot;: [&quot;dirs&quot;],
+    &quot;venvs&quot;: [&quot;prereqs&quot;, &quot;dirs&quot;],
+    &quot;models&quot;: [&quot;venvs&quot;],
+    &quot;studio_extras&quot;: [&quot;dirs&quot;, &quot;scripts&quot;],
+}
+
+_REQUIRED_DIRS = (&quot;workspace&quot;, &quot;models&quot;, &quot;benchmarks&quot;)
+
+
+def _root() -&gt; Path:
+    return Path(os.environ.get(&quot;PIPELINE_ROOT&quot;,
+                                os.path.expanduser(&quot;~/3d-pipeline&quot;)))
+
+
+def apply_dirs(manifest: dict) -&gt; dict:
+    root = _root()
+    root.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    for sub in _REQUIRED_DIRS:
+        p = root / sub
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
+            created.append(sub)
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;created&quot;: created}
+
+
+def check_dirs(manifest: dict) -&gt; dict:
+    root = _root()
+    rows: list[dict] = []
+    overall = &quot;ok&quot;
+    for sub in _REQUIRED_DIRS:
+        p = root / sub
+        if p.is_dir():
+            rows.append({&quot;name&quot;: sub, &quot;status&quot;: &quot;ok&quot;})
+        else:
+            rows.append({&quot;name&quot;: sub, &quot;status&quot;: &quot;missing&quot;})
+            overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;dirs&quot;: rows}
+
+
+_CONFIG_TEMPLATE = &quot;hardware_tier = {tier}\n&quot;
+
+
+def apply_config(manifest: dict, tier: str) -&gt; dict:
+    if tier not in (&quot;laptop&quot;, &quot;studio&quot;):
+        return {&quot;status&quot;: &quot;critical&quot;, &quot;error&quot;: f&quot;unknown tier {tier!r}&quot;}
+    cfg = _root() / &quot;.config&quot;
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    desired = _CONFIG_TEMPLATE.format(tier=tier)
+    if cfg.exists() and cfg.read_text() == desired:
+        return {&quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: False}
+    tmp = cfg.with_suffix(cfg.suffix + &quot;.tmp&quot;)
+    tmp.write_text(desired)
+    tmp.replace(cfg)
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: True}
+
+
+def read_tier() -&gt; str | None:
+    cfg = _root() / &quot;.config&quot;
+    if not cfg.exists():
+        return None
+    for line in cfg.read_text().splitlines():
+        if &quot;=&quot; not in line:
+            continue
+        k, v = (s.strip() for s in line.split(&quot;=&quot;, 1))
+        if k == &quot;hardware_tier&quot;:
+            return v if v in (&quot;laptop&quot;, &quot;studio&quot;) else None
+    return None
+
+
+def check_config(manifest: dict, tier: str) -&gt; dict:
+    cfg = _root() / &quot;.config&quot;
+    if not cfg.exists():
+        return {&quot;status&quot;: &quot;warning&quot;, &quot;reason&quot;: &quot;missing&quot;}
+    desired = _CONFIG_TEMPLATE.format(tier=tier)
+    if cfg.read_text() == desired:
+        return {&quot;status&quot;: &quot;ok&quot;, &quot;tier&quot;: tier}
+    return {&quot;status&quot;: &quot;warning&quot;, &quot;reason&quot;: &quot;drift&quot;, &quot;tier&quot;: tier}
+
+
+def _expand_workspace(rel: str) -&gt; Path:
+    expanded = rel.replace(&quot;~/3d-pipeline&quot;, str(_root()), 1)
+    return Path(expanded).expanduser()
+
+
+def _materialize_embed(src_rel: str, dest_rel: str) -&gt; dict:
+    src = REPO_ROOT / src_rel
+    dest = _expand_workspace(dest_rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and _file_sha256(src) == _file_sha256(dest):
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: False}
+    tmp = dest.with_suffix(dest.suffix + &quot;.tmp&quot;)
+    tmp.write_bytes(src.read_bytes())
+    if src_rel.endswith(&quot;.sh&quot;):
+        tmp.chmod(0o755)
+    else:
+        tmp.chmod(src.stat().st_mode &amp; 0o777)
+    tmp.replace(dest)
+    return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: True}
+
+
+def _drift_check_embed(src_rel: str, dest_rel: str,
+                        mutable_set: set[str]) -&gt; dict:
+    src = REPO_ROOT / src_rel
+    dest = _expand_workspace(dest_rel)
+    if dest_rel in mutable_set:
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;advisory&quot;,
+                &quot;reason&quot;: &quot;marked mutable_embed_paths&quot;}
+    if not dest.exists():
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;drift&quot;,
+                &quot;current&quot;: &quot;missing&quot;, &quot;expected&quot;: &quot;present&quot;,
+                &quot;fix_command&quot;: &quot;pipeline_doctor.py --apply --only scripts&quot;}
+    if _file_sha256(src) != _file_sha256(dest):
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;drift&quot;,
+                &quot;current&quot;: &quot;byte-mismatch&quot;, &quot;expected&quot;: &quot;sha256 match&quot;,
+                &quot;fix_command&quot;: &quot;pipeline_doctor.py --apply --only scripts&quot;}
+    return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;}
+
+
+def apply_scripts(manifest: dict, mutable_paths: list[str]) -&gt; dict:
+    from tools._embed_lib import EMBEDS_SCRIPTS  # type: ignore
+    rows = [_materialize_embed(s, d) for s, d in EMBEDS_SCRIPTS.items()]
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;scripts&quot;: rows}
+
+
+def check_scripts(manifest: dict, mutable_paths: list[str]) -&gt; dict:
+    from tools._embed_lib import EMBEDS_SCRIPTS  # type: ignore
+    mutable_set = set(mutable_paths or [])
+    rows = [_drift_check_embed(s, d, mutable_set)
+            for s, d in EMBEDS_SCRIPTS.items()]
+    overall = &quot;ok&quot;
+    if any(r[&quot;status&quot;] == &quot;drift&quot; for r in rows):
+        overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;scripts&quot;: rows}
+
+
+def _expand_skill(rel: str) -&gt; Path:
+    return Path(os.path.expanduser(rel))
+
+
+def _materialize_skill_embed(src_rel: str, dest_rel: str) -&gt; dict:
+    src = REPO_ROOT / src_rel
+    dest = _expand_skill(dest_rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and _file_sha256(src) == _file_sha256(dest):
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: False}
+    tmp = dest.with_suffix(dest.suffix + &quot;.tmp&quot;)
+    tmp.write_bytes(src.read_bytes())
+    tmp.chmod(src.stat().st_mode &amp; 0o777)
+    tmp.replace(dest)
+    return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;, &quot;changed&quot;: True}
+
+
+def _drift_check_skill_embed(src_rel: str, dest_rel: str,
+                              mutable_set: set[str]) -&gt; dict:
+    src = REPO_ROOT / src_rel
+    dest = _expand_skill(dest_rel)
+    if dest_rel in mutable_set:
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;advisory&quot;,
+                &quot;reason&quot;: &quot;marked mutable_embed_paths&quot;}
+    if not dest.exists():
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;drift&quot;,
+                &quot;current&quot;: &quot;missing&quot;, &quot;expected&quot;: &quot;present&quot;,
+                &quot;fix_command&quot;: &quot;pipeline_doctor.py --apply --only skill&quot;}
+    if _file_sha256(src) != _file_sha256(dest):
+        return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;drift&quot;,
+                &quot;current&quot;: &quot;byte-mismatch&quot;, &quot;expected&quot;: &quot;sha256 match&quot;,
+                &quot;fix_command&quot;: &quot;pipeline_doctor.py --apply --only skill&quot;}
+    return {&quot;name&quot;: dest.name, &quot;status&quot;: &quot;ok&quot;}
+
+
+def apply_skill(manifest: dict, mutable_paths: list[str]) -&gt; dict:
+    from tools._embed_lib import EMBEDS_SKILL  # type: ignore
+    rows = [_materialize_skill_embed(s, d) for s, d in EMBEDS_SKILL.items()]
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;skill&quot;: rows}
+
+
+def check_skill(manifest: dict, mutable_paths: list[str]) -&gt; dict:
+    from tools._embed_lib import EMBEDS_SKILL  # type: ignore
+    mutable_set = set(mutable_paths or [])
+    rows = [_drift_check_skill_embed(s, d, mutable_set)
+            for s, d in EMBEDS_SKILL.items()]
+    overall = &quot;ok&quot;
+    if any(r[&quot;status&quot;] == &quot;drift&quot; for r in rows):
+        overall = &quot;warning&quot;
+    return {&quot;status&quot;: overall, &quot;skill&quot;: rows}
+
+
+def _binary_version(name: str) -&gt; str | None:
+    if shutil.which(name) is None:
+        return None
+    try:
+        r = subprocess.run([name, &quot;--version&quot;], capture_output=True,
+                            text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    stdout = r.stdout if isinstance(r.stdout, str) else &quot;&quot;
+    stderr = r.stderr if isinstance(r.stderr, str) else &quot;&quot;
+    out = stdout + stderr
+    m = re.search(r&quot;\b(\d+\.\d+(?:\.\d+)?)\b&quot;, out)
+    return m.group(1) if m else None
+
+
+def _version_tuple(v: str) -&gt; tuple[int, ...]:
+    parts = []
+    for x in v.split(&quot;.&quot;):
+        try:
+            parts.append(int(x))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def check_prereqs(manifest: dict) -&gt; dict:
+    rows: list[dict] = []
+    overall = &quot;ok&quot;
+    for p in (manifest.get(&quot;prereqs&quot;) or []):
+        name = p[&quot;name&quot;]
+        version = _binary_version(name)
+        entry: dict = {&quot;id&quot;: p[&quot;id&quot;], &quot;name&quot;: name, &quot;version&quot;: version}
+        if version is None:
+            entry[&quot;status&quot;] = &quot;missing&quot;
+            entry[&quot;install_hint&quot;] = p.get(&quot;install_hint&quot;, &quot;&quot;)
+            overall = &quot;critical&quot;
+            rows.append(entry)
+            continue
+        vt = _version_tuple(version)
+        if p.get(&quot;min_version&quot;):
+            if vt &lt; _version_tuple(p[&quot;min_version&quot;]):
+                entry[&quot;status&quot;] = &quot;critical&quot;
+                entry[&quot;reason&quot;] = f&quot;version {version} &lt; min {p[&#x27;min_version&#x27;]}&quot;
+                entry[&quot;install_hint&quot;] = p.get(&quot;install_hint&quot;, &quot;&quot;)
+                overall = &quot;critical&quot;
+                rows.append(entry)
+                continue
+        if p.get(&quot;max_version&quot;):
+            if vt &gt; _version_tuple(p[&quot;max_version&quot;]):
+                sev = p.get(&quot;max_version_severity&quot;, &quot;warn&quot;)
+                entry[&quot;status&quot;] = &quot;warning&quot; if sev == &quot;warn&quot; else &quot;critical&quot;
+                entry[&quot;reason&quot;] = f&quot;version {version} &gt; max {p[&#x27;max_version&#x27;]}&quot;
+                if sev != &quot;warn&quot;:
+                    overall = &quot;critical&quot;
+                elif overall == &quot;ok&quot;:
+                    overall = &quot;warning&quot;
+                rows.append(entry)
+                continue
+        entry[&quot;status&quot;] = &quot;ok&quot;
+        rows.append(entry)
+    return {&quot;status&quot;: overall, &quot;prereqs&quot;: rows}
+
+
+def apply_prereqs(manifest: dict) -&gt; dict:
+    return check_prereqs(manifest)
+
+
+def _resolve_only(arg: str) -&gt; list[str]:
+    if not arg:
+        return list(STAGES_ORDER)
+    requested = [s.strip() for s in arg.split(&quot;,&quot;) if s.strip()]
+    unknown = [s for s in requested if s not in STAGES_ORDER]
+    if unknown:
+        print(f&quot;error: unknown stage(s): {unknown}; &quot;
+              f&quot;valid: {STAGES_ORDER}&quot;, file=sys.stderr)
+        sys.exit(2)
+    return [s for s in STAGES_ORDER if s in requested]
+
+
+def _enforce_prereqs(stages: list[str]) -&gt; None:
+    requested = set(stages)
+    for stage in stages:
+        missing = [p for p in STAGE_PREREQUISITES[stage]
+                    if p not in requested]
+        if missing:
+            print(f&quot;error: stage {stage!r} requires stages {missing} — &quot;
+                  f&quot;run with --only {&#x27;,&#x27;.join(missing + [stage])} first, &quot;
+                  &quot;or drop --only.&quot;, file=sys.stderr)
+            sys.exit(1)
+
+
+def dispatch_apply(manifest: dict, stages: list[str],
+                    tier: str, mutable_paths: list[str],
+                    *, yes: bool = False) -&gt; dict:
+    report: dict = {&quot;stages&quot;: {}}
+    for stage in stages:
+        if stage == &quot;studio_extras&quot; and tier != &quot;studio&quot;:
+            report[&quot;stages&quot;][stage] = {&quot;status&quot;: &quot;skipped&quot;, &quot;reason&quot;: &quot;laptop tier&quot;}
+            continue
+        if stage == &quot;prereqs&quot;:
+            r = apply_prereqs(manifest)
+        elif stage == &quot;dirs&quot;:
+            r = apply_dirs(manifest)
+        elif stage == &quot;config&quot;:
+            r = apply_config(manifest, tier=tier)
+        elif stage == &quot;scripts&quot;:
+            r = apply_scripts(manifest, mutable_paths=mutable_paths)
+        elif stage == &quot;skill&quot;:
+            r = apply_skill(manifest, mutable_paths=mutable_paths)
+        elif stage == &quot;venvs&quot;:
+            r = {&quot;status&quot;: &quot;skipped&quot;, &quot;reason&quot;: &quot;Phase 3 not yet implemented&quot;}
+        elif stage == &quot;models&quot;:
+            r = {&quot;status&quot;: &quot;skipped&quot;, &quot;reason&quot;: &quot;Phase 3 not yet implemented&quot;}
+        elif stage == &quot;studio_extras&quot;:
+            r = {&quot;status&quot;: &quot;skipped&quot;, &quot;reason&quot;: &quot;Phase 4 not yet implemented&quot;}
+        else:
+            r = {&quot;status&quot;: &quot;critical&quot;, &quot;error&quot;: f&quot;unknown stage {stage!r}&quot;}
+        report[&quot;stages&quot;][stage] = r
+        record_stage_outcome(stage, ok=(r[&quot;status&quot;] in (&quot;ok&quot;, &quot;skipped&quot;)),
+                              error=r.get(&quot;error&quot;))
+    return report
+
+
+def dispatch_check_installed(manifest: dict, stages: list[str],
+                              tier: str, mutable_paths: list[str]) -&gt; dict:
+    report: dict = {&quot;stages&quot;: {}}
+    for stage in stages:
+        if stage == &quot;studio_extras&quot; and tier != &quot;studio&quot;:
+            report[&quot;stages&quot;][stage] = {&quot;status&quot;: &quot;skipped&quot;}
+            continue
+        if stage == &quot;prereqs&quot;:
+            r = check_prereqs(manifest)
+        elif stage == &quot;dirs&quot;:
+            r = check_dirs(manifest)
+        elif stage == &quot;config&quot;:
+            r = check_config(manifest, tier=tier)
+        elif stage == &quot;scripts&quot;:
+            r = check_scripts(manifest, mutable_paths=mutable_paths)
+        elif stage == &quot;skill&quot;:
+            r = check_skill(manifest, mutable_paths=mutable_paths)
+        else:
+            r = {&quot;status&quot;: &quot;skipped&quot;,
+                  &quot;reason&quot;: &quot;Phase 3/4 stage not yet implemented&quot;}
+        report[&quot;stages&quot;][stage] = r
+    return report
 
 
 # ---------------- checks ----------------
@@ -6724,37 +7079,92 @@ def main() -&gt; int:
     scope = _resolve_feature_sets(manifest, include)
 
     report: dict = {&quot;scope&quot;: sorted(scope)}
-    if args.check in (&quot;disk&quot;, &quot;all&quot;):
-        report[&quot;disk&quot;] = check_disk(manifest, scope)
-    if args.check in (&quot;venvs&quot;, &quot;all&quot;):
-        report[&quot;venvs&quot;] = check_venvs(manifest, scope)
-    if args.check in (&quot;models&quot;, &quot;all&quot;):
-        report[&quot;models&quot;] = check_models(manifest, scope)
-    if args.check in (&quot;wrappers&quot;, &quot;all&quot;):
-        report[&quot;wrappers&quot;] = check_wrappers(manifest)
-    if args.check == &quot;structure&quot;:
-        # structure is not included in &quot;all&quot; — it requires a repo checkout
-        # (tools._embed_lib) and is intended for CI, not user installs.
-        report[&quot;structure&quot;] = check_structure(manifest)
-    if args.warm_cache:
-        report[&quot;warm_cache&quot;] = warm_cache(manifest, scope)
+
+    # --apply path
+    if args.apply:
+        cfg_tier = read_tier()
+        if args.tier is None and cfg_tier is None:
+            print(&quot;error: --tier is required on a fresh machine &quot;
+                  &quot;(no ~/3d-pipeline/.config found).&quot;,
+                  file=sys.stderr)
+            return 1
+        chosen_tier = args.tier or cfg_tier
+        stages = _resolve_only(args.only)
+        _enforce_prereqs(stages)
+        mutable_paths = manifest.get(&quot;mutable_embed_paths&quot;) or []
+        if args.reconsider_optionals:
+            clear_declined()
+        try:
+            with apply_lock():
+                report[&quot;apply&quot;] = dispatch_apply(manifest, stages,
+                                                   tier=chosen_tier,
+                                                   mutable_paths=mutable_paths,
+                                                   yes=args.yes)
+        except LockHeldError as e:
+            print(f&quot;error: {e}&quot;, file=sys.stderr)
+            return 1
+        except NetworkFSError as e:
+            print(f&quot;error: {e}&quot;, file=sys.stderr)
+            return 1
+
+    # --check installed path
+    elif args.check == &quot;installed&quot;:
+        cfg_tier = read_tier()
+        if args.tier is None and cfg_tier is None:
+            print(&quot;error: --tier is required on a fresh machine.&quot;,
+                  file=sys.stderr)
+            return 1
+        chosen_tier = args.tier or cfg_tier
+        stages = _resolve_only(args.only)
+        mutable_paths = manifest.get(&quot;mutable_embed_paths&quot;) or []
+        report[&quot;check_installed&quot;] = dispatch_check_installed(
+            manifest, stages, tier=chosen_tier, mutable_paths=mutable_paths)
+
+    # Existing --check paths (disk/models/venvs/wrappers/structure/all)
+    else:
+        if args.check in (&quot;disk&quot;, &quot;all&quot;):
+            report[&quot;disk&quot;] = check_disk(manifest, scope)
+        if args.check in (&quot;venvs&quot;, &quot;all&quot;):
+            report[&quot;venvs&quot;] = check_venvs(manifest, scope)
+        if args.check in (&quot;models&quot;, &quot;all&quot;):
+            report[&quot;models&quot;] = check_models(manifest, scope)
+        if args.check in (&quot;wrappers&quot;, &quot;all&quot;):
+            report[&quot;wrappers&quot;] = check_wrappers(manifest)
+        if args.check == &quot;structure&quot;:
+            # structure is not included in &quot;all&quot; — it requires a repo checkout
+            # (tools._embed_lib) and is intended for CI, not user installs.
+            report[&quot;structure&quot;] = check_structure(manifest)
+        if args.warm_cache:
+            report[&quot;warm_cache&quot;] = warm_cache(manifest, scope)
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         _print_human(report, scope)
-        if args.apply:
-            print(&quot;--apply: no stages implemented yet (coming in Phase 2).\n&quot;, file=sys.stderr)
 
-    # Exit code reflects worst severity across checks
+    # Two exit-code regimes:
+    # - Legacy --check: warning → 0, critical → 1.
+    # - New --apply / --check installed: any drift/failure → 1, ok → 0.
+    new_command = &quot;apply&quot; in report or &quot;check_installed&quot; in report
+    if new_command:
+        for k in (&quot;apply&quot;, &quot;check_installed&quot;):
+            if k not in report:
+                continue
+            for _, stage_r in report[k][&quot;stages&quot;].items():
+                s = stage_r.get(&quot;status&quot;, &quot;ok&quot;)
+                if s in (&quot;critical&quot;, &quot;drift&quot;, &quot;warning&quot;):
+                    return 1
+        return 0
+
     worst = &quot;ok&quot;
     for k in (&quot;disk&quot;, &quot;venvs&quot;, &quot;models&quot;, &quot;wrappers&quot;, &quot;structure&quot;):
-        if k in report:
-            s = report[k][&quot;status&quot;]
-            if s == &quot;critical&quot;:
-                worst = &quot;critical&quot;
-            elif s == &quot;warning&quot; and worst != &quot;critical&quot;:
-                worst = &quot;warning&quot;
+        if k not in report:
+            continue
+        s = report[k][&quot;status&quot;]
+        if s == &quot;critical&quot;:
+            worst = &quot;critical&quot;
+        elif s == &quot;warning&quot; and worst != &quot;critical&quot;:
+            worst = &quot;warning&quot;
     return {&quot;ok&quot;: 0, &quot;warning&quot;: 0, &quot;critical&quot;: 1}[worst]
 
 
