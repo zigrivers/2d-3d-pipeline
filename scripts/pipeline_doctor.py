@@ -243,6 +243,14 @@ def check_structure(manifest: dict) -> dict:
     def _ok(name: str, details: str = "") -> None:
         checks.append({"name": name, "status": "ok", "details": details})
 
+    v2 = manifest.get("schema_version", 1) >= 2
+
+    def _v2_ok(name: str, details: str = "") -> None:
+        checks.append({"name": f"v2:{name}", "status": "ok", "details": details})
+
+    if v2:
+        _v2_ok("schema-version", "manifest is v2; v2 rules active")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))
