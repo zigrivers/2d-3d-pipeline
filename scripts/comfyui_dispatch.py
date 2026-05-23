@@ -159,6 +159,8 @@ def _substitute(workflow: dict, pack_data: dict, pack_dir: Path, args) -> dict:
         "${pack.identity.reference}": str((pack_dir / identity["reference"]).resolve()),
         "${pack.identity.weight}": str(identity.get("weight", 0.8)),
         "${pack.identity.model}": identity.get("model", "ip-adapter-faceid-sdxl"),
+        "${pack.ipadapter_file}": identity.get("ipadapter_file", "ip-adapter-faceid_sdxl.bin"),
+        "${pack.clip_vision_file}": identity.get("clip_vision_file", "clip-vit-h-14.safetensors"),
         "${pack.lora.path}": str((pack_dir / lora["path"]).resolve()) if lora.get("path") else "",
         "${pack.lora.weight}": str(lora.get("weight", 1.0)),
     }
@@ -179,7 +181,34 @@ def _substitute(workflow: dict, pack_data: dict, pack_dir: Path, args) -> dict:
             return node
         return node
 
-    return _walk(workflow)
+    result = _walk(workflow)
+
+    # When no LoRA is in the pack, strip any LoraLoader node and rewire its
+    # downstream consumers directly to the checkpoint loader. ComfyUI rejects
+    # a LoraLoader with an empty lora_name.
+    if not lora.get("path"):
+        lora_nodes = {
+            nid for nid, n in result.items()
+            if isinstance(n, dict) and n.get("class_type") == "LoraLoader"
+        }
+        for lora_nid in lora_nodes:
+            lora_node = result.pop(lora_nid)
+            # LoRA receives [upstream, 0] (MODEL). Its outputs are slot 0=MODEL,
+            # slot 1=CLIP; map those to [upstream, 0] and [upstream, 1] respectively.
+            upstream = lora_node.get("inputs", {}).get("model")  # e.g. ["3", 0]
+            if not (isinstance(upstream, list) and len(upstream) == 2):
+                continue
+            upstream_nid = upstream[0]
+            for n in result.values():
+                if not isinstance(n, dict):
+                    continue
+                inputs = n.get("inputs") or {}
+                for key, val in inputs.items():
+                    if isinstance(val, list) and len(val) == 2 and val[0] == lora_nid:
+                        # Preserve slot index: MODEL→slot 0, CLIP→slot 1 on the checkpoint
+                        inputs[key] = [upstream_nid, val[1]]
+
+    return result
 
 
 def main() -> int:
@@ -228,9 +257,11 @@ def main() -> int:
             "notes": "ship a workflow JSON or pass --workflow",
         })
     try:
-        workflow_template = json.loads(workflow_path.read_text())
+        raw_template = json.loads(workflow_path.read_text())
     except json.JSONDecodeError as e:
         return _emit({"status": "error", "error": "workflow_json_invalid", "notes": str(e)})
+    # Strip metadata keys (leading underscore) — ComfyUI rejects non-node entries.
+    workflow_template = {k: v for k, v in raw_template.items() if not k.startswith("_")}
 
     if not _server_alive(args.server):
         return _emit({

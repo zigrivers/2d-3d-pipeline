@@ -33,10 +33,18 @@
 
   "6": {
     "inputs": {
-      "ipadapter_file": "ip-adapter-faceid_sdxl.safetensors"
+      "ipadapter_file": "${pack.ipadapter_file}"
     },
     "class_type": "IPAdapterModelLoader",
-    "_meta": {"title": "Load IP-Adapter FaceID SDXL"}
+    "_meta": {"title": "Load IP-Adapter model"}
+  },
+
+  "14": {
+    "inputs": {
+      "clip_name": "${pack.clip_vision_file}"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {"title": "Load CLIP vision encoder"}
   },
 
   "7": {
@@ -46,8 +54,11 @@
       "image": ["5", 0],
       "weight": "${pack.identity.weight}",
       "weight_type": "linear",
+      "combine_embeds": "concat",
       "start_at": 0.0,
-      "end_at": 1.0
+      "end_at": 1.0,
+      "embeds_scaling": "V only",
+      "clip_vision": ["14", 0]
     },
     "class_type": "IPAdapterAdvanced",
     "_meta": {"title": "Apply IP-Adapter"}

@@ -31,10 +31,24 @@
       "properties": {
         "model": {
           "type": "string",
-          "enum": ["ip-adapter-faceid-sdxl", "ip-adapter-plus-sdxl"]
+          "enum": [
+            "ip-adapter-faceid-sdxl",
+            "ip-adapter-plus-sdxl",
+            "ip-adapter-sdxl"
+          ]
         },
         "reference": { "type": "string", "minLength": 1 },
-        "weight": { "type": "number", "minimum": 0.0, "maximum": 1.5, "default": 0.8 }
+        "weight": { "type": "number", "minimum": 0.0, "maximum": 1.5, "default": 0.8 },
+        "ipadapter_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Filename in ComfyUI/models/ipadapter/ (overrides dispatch default)"
+        },
+        "clip_vision_file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Filename in ComfyUI/models/clip_vision/ (overrides dispatch default)"
+        }
       }
     },
     "controlnets": {

@@ -6526,7 +6526,7 @@ PIPELINE_EOF</pre></div>
       &quot;feature_set&quot;: &quot;comfyui&quot;,
       &quot;license_bucket&quot;: &quot;commercial_threshold&quot;,
       &quot;size_mb&quot;: 7000,
-      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/sdxl&quot;,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/checkpoints&quot;,
       &quot;env_var&quot;: &quot;&quot;,
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
@@ -6534,17 +6534,43 @@ PIPELINE_EOF</pre></div>
       &quot;notes&quot;: &quot;CreativeML Open RAIL-M license.&quot;
     },
     {
-      &quot;id&quot;: &quot;ip-adapter-faceid-sdxl&quot;,
-      &quot;filename&quot;: &quot;ip-adapter-faceid_sdxl.safetensors&quot;,
+      &quot;id&quot;: &quot;ip-adapter-sdxl&quot;,
+      &quot;filename&quot;: &quot;ip-adapter_sdxl.safetensors&quot;,
       &quot;feature_set&quot;: &quot;comfyui&quot;,
       &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
       &quot;size_mb&quot;: 700,
-      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/ip-adapter&quot;,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/ipadapter&quot;,
       &quot;env_var&quot;: &quot;&quot;,
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;clip-vit-bigg-14&quot;,
+      &quot;filename&quot;: &quot;clip-vit-bigg-14.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 3500,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/clip_vision&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;ip-adapter-faceid-sdxl&quot;,
+      &quot;filename&quot;: &quot;ip-adapter-faceid_sdxl.bin&quot;,
+      &quot;feature_set&quot;: &quot;comfyui&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 700,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/ipadapter&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;comfyui&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet.&quot;
     },
     {
       &quot;id&quot;: &quot;controlnet-openpose&quot;,
@@ -6552,7 +6578,7 @@ PIPELINE_EOF</pre></div>
       &quot;feature_set&quot;: &quot;comfyui&quot;,
       &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
       &quot;size_mb&quot;: 1300,
-      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/controlnet&quot;,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/controlnet&quot;,
       &quot;env_var&quot;: &quot;&quot;,
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
@@ -6565,7 +6591,7 @@ PIPELINE_EOF</pre></div>
       &quot;feature_set&quot;: &quot;comfyui&quot;,
       &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
       &quot;size_mb&quot;: 700,
-      &quot;cache_dir&quot;: &quot;~/3d-pipeline/models/controlnet&quot;,
+      &quot;cache_dir&quot;: &quot;~/3d-pipeline/ComfyUI/models/controlnet&quot;,
       &quot;env_var&quot;: &quot;&quot;,
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
@@ -9455,10 +9481,24 @@ chmod +x ~/3d-pipeline/workspace/multiview.sh</pre></div>
       &quot;properties&quot;: {
         &quot;model&quot;: {
           &quot;type&quot;: &quot;string&quot;,
-          &quot;enum&quot;: [&quot;ip-adapter-faceid-sdxl&quot;, &quot;ip-adapter-plus-sdxl&quot;]
+          &quot;enum&quot;: [
+            &quot;ip-adapter-faceid-sdxl&quot;,
+            &quot;ip-adapter-plus-sdxl&quot;,
+            &quot;ip-adapter-sdxl&quot;
+          ]
         },
         &quot;reference&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;minLength&quot;: 1 },
-        &quot;weight&quot;: { &quot;type&quot;: &quot;number&quot;, &quot;minimum&quot;: 0.0, &quot;maximum&quot;: 1.5, &quot;default&quot;: 0.8 }
+        &quot;weight&quot;: { &quot;type&quot;: &quot;number&quot;, &quot;minimum&quot;: 0.0, &quot;maximum&quot;: 1.5, &quot;default&quot;: 0.8 },
+        &quot;ipadapter_file&quot;: {
+          &quot;type&quot;: &quot;string&quot;,
+          &quot;minLength&quot;: 1,
+          &quot;description&quot;: &quot;Filename in ComfyUI/models/ipadapter/ (overrides dispatch default)&quot;
+        },
+        &quot;clip_vision_file&quot;: {
+          &quot;type&quot;: &quot;string&quot;,
+          &quot;minLength&quot;: 1,
+          &quot;description&quot;: &quot;Filename in ComfyUI/models/clip_vision/ (overrides dispatch default)&quot;
+        }
       }
     },
     &quot;controlnets&quot;: {
@@ -9662,6 +9702,8 @@ def _substitute(workflow: dict, pack_data: dict, pack_dir: Path, args) -&gt; dic
         &quot;${pack.identity.reference}&quot;: str((pack_dir / identity[&quot;reference&quot;]).resolve()),
         &quot;${pack.identity.weight}&quot;: str(identity.get(&quot;weight&quot;, 0.8)),
         &quot;${pack.identity.model}&quot;: identity.get(&quot;model&quot;, &quot;ip-adapter-faceid-sdxl&quot;),
+        &quot;${pack.ipadapter_file}&quot;: identity.get(&quot;ipadapter_file&quot;, &quot;ip-adapter-faceid_sdxl.bin&quot;),
+        &quot;${pack.clip_vision_file}&quot;: identity.get(&quot;clip_vision_file&quot;, &quot;clip-vit-h-14.safetensors&quot;),
         &quot;${pack.lora.path}&quot;: str((pack_dir / lora[&quot;path&quot;]).resolve()) if lora.get(&quot;path&quot;) else &quot;&quot;,
         &quot;${pack.lora.weight}&quot;: str(lora.get(&quot;weight&quot;, 1.0)),
     }
@@ -9682,7 +9724,34 @@ def _substitute(workflow: dict, pack_data: dict, pack_dir: Path, args) -&gt; dic
             return node
         return node
 
-    return _walk(workflow)
+    result = _walk(workflow)
+
+    # When no LoRA is in the pack, strip any LoraLoader node and rewire its
+    # downstream consumers directly to the checkpoint loader. ComfyUI rejects
+    # a LoraLoader with an empty lora_name.
+    if not lora.get(&quot;path&quot;):
+        lora_nodes = {
+            nid for nid, n in result.items()
+            if isinstance(n, dict) and n.get(&quot;class_type&quot;) == &quot;LoraLoader&quot;
+        }
+        for lora_nid in lora_nodes:
+            lora_node = result.pop(lora_nid)
+            # LoRA receives [upstream, 0] (MODEL). Its outputs are slot 0=MODEL,
+            # slot 1=CLIP; map those to [upstream, 0] and [upstream, 1] respectively.
+            upstream = lora_node.get(&quot;inputs&quot;, {}).get(&quot;model&quot;)  # e.g. [&quot;3&quot;, 0]
+            if not (isinstance(upstream, list) and len(upstream) == 2):
+                continue
+            upstream_nid = upstream[0]
+            for n in result.values():
+                if not isinstance(n, dict):
+                    continue
+                inputs = n.get(&quot;inputs&quot;) or {}
+                for key, val in inputs.items():
+                    if isinstance(val, list) and len(val) == 2 and val[0] == lora_nid:
+                        # Preserve slot index: MODEL→slot 0, CLIP→slot 1 on the checkpoint
+                        inputs[key] = [upstream_nid, val[1]]
+
+    return result
 
 
 def main() -&gt; int:
@@ -9731,9 +9800,11 @@ def main() -&gt; int:
             &quot;notes&quot;: &quot;ship a workflow JSON or pass --workflow&quot;,
         })
     try:
-        workflow_template = json.loads(workflow_path.read_text())
+        raw_template = json.loads(workflow_path.read_text())
     except json.JSONDecodeError as e:
         return _emit({&quot;status&quot;: &quot;error&quot;, &quot;error&quot;: &quot;workflow_json_invalid&quot;, &quot;notes&quot;: str(e)})
+    # Strip metadata keys (leading underscore) — ComfyUI rejects non-node entries.
+    workflow_template = {k: v for k, v in raw_template.items() if not k.startswith(&quot;_&quot;)}
 
     if not _server_alive(args.server):
         return _emit({
@@ -9891,10 +9962,18 @@ PIPELINE_EOF</pre></div>
 
   &quot;6&quot;: {
     &quot;inputs&quot;: {
-      &quot;ipadapter_file&quot;: &quot;ip-adapter-faceid_sdxl.safetensors&quot;
+      &quot;ipadapter_file&quot;: &quot;${pack.ipadapter_file}&quot;
     },
     &quot;class_type&quot;: &quot;IPAdapterModelLoader&quot;,
-    &quot;_meta&quot;: {&quot;title&quot;: &quot;Load IP-Adapter FaceID SDXL&quot;}
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Load IP-Adapter model&quot;}
+  },
+
+  &quot;14&quot;: {
+    &quot;inputs&quot;: {
+      &quot;clip_name&quot;: &quot;${pack.clip_vision_file}&quot;
+    },
+    &quot;class_type&quot;: &quot;CLIPVisionLoader&quot;,
+    &quot;_meta&quot;: {&quot;title&quot;: &quot;Load CLIP vision encoder&quot;}
   },
 
   &quot;7&quot;: {
@@ -9904,8 +9983,11 @@ PIPELINE_EOF</pre></div>
       &quot;image&quot;: [&quot;5&quot;, 0],
       &quot;weight&quot;: &quot;${pack.identity.weight}&quot;,
       &quot;weight_type&quot;: &quot;linear&quot;,
+      &quot;combine_embeds&quot;: &quot;concat&quot;,
       &quot;start_at&quot;: 0.0,
-      &quot;end_at&quot;: 1.0
+      &quot;end_at&quot;: 1.0,
+      &quot;embeds_scaling&quot;: &quot;V only&quot;,
+      &quot;clip_vision&quot;: [&quot;14&quot;, 0]
     },
     &quot;class_type&quot;: &quot;IPAdapterAdvanced&quot;,
     &quot;_meta&quot;: {&quot;title&quot;: &quot;Apply IP-Adapter&quot;}
