@@ -19,3 +19,9 @@ def test_setup_skill_not_in_embeds():
 
 def test_setup_skill_audit_loop_helper_exists():
     assert (REPO / "setup-skill" / "scripts" / "audit_loop.py").exists()
+
+
+def test_runtime_skill_mentions_setup_skill():
+    runtime = (REPO / "skill" / "SKILL.md").read_text()
+    assert "asset-pipeline-setup" in runtime
+    assert "When to run setup" in runtime or "When to run the setup" in runtime
