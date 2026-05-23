@@ -64,7 +64,21 @@ EMBEDS: dict[str, str] = {
     "scripts/consistency_pack_schema.json": "~/3d-pipeline/workspace/consistency_pack_schema.json",
     "scripts/comfyui_dispatch.py":          "~/3d-pipeline/workspace/comfyui_dispatch.py",
     "scripts/comfyui_workflows/consistency_sdxl.json": "~/3d-pipeline/workspace/comfyui_workflows/consistency_sdxl.json",
+    "scripts/_install_lib.py":              "~/3d-pipeline/workspace/_install_lib.py",
 }
+
+EMBEDS_SCRIPTS: dict[str, str] = {
+    src: dst for src, dst in EMBEDS.items()
+    if dst.startswith("~/3d-pipeline/workspace/")
+}
+EMBEDS_SKILL: dict[str, str] = {
+    src: dst for src, dst in EMBEDS.items()
+    if dst.startswith("~/.claude/skills/asset-pipeline/")
+}
+assert set(EMBEDS_SCRIPTS) | set(EMBEDS_SKILL) == set(EMBEDS), \
+    "EMBEDS_SCRIPTS ∪ EMBEDS_SKILL must cover all EMBEDS"
+assert set(EMBEDS_SCRIPTS) & set(EMBEDS_SKILL) == set(), \
+    "EMBEDS_SCRIPTS and EMBEDS_SKILL must be disjoint"
 
 # Block pattern: opener line, body, closing PIPELINE_EOF on its own line.
 # The opener uses literal `>`, `<`, `'` (safe in <pre>) — only the body is escaped.

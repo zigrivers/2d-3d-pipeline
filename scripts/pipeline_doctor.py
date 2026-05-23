@@ -425,6 +425,34 @@ def check_structure(manifest: dict) -> dict:
             if not any_bad_se:
                 _ok("v2:studio-extras", "studio_extras well-formed")
 
+    if v2:
+        try:
+            sys.path.insert(0, str(REPO_ROOT))
+            from tools._embed_lib import EMBEDS_SCRIPTS, EMBEDS_SKILL, EMBEDS  # type: ignore
+            scripts_dests = set(EMBEDS_SCRIPTS.values())
+            skill_dests = set(EMBEDS_SKILL.values())
+            all_dests = set(EMBEDS.values())
+            if scripts_dests | skill_dests != all_dests:
+                _fail("v2:embeds-partition",
+                      "EMBEDS_SCRIPTS ∪ EMBEDS_SKILL does not cover all EMBEDS")
+            elif scripts_dests & skill_dests:
+                _fail("v2:embeds-partition",
+                      f"EMBEDS_SCRIPTS and EMBEDS_SKILL overlap: {scripts_dests & skill_dests}")
+            else:
+                bad_scripts = [d for d in scripts_dests
+                               if not d.startswith("~/3d-pipeline/workspace/")]
+                bad_skill = [d for d in skill_dests
+                             if not d.startswith("~/.claude/skills/asset-pipeline/")]
+                if bad_scripts or bad_skill:
+                    _fail("v2:embeds-partition",
+                          f"prefix invariant violated — scripts: {bad_scripts}, skill: {bad_skill}")
+                else:
+                    _ok("v2:embeds-partition",
+                        f"{len(EMBEDS_SCRIPTS)} scripts dest(s), {len(EMBEDS_SKILL)} skill dest(s)")
+        except ImportError:
+            _fail("v2:embeds-partition",
+                  "could not import EMBEDS_SCRIPTS/EMBEDS_SKILL from tools._embed_lib")
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))

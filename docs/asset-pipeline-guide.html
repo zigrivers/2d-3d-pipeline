@@ -6131,6 +6131,216 @@ def check_structure(manifest: dict) -&gt; dict:
     def _ok(name: str, details: str = &quot;&quot;) -&gt; None:
         checks.append({&quot;name&quot;: name, &quot;status&quot;: &quot;ok&quot;, &quot;details&quot;: details})
 
+    v2 = manifest.get(&quot;schema_version&quot;, 1) &gt;= 2
+
+    def _v2_ok(name: str, details: str = &quot;&quot;) -&gt; None:
+        checks.append({&quot;name&quot;: f&quot;v2:{name}&quot;, &quot;status&quot;: &quot;ok&quot;, &quot;details&quot;: details})
+
+    if v2:
+        _v2_ok(&quot;schema-version&quot;, &quot;manifest is v2; v2 rules active&quot;)
+
+    if v2:
+        td = manifest.get(&quot;tier_defaults&quot;)
+        known_sets = set((manifest.get(&quot;feature_sets&quot;) or {}).keys())
+        if td is None:
+            _fail(&quot;v2:tier-defaults&quot;, &quot;missing &#x27;tier_defaults&#x27; block&quot;)
+        elif not isinstance(td, dict):
+            _fail(&quot;v2:tier-defaults&quot;, f&quot;&#x27;tier_defaults&#x27; must be an object, got {type(td).__name__}&quot;)
+        else:
+            missing_tiers = {&quot;laptop&quot;, &quot;studio&quot;} - set(td.keys())
+            if missing_tiers:
+                _fail(&quot;v2:tier-defaults&quot;, f&quot;missing tier(s): {sorted(missing_tiers)}&quot;)
+            else:
+                any_bad = False
+                for tier, body in td.items():
+                    inc = (body or {}).get(&quot;include&quot;, [])
+                    if not isinstance(inc, list):
+                        _fail(&quot;v2:tier-defaults&quot;, f&quot;tier &#x27;{tier}&#x27; include must be a list&quot;)
+                        any_bad = True
+                        continue
+                    unknown = [s for s in inc if s not in known_sets]
+                    if unknown:
+                        _fail(&quot;v2:tier-defaults&quot;,
+                              f&quot;tier &#x27;{tier}&#x27; includes unknown feature_set(s): {unknown}&quot;)
+                        any_bad = True
+                if not any_bad:
+                    _ok(&quot;v2:tier-defaults&quot;, &quot;both tiers declared with valid feature_sets&quot;)
+
+    if v2:
+        prereqs = manifest.get(&quot;prereqs&quot;)
+        if prereqs is None:
+            _fail(&quot;v2:prereqs&quot;, &quot;missing &#x27;prereqs&#x27; block&quot;)
+        elif not isinstance(prereqs, list):
+            _fail(&quot;v2:prereqs&quot;, f&quot;&#x27;prereqs&#x27; must be a list, got {type(prereqs).__name__}&quot;)
+        else:
+            any_bad = False
+            for i, p in enumerate(prereqs):
+                if not isinstance(p, dict):
+                    _fail(&quot;v2:prereqs&quot;, f&quot;prereqs[{i}] must be an object&quot;)
+                    any_bad = True
+                    continue
+                for required in (&quot;id&quot;, &quot;kind&quot;, &quot;name&quot;):
+                    if required not in p:
+                        _fail(&quot;v2:prereqs&quot;, f&quot;prereqs[{i}] missing field &#x27;{required}&#x27;&quot;)
+                        any_bad = True
+                sev = p.get(&quot;max_version_severity&quot;, &quot;warn&quot;)
+                if sev not in (&quot;warn&quot;, &quot;fail&quot;):
+                    _fail(&quot;v2:prereqs&quot;,
+                          f&quot;prereqs[{i}] max_version_severity must be &#x27;warn&#x27; or &#x27;fail&#x27;, got {sev!r}&quot;)
+                    any_bad = True
+            if not any_bad:
+                _ok(&quot;v2:prereqs&quot;, f&quot;{len(prereqs)} prereq(s) well-formed&quot;)
+
+    if v2:
+        mep = manifest.get(&quot;mutable_embed_paths&quot;)
+        if mep is None:
+            _fail(&quot;v2:mutable-embed-paths&quot;, &quot;missing &#x27;mutable_embed_paths&#x27; field (use [] for default)&quot;)
+        elif not isinstance(mep, list):
+            _fail(&quot;v2:mutable-embed-paths&quot;,
+                  f&quot;&#x27;mutable_embed_paths&#x27; must be a list, got {type(mep).__name__}&quot;)
+        elif any(not isinstance(p, str) for p in mep):
+            _fail(&quot;v2:mutable-embed-paths&quot;, &quot;all entries must be strings (embed destination paths)&quot;)
+        else:
+            _ok(&quot;v2:mutable-embed-paths&quot;, f&quot;{len(mep)} entry/entries&quot;)
+
+    if v2:
+        any_bad_model_v2 = False
+        for m in (manifest.get(&quot;models&quot;) or []):
+            mid = m.get(&quot;id&quot;, &quot;&lt;unknown&gt;&quot;)
+            layout = m.get(&quot;storage_layout&quot;)
+            if layout not in (&quot;literal&quot;, &quot;hf_snapshot&quot;):
+                _fail(&quot;v2:model-storage-layout&quot;,
+                      f&quot;model &#x27;{mid}&#x27; storage_layout must be &#x27;literal&#x27; or &#x27;hf_snapshot&#x27;, got {layout!r}&quot;)
+                any_bad_model_v2 = True
+
+            managed = m.get(&quot;managed_by&quot;)
+            kind = m.get(&quot;comfyui_kind&quot;)
+            if managed == &quot;comfyui&quot;:
+                if kind not in (&quot;checkpoint&quot;, &quot;ip_adapter&quot;, &quot;controlnet&quot;, &quot;lora&quot;, &quot;clip_vision&quot;):
+                    _fail(&quot;v2:model-comfyui-kind&quot;,
+                          f&quot;model &#x27;{mid}&#x27; managed_by=comfyui requires comfyui_kind in &quot;
+                          &quot;{checkpoint, ip_adapter, controlnet, lora, clip_vision}&quot;)
+                    any_bad_model_v2 = True
+            elif kind is not None:
+                _fail(&quot;v2:model-comfyui-kind&quot;,
+                      f&quot;model &#x27;{mid}&#x27; has comfyui_kind={kind!r} but managed_by={managed!r}&quot;)
+                any_bad_model_v2 = True
+
+            if m.get(&quot;requires_hf_auth&quot;) and not m.get(&quot;hf_repo&quot;):
+                _fail(&quot;v2:model-hf-auth&quot;,
+                      f&quot;model &#x27;{mid}&#x27; requires_hf_auth=true but no hf_repo declared&quot;)
+                any_bad_model_v2 = True
+
+        if not any_bad_model_v2:
+            _ok(&quot;v2:model-fields&quot;, &quot;all models have valid v2 fields&quot;)
+
+    if v2:
+        any_bad_venv_v2 = False
+        for v in (manifest.get(&quot;venvs&quot;) or []):
+            name = v.get(&quot;name&quot;, &quot;&lt;unnamed&gt;&quot;)
+            pyver = v.get(&quot;python_version&quot;)
+            if not isinstance(pyver, str) or not pyver:
+                _fail(&quot;v2:venv-python-version&quot;,
+                      f&quot;venv &#x27;{name}&#x27; missing &#x27;python_version&#x27; (e.g. &#x27;3.12&#x27;)&quot;)
+                any_bad_venv_v2 = True
+            lockfile_rel = v.get(&quot;lockfile&quot;)
+            if not isinstance(lockfile_rel, str) or not lockfile_rel:
+                _fail(&quot;v2:venv-lockfile&quot;,
+                      f&quot;venv &#x27;{name}&#x27; missing &#x27;lockfile&#x27; path&quot;)
+                any_bad_venv_v2 = True
+                continue
+            lockfile_abs = (REPO_ROOT / lockfile_rel).resolve()
+            if not lockfile_abs.is_relative_to(REPO_ROOT.resolve()):
+                _fail(&quot;v2:venv-lockfile&quot;,
+                      f&quot;venv &#x27;{name}&#x27; lockfile {lockfile_rel!r} resolves outside repo&quot;)
+                any_bad_venv_v2 = True
+                continue
+            if not lockfile_abs.exists():
+                _fail(&quot;v2:venv-lockfile&quot;,
+                      f&quot;venv &#x27;{name}&#x27; lockfile not found at {lockfile_rel}&quot;)
+                any_bad_venv_v2 = True
+                continue
+            content = lockfile_abs.read_text()
+            forbidden = []
+            for line in content.splitlines():
+                pkg = line.split(&quot;==&quot;)[0].strip().lower()
+                if pkg in (&quot;pip&quot;, &quot;setuptools&quot;, &quot;wheel&quot;):
+                    forbidden.append(pkg)
+            if forbidden:
+                _fail(&quot;v2:venv-lockfile&quot;,
+                      f&quot;venv &#x27;{name}&#x27; lockfile contains {forbidden} — regenerate with &quot;
+                      &quot;`pip freeze --exclude pip --exclude setuptools --exclude wheel`&quot;)
+                any_bad_venv_v2 = True
+        if not any_bad_venv_v2:
+            _ok(&quot;v2:venv-fields&quot;, &quot;all venvs have valid python_version + lockfile&quot;)
+
+    if v2:
+        se = manifest.get(&quot;studio_extras&quot;)
+        if se is None:
+            _fail(&quot;v2:studio-extras&quot;, &quot;missing &#x27;studio_extras&#x27; block&quot;)
+        elif not isinstance(se, dict):
+            _fail(&quot;v2:studio-extras&quot;,
+                  f&quot;&#x27;studio_extras&#x27; must be an object, got {type(se).__name__}&quot;)
+        else:
+            any_bad_se = False
+            for required in (&quot;queue_dirs&quot;, &quot;launchd_plist&quot;, &quot;heartbeat_file&quot;,
+                             &quot;heartbeat_max_age_seconds&quot;,
+                             &quot;heartbeat_write_timeout_seconds&quot;):
+                if required not in se:
+                    _fail(&quot;v2:studio-extras&quot;, f&quot;studio_extras missing &#x27;{required}&#x27;&quot;)
+                    any_bad_se = True
+            if not any_bad_se:
+                max_age = se[&quot;heartbeat_max_age_seconds&quot;]
+                timeout = se[&quot;heartbeat_write_timeout_seconds&quot;]
+                if not (isinstance(max_age, int) and isinstance(timeout, int)):
+                    _fail(&quot;v2:studio-extras&quot;,
+                          &quot;heartbeat_*_seconds must be integers&quot;)
+                    any_bad_se = True
+                elif timeout &gt;= max_age / 3:
+                    _fail(&quot;v2:studio-extras&quot;,
+                          f&quot;heartbeat_write_timeout_seconds ({timeout}) must be &quot;
+                          f&quot;strictly less than heartbeat_max_age_seconds/3 &quot;
+                          f&quot;({max_age/3}) to avoid races&quot;)
+                    any_bad_se = True
+                plist = se.get(&quot;launchd_plist&quot;) or {}
+                label = plist.get(&quot;label&quot;, &quot;&quot;)
+                if not (label.count(&quot;.&quot;) &gt;= 2 and
+                        label.split(&quot;.&quot;)[0] in (&quot;com&quot;, &quot;org&quot;, &quot;net&quot;, &quot;io&quot;, &quot;dev&quot;)):
+                    _fail(&quot;v2:studio-extras&quot;,
+                          f&quot;launchd_plist.label {label!r} must be reverse-DNS &quot;
+                          &quot;(e.g. com.kenallred.3dpipeline.queue-worker)&quot;)
+                    any_bad_se = True
+            if not any_bad_se:
+                _ok(&quot;v2:studio-extras&quot;, &quot;studio_extras well-formed&quot;)
+
+    if v2:
+        try:
+            sys.path.insert(0, str(REPO_ROOT))
+            from tools._embed_lib import EMBEDS_SCRIPTS, EMBEDS_SKILL, EMBEDS  # type: ignore
+            scripts_dests = set(EMBEDS_SCRIPTS.values())
+            skill_dests = set(EMBEDS_SKILL.values())
+            all_dests = set(EMBEDS.values())
+            if scripts_dests | skill_dests != all_dests:
+                _fail(&quot;v2:embeds-partition&quot;,
+                      &quot;EMBEDS_SCRIPTS ∪ EMBEDS_SKILL does not cover all EMBEDS&quot;)
+            elif scripts_dests &amp; skill_dests:
+                _fail(&quot;v2:embeds-partition&quot;,
+                      f&quot;EMBEDS_SCRIPTS and EMBEDS_SKILL overlap: {scripts_dests &amp; skill_dests}&quot;)
+            else:
+                bad_scripts = [d for d in scripts_dests
+                               if not d.startswith(&quot;~/3d-pipeline/workspace/&quot;)]
+                bad_skill = [d for d in skill_dests
+                             if not d.startswith(&quot;~/.claude/skills/asset-pipeline/&quot;)]
+                if bad_scripts or bad_skill:
+                    _fail(&quot;v2:embeds-partition&quot;,
+                          f&quot;prefix invariant violated — scripts: {bad_scripts}, skill: {bad_skill}&quot;)
+                else:
+                    _ok(&quot;v2:embeds-partition&quot;,
+                        f&quot;{len(EMBEDS_SCRIPTS)} scripts dest(s), {len(EMBEDS_SKILL)} skill dest(s)&quot;)
+        except ImportError:
+            _fail(&quot;v2:embeds-partition&quot;,
+                  &quot;could not import EMBEDS_SCRIPTS/EMBEDS_SKILL from tools._embed_lib&quot;)
+
     # Rule 1 — every EMBEDS source path exists on disk.
     try:
         sys.path.insert(0, str(REPO_ROOT))
@@ -6417,8 +6627,39 @@ PIPELINE_EOF</pre></div>
               </summary>
               <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/model_manifest.json << 'PIPELINE_EOF'
 {
-  &quot;schema_version&quot;: 1,
+  &quot;schema_version&quot;: 2,
   &quot;description&quot;: &quot;Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.&quot;,
+  &quot;tier_defaults&quot;: {
+    &quot;laptop&quot;: { &quot;include&quot;: [] },
+    &quot;studio&quot;: { &quot;include&quot;: [&quot;hunyuan3d-paint&quot;] }
+  },
+  &quot;prereqs&quot;: [
+    { &quot;id&quot;: &quot;python&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;python3&quot;,
+      &quot;min_version&quot;: &quot;3.10&quot;, &quot;max_version&quot;: &quot;3.12&quot;,
+      &quot;max_version_severity&quot;: &quot;warn&quot;,
+      &quot;install_hint&quot;: &quot;brew install python@3.12&quot; },
+    { &quot;id&quot;: &quot;brew&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;brew&quot;,
+      &quot;install_hint&quot;: &quot;see https://brew.sh&quot; },
+    { &quot;id&quot;: &quot;git&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;git&quot; },
+    { &quot;id&quot;: &quot;huggingface-cli&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;huggingface-cli&quot;,
+      &quot;install_hint&quot;: &quot;pip install huggingface_hub[cli]&quot; },
+    { &quot;id&quot;: &quot;pip&quot;, &quot;kind&quot;: &quot;python_package&quot;, &quot;name&quot;: &quot;pip&quot;,
+      &quot;min_version&quot;: &quot;23.1&quot;,
+      &quot;install_hint&quot;: &quot;python3 -m pip install --upgrade pip&quot; }
+  ],
+  &quot;mutable_embed_paths&quot;: [],
+  &quot;studio_extras&quot;: {
+    &quot;queue_dirs&quot;: [&quot;queue/pending&quot;, &quot;queue/running&quot;, &quot;queue/done&quot;, &quot;queue/failed&quot;],
+    &quot;launchd_plist&quot;: {
+      &quot;label&quot;: &quot;com.kenallred.3dpipeline.queue-worker&quot;,
+      &quot;template&quot;: &quot;scripts/launchd/queue-worker.plist.tmpl&quot;,
+      &quot;dest_path&quot;: &quot;~/Library/LaunchAgents/com.kenallred.3dpipeline.queue-worker.plist&quot;,
+      &quot;optional&quot;: true
+    },
+    &quot;heartbeat_file&quot;: &quot;queue/.heartbeat-&lt;machine&gt;&quot;,
+    &quot;heartbeat_max_age_seconds&quot;: 90,
+    &quot;heartbeat_write_timeout_seconds&quot;: 25
+  },
   &quot;feature_sets&quot;: {
     &quot;tier1&quot;: {
       &quot;description&quot;: &quot;Default v0.3 quality features (always recommended)&quot;,
@@ -6444,7 +6685,9 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: true,
       &quot;feature_set&quot;: &quot;tier1&quot;,
       &quot;size_gb&quot;: 8,
-      &quot;purpose&quot;: &quot;2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)&quot;
+      &quot;purpose&quot;: &quot;2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;
     },
     {
       &quot;name&quot;: &quot;pipeline-tools-env&quot;,
@@ -6453,7 +6696,9 @@ PIPELINE_EOF</pre></div>
       &quot;feature_set&quot;: &quot;tier1&quot;,
       &quot;size_gb&quot;: 6,
       &quot;purpose&quot;: &quot;Quality-check scripts (trimesh, rembg, open_clip)&quot;,
-      &quot;import_check&quot;: &quot;trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests&quot;
+      &quot;import_check&quot;: &quot;trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/pipeline-tools-env.txt&quot;
     },
     {
       &quot;name&quot;: &quot;hunyuan3d-paint-env&quot;,
@@ -6461,7 +6706,9 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: false,
       &quot;feature_set&quot;: &quot;hunyuan3d-paint&quot;,
       &quot;size_gb&quot;: 6,
-      &quot;purpose&quot;: &quot;Hunyuan3D-Paint texture painting&quot;
+      &quot;purpose&quot;: &quot;Hunyuan3D-Paint texture painting&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/hunyuan3d-paint-env.txt&quot;
     },
     {
       &quot;name&quot;: &quot;comfyui-env&quot;,
@@ -6469,7 +6716,9 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: false,
       &quot;feature_set&quot;: &quot;comfyui&quot;,
       &quot;size_gb&quot;: 10,
-      &quot;purpose&quot;: &quot;ComfyUI consistency mode (Item 11)&quot;
+      &quot;purpose&quot;: &quot;ComfyUI consistency mode (Item 11)&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/comfyui-env.txt&quot;
     },
     {
       &quot;name&quot;: &quot;multiview-env&quot;,
@@ -6477,7 +6726,9 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: false,
       &quot;feature_set&quot;: &quot;multiview&quot;,
       &quot;size_gb&quot;: 6,
-      &quot;purpose&quot;: &quot;Multi-view reconstruction (Item 12)&quot;
+      &quot;purpose&quot;: &quot;Multi-view reconstruction (Item 12)&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/multiview-env.txt&quot;
     }
   ],
   &quot;models&quot;: [
@@ -6492,7 +6743,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;rembg&quot;,
-      &quot;notes&quot;: &quot;Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache.&quot;
+      &quot;notes&quot;: &quot;Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: null,
+      &quot;storage_layout&quot;: &quot;literal&quot;,
+      &quot;warm_target&quot;: &quot;u2net&quot;,
+      &quot;comfyui_kind&quot;: null
     },
     {
       &quot;id&quot;: &quot;clip-vit-l-14&quot;,
@@ -6505,7 +6761,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;open_clip&quot;,
-      &quot;notes&quot;: &quot;Downloaded automatically by open_clip on first use; the env var routes the cache.&quot;
+      &quot;notes&quot;: &quot;Downloaded automatically by open_clip on first use; the env var routes the cache.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: null,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;ViT-L-14&quot;,
+      &quot;comfyui_kind&quot;: null
     },
     {
       &quot;id&quot;: &quot;hunyuan3d-paint&quot;,
@@ -6518,7 +6779,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;hunyuan3d-paint&quot;,
-      &quot;notes&quot;: &quot;Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md.&quot;
+      &quot;notes&quot;: &quot;Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md.&quot;,
+      &quot;requires_hf_auth&quot;: true,
+      &quot;hf_repo&quot;: &quot;tencent/Hunyuan3D-2&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;hunyuan3d-paint&quot;,
+      &quot;comfyui_kind&quot;: null
     },
     {
       &quot;id&quot;: &quot;sdxl-base&quot;,
@@ -6531,7 +6797,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;CreativeML Open RAIL-M license.&quot;
+      &quot;notes&quot;: &quot;CreativeML Open RAIL-M license.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;stabilityai/stable-diffusion-xl-base-1.0&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;sd_xl_base_1.0&quot;,
+      &quot;comfyui_kind&quot;: &quot;checkpoint&quot;
     },
     {
       &quot;id&quot;: &quot;ip-adapter-sdxl&quot;,
@@ -6544,7 +6815,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;h94/IP-Adapter&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;ip-adapter_sdxl&quot;,
+      &quot;comfyui_kind&quot;: &quot;ip_adapter&quot;
     },
     {
       &quot;id&quot;: &quot;clip-vit-bigg-14&quot;,
@@ -6557,7 +6833,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;h94/IP-Adapter&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;clip-vit-bigg-14&quot;,
+      &quot;comfyui_kind&quot;: &quot;clip_vision&quot;
     },
     {
       &quot;id&quot;: &quot;ip-adapter-faceid-sdxl&quot;,
@@ -6570,7 +6851,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;h94/IP-Adapter-FaceID&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;ip-adapter-faceid_sdxl&quot;,
+      &quot;comfyui_kind&quot;: &quot;ip_adapter&quot;
     },
     {
       &quot;id&quot;: &quot;controlnet-openpose&quot;,
@@ -6583,7 +6869,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;xinsir/controlnet-openpose-sdxl-1.0&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;controlnet-openpose-sdxl&quot;,
+      &quot;comfyui_kind&quot;: &quot;controlnet&quot;
     },
     {
       &quot;id&quot;: &quot;controlnet-canny&quot;,
@@ -6596,7 +6887,12 @@ PIPELINE_EOF</pre></div>
       &quot;download_url&quot;: &quot;&quot;,
       &quot;sha256&quot;: &quot;&quot;,
       &quot;managed_by&quot;: &quot;comfyui&quot;,
-      &quot;notes&quot;: &quot;Apache 2.0.&quot;
+      &quot;notes&quot;: &quot;Apache 2.0.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;xinsir/controlnet-canny-sdxl-1.0&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;controlnet-canny-sdxl&quot;,
+      &quot;comfyui_kind&quot;: &quot;controlnet&quot;
     }
   ],
   &quot;wrappers&quot;: [
@@ -10056,6 +10352,28 @@ PIPELINE_EOF</pre></div>
     &quot;_meta&quot;: {&quot;title&quot;: &quot;Save&quot;}
   }
 }
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>_install_lib.py</code>
+                <span class="script-summary-desc">Host-tool warm-up recipes (Phase 3 placeholder)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/_install_lib.py << 'PIPELINE_EOF'
+&quot;&quot;&quot;Host-tool recipes for smoke-warming lazy-managed models.
+
+Each entry in RECIPES maps a model warm_target to a callable that triggers
+the framework&#x27;s own download on first use.  Populated incrementally in Phase 3.
+&quot;&quot;&quot;
+from __future__ import annotations
+
+RECIPES: dict = {}
+
+
+def warm(model: dict) -&gt; tuple[str, str]:
+    &quot;&quot;&quot;Placeholder; populated in Phase 3.&quot;&quot;&quot;
+    return (&quot;skipped&quot;, &quot;no recipe registered yet&quot;)
 PIPELINE_EOF</pre></div>
             </details>
 
