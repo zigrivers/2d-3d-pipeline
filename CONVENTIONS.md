@@ -200,3 +200,24 @@ their local copy is current. Significant doc changes get a dated entry in
 
 When a script's behaviour changes in a user-visible way, bump the "Last
 updated" date on the guide and note the change in the changelog.
+
+## Setup skill (v0.4) — naming exception
+
+In addition to the runtime skill at `skill/` (singular), v0.4 adds a
+second one-shot setup skill at `setup-skill/` deployed to
+`~/.claude/skills/asset-pipeline-setup/`. The two have different
+lifecycles — the runtime skill is hot-loaded constantly during
+pipeline work; the setup skill runs rarely (install + audit). Sharing
+a single repo directory would conflate the two.
+
+This is a **soft exception** to the singular-`skill/` convention.
+Tracked technical debt: v0.5 will consolidate to
+`skills/runtime/` and `skills/setup/`, updating `EMBEDS` and the
+HTML embed regenerator at the same time. Until then, both
+directories coexist; the exception is documented here so it doesn't
+quietly become a precedent.
+
+`setup-skill/` is **not** in `EMBEDS`. The setup skill ships via
+the repo clone alone — Claude-driven installs pull it directly.
+This is enforced by `pipeline_doctor.py --check structure` (rule
+`v2:embeds-partition`).
