@@ -12,6 +12,26 @@ memory, full-suite bake-offs, and the two-machine job queue.
 
 ---
 
+## v0.4 — Claude-Code-driven setup + audit/fix loop
+
+Same as laptop tier (`asset-pipeline-setup` skill, `--apply`, lockfile-driven
+venvs, resumable downloads). Studio-only additions:
+
+- New `studio_extras` apply stage creates the queue directory tree and
+  offers an opt-in launchd plist for auto-starting the worker.
+- `queue_worker.py` now writes a heartbeat to
+  `queue/.heartbeat-<machine>` every poll cycle. The setup skill
+  uses this heartbeat (not the existing `mtime`-based stuck-job
+  reclaim) to decide whether a foreign worker is alive before
+  touching the shared queue.
+- Heartbeat write uses a local-tmp + atomic-rename + watchdog timeout
+  protocol so a slow SMB connection can't cause false-dead
+  conclusions on the other machine.
+
+Last updated: 2026-05-23
+
+---
+
 ## Declare the studio tier
 
 Every Mac Studio needs `~/3d-pipeline/.config` with:

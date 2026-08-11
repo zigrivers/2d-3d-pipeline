@@ -1,6 +1,37 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.",
+  "tier_defaults": {
+    "laptop": { "include": [] },
+    "studio": { "include": ["hunyuan3d-paint"] }
+  },
+  "prereqs": [
+    { "id": "python", "kind": "binary", "name": "python3",
+      "min_version": "3.10", "max_version": "3.12",
+      "max_version_severity": "warn",
+      "install_hint": "brew install python@3.12" },
+    { "id": "brew", "kind": "binary", "name": "brew",
+      "install_hint": "see https://brew.sh" },
+    { "id": "git", "kind": "binary", "name": "git" },
+    { "id": "huggingface-cli", "kind": "binary", "name": "huggingface-cli",
+      "install_hint": "pip install huggingface_hub[cli]" },
+    { "id": "pip", "kind": "python_package", "name": "pip",
+      "min_version": "23.1",
+      "install_hint": "python3 -m pip install --upgrade pip" }
+  ],
+  "mutable_embed_paths": [],
+  "studio_extras": {
+    "queue_dirs": ["queue/pending", "queue/running", "queue/done", "queue/failed"],
+    "launchd_plist": {
+      "label": "com.kenallred.3dpipeline.queue-worker",
+      "template": "scripts/launchd/queue-worker.plist.tmpl",
+      "dest_path": "~/Library/LaunchAgents/com.kenallred.3dpipeline.queue-worker.plist",
+      "optional": true
+    },
+    "heartbeat_file": "queue/.heartbeat-<machine>",
+    "heartbeat_max_age_seconds": 90,
+    "heartbeat_write_timeout_seconds": 25
+  },
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",
@@ -26,7 +57,9 @@
       "required": true,
       "feature_set": "tier1",
       "size_gb": 8,
-      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)"
+      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/mflux-env.txt"
     },
     {
       "name": "pipeline-tools-env",
@@ -35,7 +68,9 @@
       "feature_set": "tier1",
       "size_gb": 6,
       "purpose": "Quality-check scripts (trimesh, rembg, open_clip)",
-      "import_check": "trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests"
+      "import_check": "trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/pipeline-tools-env.txt"
     },
     {
       "name": "hunyuan3d-paint-env",
@@ -43,7 +78,9 @@
       "required": false,
       "feature_set": "hunyuan3d-paint",
       "size_gb": 6,
-      "purpose": "Hunyuan3D-Paint texture painting"
+      "purpose": "Hunyuan3D-Paint texture painting",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/hunyuan3d-paint-env.txt"
     },
     {
       "name": "comfyui-env",
@@ -51,7 +88,9 @@
       "required": false,
       "feature_set": "comfyui",
       "size_gb": 10,
-      "purpose": "ComfyUI consistency mode (Item 11)"
+      "purpose": "ComfyUI consistency mode (Item 11)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/comfyui-env.txt"
     },
     {
       "name": "multiview-env",
@@ -59,7 +98,9 @@
       "required": false,
       "feature_set": "multiview",
       "size_gb": 6,
-      "purpose": "Multi-view reconstruction (Item 12)"
+      "purpose": "Multi-view reconstruction (Item 12)",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/multiview-env.txt"
     }
   ],
   "models": [
@@ -74,7 +115,12 @@
       "download_url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
       "sha256": "",
       "managed_by": "rembg",
-      "notes": "Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache."
+      "notes": "Downloaded automatically by rembg on first use; recorded here for disk planning + manual --warm-cache.",
+      "requires_hf_auth": false,
+      "hf_repo": null,
+      "storage_layout": "literal",
+      "warm_target": "u2net",
+      "comfyui_kind": null
     },
     {
       "id": "clip-vit-l-14",
@@ -87,7 +133,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "open_clip",
-      "notes": "Downloaded automatically by open_clip on first use; the env var routes the cache."
+      "notes": "Downloaded automatically by open_clip on first use; the env var routes the cache.",
+      "requires_hf_auth": false,
+      "hf_repo": null,
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ViT-L-14",
+      "comfyui_kind": null
     },
     {
       "id": "hunyuan3d-paint",
@@ -100,7 +151,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "hunyuan3d-paint",
-      "notes": "Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md."
+      "notes": "Tencent Hunyuan Community License (approved 2026-05-20). See docs/license-review-hunyuan3d-paint.md.",
+      "requires_hf_auth": true,
+      "hf_repo": "tencent/Hunyuan3D-2",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "hunyuan3d-paint",
+      "comfyui_kind": null
     },
     {
       "id": "sdxl-base",
@@ -113,7 +169,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "CreativeML Open RAIL-M license."
+      "notes": "CreativeML Open RAIL-M license.",
+      "requires_hf_auth": false,
+      "hf_repo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "sd_xl_base_1.0",
+      "comfyui_kind": "checkpoint"
     },
     {
       "id": "ip-adapter-sdxl",
@@ -126,7 +187,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/."
+      "notes": "Apache 2.0. Verified working with clip-vit-bigg-14.safetensors. Paired with ViT-bigG CLIP encoder from h94/IP-Adapter sdxl_models/image_encoder/.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ip-adapter_sdxl",
+      "comfyui_kind": "ip_adapter"
     },
     {
       "id": "clip-vit-bigg-14",
@@ -139,7 +205,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors."
+      "notes": "Apache 2.0. CLIP ViT-bigG-14 vision encoder. Required for ip-adapter_sdxl. Source: h94/IP-Adapter sdxl_models/image_encoder/model.safetensors.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "clip-vit-bigg-14",
+      "comfyui_kind": "clip_vision"
     },
     {
       "id": "ip-adapter-faceid-sdxl",
@@ -152,7 +223,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet."
+      "notes": "Apache 2.0. Requires InsightFace + onnxruntime in comfyui-env (pip install insightface onnxruntime) and CLIPVision encoder. Not verified on this machine yet.",
+      "requires_hf_auth": false,
+      "hf_repo": "h94/IP-Adapter-FaceID",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "ip-adapter-faceid_sdxl",
+      "comfyui_kind": "ip_adapter"
     },
     {
       "id": "controlnet-openpose",
@@ -165,7 +241,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0."
+      "notes": "Apache 2.0.",
+      "requires_hf_auth": false,
+      "hf_repo": "xinsir/controlnet-openpose-sdxl-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "controlnet-openpose-sdxl",
+      "comfyui_kind": "controlnet"
     },
     {
       "id": "controlnet-canny",
@@ -178,7 +259,12 @@
       "download_url": "",
       "sha256": "",
       "managed_by": "comfyui",
-      "notes": "Apache 2.0."
+      "notes": "Apache 2.0.",
+      "requires_hf_auth": false,
+      "hf_repo": "xinsir/controlnet-canny-sdxl-1.0",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "controlnet-canny-sdxl",
+      "comfyui_kind": "controlnet"
     }
   ],
   "wrappers": [

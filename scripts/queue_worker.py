@@ -42,6 +42,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Dual-path import so the worker runs whether installed to
+# ~/3d-pipeline/workspace/ alongside _heartbeat.py, or from a source checkout.
+try:
+    from _heartbeat import write as _heartbeat_write  # type: ignore
+except ImportError:
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from _heartbeat import write as _heartbeat_write  # type: ignore
+
 VALID_STAGES = {"text_to_image", "image_to_3d", "glb_to_print"}
 
 
@@ -275,6 +285,11 @@ def main() -> int:
     p.add_argument("--max-claims", type=int, default=3,
                    help="If reclaim is enabled, jobs that have been claimed this many "
                         "times move to failed/ instead of pending/ (default: 3).")
+    p.add_argument("--heartbeat-write-timeout-seconds", type=int, default=25,
+                   help="Watchdog for the heartbeat atomic-rename (default: 25).")
+    p.add_argument("--heartbeat-template", default=".heartbeat-<machine>",
+                   help="Heartbeat path template (manifest's "
+                        "studio_extras.heartbeat_file). Relative to queue/.")
     args = p.parse_args()
 
     assets_root = Path(os.path.expanduser(args.assets_root))
@@ -296,8 +311,23 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    def _hb() -> None:
+        # Spec §6.2: --dry-run skips heartbeat writes.
+        if args.dry_run:
+            return
+        try:
+            _heartbeat_write(qr, machine=hostname,
+                              timeout_seconds=args.heartbeat_write_timeout_seconds,
+                              template=args.heartbeat_template)
+        except Exception as exc:
+            # A heartbeat failure must never kill the worker.
+            print(f"[queue-worker] heartbeat write failed: {exc}",
+                  file=sys.stderr)
+
     processed = 0
+    _hb()  # initial heartbeat so an observer can confirm boot
     while not stop["flag"]:
+        _hb()
         if args.reclaim_stuck_after > 0:
             _reclaim_stuck(qr, args.reclaim_stuck_after, args.max_claims,
                            json_mode=args.json)
@@ -306,6 +336,7 @@ def main() -> int:
         if not pending:
             if args.once or stop["flag"]:
                 break
+            _hb()  # keep heartbeat fresh while waiting
             time.sleep(args.poll_seconds)
             continue
 
