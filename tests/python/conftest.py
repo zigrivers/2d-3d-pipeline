@@ -28,7 +28,7 @@ def minimal_v2_manifest():
         "models": [],
         "wrappers": [
             "concept.sh", "generate.sh", "multiview.sh",
-            "print.sh", "texture.sh", "benchmark.sh",
+            "print.sh", "texture.sh", "benchmark.sh", "edit.sh",
         ],
         "internal_scripts": ["_pipeline_lib.sh", "migrate_assets.sh"],
         "tier_defaults": {"laptop": {"include": []}, "studio": {"include": []}},
