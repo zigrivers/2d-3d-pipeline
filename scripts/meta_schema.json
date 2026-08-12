@@ -128,6 +128,19 @@
             "vertex_colors_discarded": { "type": "boolean" },
             "duration_seconds": { "type": "number" }
           }
+        },
+        "retopo": {
+          "type": "object",
+          "description": "Item 25 — generate.sh --retopo quad (retopo_quad.py: QuadWild bi-MDF).",
+          "additionalProperties": true,
+          "properties": {
+            "method": { "type": "string" },
+            "faces_before": { "type": "integer" },
+            "faces_after": { "type": "integer" },
+            "quad_fraction": { "type": "number" },
+            "watertight": { "type": "boolean" },
+            "duration_seconds": { "type": "number" }
+          }
         }
       }
     },

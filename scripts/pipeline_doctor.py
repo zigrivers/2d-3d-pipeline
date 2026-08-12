@@ -448,7 +448,15 @@ def _binary_version(name: str, version_flag: str = "--version") -> str | None:
     stderr = r.stderr if isinstance(r.stderr, str) else ""
     out = stdout + stderr
     m = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", out)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    # Item 25: quadwild / quad_from_patches print no version number at all
+    # in their usage text (unlike gltfpack, whose banner has one) -- the
+    # binary is genuinely on PATH and ran, just with nothing to parse.
+    # "unknown" (not None) so check_prereqs doesn't report a present
+    # binary as missing; entries relying on this must not set
+    # min_version/max_version since "unknown" can't be compared.
+    return "unknown"
 
 
 def _version_tuple(v: str) -> tuple[int, ...]:

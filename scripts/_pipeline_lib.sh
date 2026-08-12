@@ -317,6 +317,11 @@ license_bucket_for_model() {
         # recommended, same convention as commercial_threshold's MAU
         # footnote.
         marigold-iid)                           echo commercial_safe ;;
+        # Item 25 retopo (2026-08): QuadWild bi-MDF is GPL-3 (verified via
+        # GitHub API license metadata on cgg-bern/quadwild-bimdf) but a
+        # CLI tool with no shipped weights — tool-side copyleft only,
+        # generated GLB outputs are unaffected by GPL-3's terms.
+        quadwild-bimdf)                         echo commercial_safe ;;
         "")                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
