@@ -144,14 +144,71 @@ PNG> -g trellis2 -o r14_trellis2_test --no-preview` on this Studio
   report (with a working `fix_command`) after temporarily checking out a
   different real commit on the same clone, restored afterward.
 
-## Bake-off (placeholder — plan phase R1.5)
+## Bake-off (plan phase R1.5, run 2026-08-12)
 
-Not yet run. Plan phase R1.5 runs `scripts/model_bakeoff.py`'s studio
-`default` suite across `sf3d` / `spar3d` / `trellis2`, judges outputs with
-item 18's mesh judge (`--judge-mesh`), and fills per-model scores,
-timings, memory, and a recommendation into this section. **Default
-promotion is gate G6 (user decision) — this PR does not change any
-default.**
+`scripts/benchmark.sh --suite default --generators sf3d,spar3d,trellis2
+--judge-mesh --json` — the studio `default` suite (14 prompts spanning
+props, weapons, creatures, and print-adjacent objects), each 3D output
+scored by item 18's mesh judge. Raw results:
+`~/3d-pipeline/workspace/benchmarks/20260812-055040/benchmark_results.json`.
+
+**SPAR3D was not installed on this Studio** (only `sf3d`, `trellis`,
+`trellis2` were installed during this refresh round; SPAR3D remains an
+opt-in generator per `skill/SKILL.md` that nobody has set up here yet).
+All 14 SPAR3D runs failed identically with `SPAR3D not installed at
+~/3d-pipeline/stable-point-aware-3d` — a real, expected environment gap,
+not a bug, and not reported as a score below. The comparison that
+matters most for this PR (SF3D vs TRELLIS.2) is unaffected.
+
+### Results: SF3D vs TRELLIS.2 (14/14 successful runs each)
+
+| Metric | SF3D | TRELLIS.2 |
+|---|---|---|
+| Generation duration | avg 37.2s (min 34.1s, median 35.7s, max 52.1s) | avg 226.8s (min 161.7s, median 209.8s, max 334.1s) — **~6.1× slower** |
+| Peak memory (Metal/PyTorch) | avg 11.0 GB (captured for all 14 runs) | **not captured** — TRELLIS.2's `generate.py` doesn't print a peak-memory figure the way SF3D's does; `model_bakeoff.py`'s memory scraper found nothing to match. The R0.1 spike's separate manual run (port README's own benchmark class) reported ~18 GB peak on an M4 Pro — cited for context, not measured by this bake-off. |
+| Output GLB size (clean) | avg ~547 KB (min 400 KB, max 809 KB) | avg ~7.8 MB (min 4.9 MB, max 14.1 MB) — **~14× larger**, consistent with real PBR textures + denser geometry |
+| Mesh judge verdict (item 18, 0–10) | avg 4.71 | avg 6.43 |
+| Mesh judge rejections (verdict < 2.0, "likely degenerate") | **6 / 14 (43%)** | **3 / 14 (21%)** |
+
+### What the rejections actually were
+
+Both generators produced genuinely degenerate output on the same two
+prompts — **"fantasy sword"** and **"product prototype stand"** — both
+collapsing to a hairline-thin sliver mesh per the judge's
+`shape_consistency` field (`"collapses to a hairline sliver in several
+views"`), confirmed by inspecting the actual judged turntable renders.
+This is a known single-image-reconstruction limitation (thin/flat
+subjects give the model too little depth information to work with) —
+not a generator-specific defect, and not something item 15 or 18
+attempted to fix.
+
+Where the two generators diverged: SF3D additionally collapsed
+**"shield with emblem," "small creature," "product prototype stand"
+(shared), "printable figurine,"** and **"text logo plaque"** — 4 of
+those 6 SF3D failures are prompts TRELLIS.2 handled fine (verdict 8/10).
+TRELLIS.2's denser geometry appears to genuinely help it avoid the
+flat-collapse failure mode on subjects SF3D struggles with, beyond the
+two prompts both generators found genuinely hard.
+
+### Recommendation
+
+**Do not change the default generator.** SF3D stays the documented
+default — this is a data point for gate G6, not the decision itself,
+which remains a separate user call per principle P-A.
+
+For the record, what the data supports: TRELLIS.2 produces meaningfully
+more reliable geometry on this suite (21% vs 43% judge-rejection rate)
+and real PBR textures, at a real cost — ~6× the generation time and
+~14× the output file size, with peak memory not directly comparable in
+this bake-off (SF3D's own figure is real and complete; TRELLIS.2's is
+missing data, not a measured advantage). That trade profile fits
+TRELLIS.2 as a **deliberate, opt-in choice for hero/commercial assets
+where mesh reliability matters more than iteration speed** — exactly
+the recommendation `skill/SKILL.md`'s generator matrix already encodes
+from R1.4 — rather than a wholesale default swap. SF3D's ~43% rejection
+rate on this suite is itself a notable finding independent of the
+TRELLIS.2 comparison: worth a look in its own right, but out of scope
+for this PR.
 
 ## Re-review triggers
 

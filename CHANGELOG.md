@@ -2,6 +2,37 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R1.5: TRELLIS.2 vs SF3D/SPAR3D bake-off (docs-only)
+
+- `docs/model-review-trellis2.md` — real bake-off results filled into
+  the placeholder from R1.4: `scripts/benchmark.sh --suite default
+  --generators sf3d,spar3d,trellis2 --judge-mesh` run against 14 real
+  prompts. SPAR3D excluded (not installed on this Studio — documented
+  honestly, not faked). SF3D vs TRELLIS.2 over 14/14 successful runs
+  each: TRELLIS.2 is ~6.1× slower and produces ~14× larger GLBs (real
+  PBR + denser geometry) but scores meaningfully better on item 18's
+  mesh judge (21% vs 43% below-floor rejection rate). Both generators
+  independently collapsed the same two prompts ("fantasy sword",
+  "product prototype stand") into hairline-sliver meshes — a shared
+  single-image-reconstruction limitation, not a generator-specific
+  defect. **No default changed** — recommendation is TRELLIS.2 as a
+  deliberate opt-in for hero/commercial assets, default-promotion
+  decision (gate G6) left to the user per principle P-A.
+- `scripts/model_bakeoff.py` — added `trellis2` to the allowed
+  `--generators` list and its `LICENSE_BUCKET` map (was missing
+  entirely — the bake-off couldn't run against it before this).
+  New `--judge-mesh` flag, forwarded to each `generate.sh` call. New
+  `peak_memory_mb` field per run, scraped from the wrapper's own
+  stderr (`Peak Memory: ... MB` / `Peak MLX memory: ... GB`) — this
+  data existed in every run already but was previously discarded on
+  success (`stderr_tail` was only kept on error). SF3D's peak memory
+  was captured for all 14 runs (~11 GB avg); TRELLIS.2's `generate.py`
+  doesn't print a comparable figure, so that field came back empty for
+  all 14 TRELLIS.2 runs — documented as a real gap in the bake-off
+  writeup rather than papered over.
+- `scripts/benchmark.sh` — `--judge-mesh` passthrough flag; generator
+  list in `--help` gains `trellis2`.
+
 ## 2026-08-12 — R1.4: TRELLIS.2 backend (item 15)
 
 - `scripts/generate.sh` — new `-g trellis2` generator, dispatching to a
