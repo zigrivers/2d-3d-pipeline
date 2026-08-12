@@ -1394,6 +1394,20 @@ footer .signature { color: var(--peach); }
           </div>
         </div>
       </div>
+
+      <div class="step" data-step="mflux-edit-lane">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Optional: edit lane (item 21) &mdash; no separate install</h3>
+          <p>Instruction-based concept edits and camera-angle views run through this same mflux-env venv via <code>mflux-generate-qwen-edit</code>. Qwen-Image-Edit-2511 and the official Multiple-Angles LoRA are both Apache 2.0 / <code>commercial_safe</code> (gate G3). Nothing to install ahead of time &mdash; first use downloads Qwen-Image-Edit-2511 (~40&nbsp;GB) and, for <code>--angle</code>, the LoRA (~300&nbsp;MB).</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>~/3d-pipeline/workspace/edit.sh     -i ~/3d-pipeline/workspace/concept/chest.png     <span class="tk-str">"make the wood darker and more weathered"</span></pre></div>
+          <p>Confirmed live: correctly darkened/weathered result, subject and composition fully preserved, DreamSim drift 0.084&ndash;0.139 (<code>similar_but_changed</code>) across two runs.</p>
+          <div class="callout callout-gotcha">
+            <div class="callout-label">--angle is wired but the LoRA currently applies zero weight &mdash; don't rely on it yet</div>
+            <p>As of mflux 0.18.1, the Multiple-Angles LoRA's diffusers-style key names (<code>transformer_blocks.N.attn.*.lora_A/B</code>) don't match mflux's internal Qwen-Image-Edit-2511 layer names. Confirmed live: mflux itself logs <code>Applied to 0 layers (0/1680 keys matched)</code> right before its own misleading <code>&#x2705; All LoRA weights applied successfully</code> line, and the output image showed no rotation at all versus the source (visually compared front-view input against a requested 90&deg; <code>--angle</code> output &mdash; identical camera position). This is tracked upstream at <a href="https://github.com/filipstrand/mflux/issues/298">github.com/filipstrand/mflux/issues/298</a>, not fixable from this repo. <code>edit.sh</code> detects the 0-key-match case itself, prints a warning, and records <code>angle_lora_applied: false</code> in the output's meta.json &mdash; check that field before trusting an <code>--angle</code> result. Re-test once mflux ships key remapping for this LoRA format.</p>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- ============ WORKSPACE ============ -->
@@ -1763,6 +1777,12 @@ license_bucket_for_model() {
         # (v1) entry above — MIT port + MIT weights (gate G1, R0.1 spike;
         # see docs/model-review-trellis2.md). Do not conflate v1 and v2.
         trellis2)                               echo commercial_safe ;;
+        # Item 21 (2026-08): Qwen-Image-Edit-2511 (Apache 2.0) and its
+        # official Multiple-Angles LoRA (gate G3, R0.6 spike: HF card
+        # frontmatter license: apache-2.0, no conflicting statement in the
+        # body — resolved commercial_safe, stronger than the spec&#x27;s
+        # cautious unclear_risky default).
+        qwen-image-edit)                        echo commercial_safe ;;
         # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
@@ -6204,7 +6224,7 @@ PIPELINE_EOF</pre></div>
 
     &quot;generation&quot;: {
       &quot;type&quot;: &quot;object&quot;,
-      &quot;description&quot;: &quot;Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview)&quot;,
+      &quot;description&quot;: &quot;Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview / edit)&quot;,
       &quot;additionalProperties&quot;: true,
       &quot;properties&quot;: {
         &quot;backend&quot;: { &quot;type&quot;: &quot;string&quot; },
@@ -6214,7 +6234,26 @@ PIPELINE_EOF</pre></div>
         &quot;inputs&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;object&quot; } },
         &quot;polycount_target&quot;: { &quot;type&quot;: &quot;integer&quot; },
         &quot;texture_resolution&quot;: { &quot;type&quot;: &quot;integer&quot; },
-        &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+        &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;edit_instruction&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;angle_azimuth_deg&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;angle_elevation_deg&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;angle_lora_applied&quot;: {
+          &quot;type&quot;: &quot;boolean&quot;,
+          &quot;description&quot;: &quot;false means mflux matched 0 LoRA keys (known Qwen-Image-Edit-2511 LoRA naming gap, github.com/filipstrand/mflux/issues/298) -- the output does not actually reflect the requested angle.&quot;
+        },
+        &quot;drift&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;description&quot;: &quot;Item 21 — DreamSim source-vs-result drift check (edit_drift_check.py).&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;dreamsim_distance&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;band&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;too_similar&quot;, &quot;similar_but_changed&quot;, &quot;too_different&quot;] },
+            &quot;min&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;max&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+          }
+        }
       }
     },
 
@@ -8480,6 +8519,13 @@ PIPELINE_EOF</pre></div>
         &quot;trellis2-weights&quot;,
         &quot;dinov3-encoder&quot;
       ]
+    },
+    &quot;edit-lane&quot;: {
+      &quot;description&quot;: &quot;Item 21 \u2014 instruction-based image editing + parametric camera-angle views (opt-in; edit.sh). Runs through the existing mflux-env venv, no separate install.&quot;,
+      &quot;components&quot;: [
+        &quot;qwen-image-edit-2511&quot;,
+        &quot;qwen-multi-angle-lora&quot;
+      ]
     }
   },
   &quot;venvs&quot;: [
@@ -8556,6 +8602,16 @@ PIPELINE_EOF</pre></div>
       &quot;lockfile&quot;: &quot;scripts/lockfiles/trellis2-env.txt&quot;,
       &quot;pinned_commit&quot;: &quot;d58628f4f5b9c3de8274cb110074154f4b31cef2&quot;,
       &quot;repo_path&quot;: &quot;~/3d-pipeline/trellis2-mac&quot;
+    },
+    {
+      &quot;name&quot;: &quot;edit-lane&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/mflux-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;edit-lane&quot;,
+      &quot;size_gb&quot;: 0,
+      &quot;purpose&quot;: &quot;Item 21 — not a separate install. Shares the mflux-env venv (mflux-generate-qwen-edit); this entry exists only so the edit-lane feature_set has a venv to check against.&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;
     }
   ],
   &quot;models&quot;: [
@@ -8774,6 +8830,42 @@ PIPELINE_EOF</pre></div>
       &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
       &quot;warm_target&quot;: &quot;dinov3-encoder&quot;,
       &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;qwen-image-edit-2511&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;edit-lane&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 40000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;mflux&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0. Instruction-based image editing with strong identity preservation. Runs via mflux-generate-qwen-edit (mflux-env — no separate venv). Downloaded automatically on first use.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;Qwen/Qwen-Image-Edit-2511&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;qwen-image-edit-2511&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;qwen-multi-angle-lora&quot;,
+      &quot;filename&quot;: &quot;qwen-image-edit-2511-multiple-angles-lora.safetensors&quot;,
+      &quot;feature_set&quot;: &quot;edit-lane&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 300,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;mflux&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0 (gate G3, R0.6 spike — HF card frontmatter license: apache-2.0, stronger than the spec&#x27;s cautious unclear_risky default). 96 camera poses (8 azimuths x 4 elevations x 3 distances). edit.sh --angle passes this repo reference straight to mflux&#x27;s --lora flag (HF repo form, no local download step needed).&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;qwen-multi-angle-lora&quot;,
+      &quot;comfyui_kind&quot;: null
     }
   ],
   &quot;wrappers&quot;: [
@@ -8782,7 +8874,8 @@ PIPELINE_EOF</pre></div>
     &quot;multiview.sh&quot;,
     &quot;print.sh&quot;,
     &quot;texture.sh&quot;,
-    &quot;benchmark.sh&quot;
+    &quot;benchmark.sh&quot;,
+    &quot;edit.sh&quot;
   ],
   &quot;internal_scripts&quot;: [
     &quot;_pipeline_lib.sh&quot;,
@@ -11901,6 +11994,443 @@ PIPELINE_EOF</pre></div>
 
             <details class="script-detail">
               <summary class="script-summary">
+                <code>edit.sh</code>
+                <span class="script-summary-desc">v0.3.7 instruction edits + camera-angle views (item 21)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/edit.sh << 'PIPELINE_EOF'
+#!/usr/bin/env bash
+#
+# Instruction-based image editing + parametric camera-angle views
+# (item 21 of the 2026-08 generation-quality refresh).
+#
+# Two modes, mutually exclusive:
+#   edit.sh -i concept/chest.png &quot;make the wood darker&quot;
+#       -&gt; concept/chest_edit1.png (Qwen-Image-Edit-2511, Apache 2.0)
+#   edit.sh -i concept/chest.png --angle 90,0
+#       -&gt; concept/chest_090deg.png (+ the official Multiple-Angles
+#          LoRA, gate G3: commercial_safe, Apache 2.0)
+#
+# Both write into the same project/global concept/ dir concept.sh uses,
+# so angle outputs are ready to feed multiview.sh directly.
+#
+# Project detection: same as concept.sh (--project, PROJECT_ROOT env,
+# .asset-pipeline.json, Unity/Unreal markers, global workspace fallback).
+
+set -euo pipefail
+
+SCRIPT_DIR=&quot;$(cd &quot;$(dirname &quot;${BASH_SOURCE[0]}&quot;)&quot; &amp;&amp; pwd)&quot;
+# shellcheck source=/dev/null
+source &quot;$SCRIPT_DIR/_pipeline_lib.sh&quot;
+
+PIPELINE_ROOT=&quot;${PIPELINE_ROOT:-$HOME/3d-pipeline}&quot;
+MFLUX_VENV=&quot;${MFLUX_VENV:-$PIPELINE_ROOT/mflux-env}&quot;
+# Explicit, not mflux&#x27;s own default: mflux-generate-qwen-edit defaults to
+# Qwen-Image-Edit-2509 (confirmed live), not 2511. The spec calls for 2511
+# specifically, and the Multiple-Angles LoRA below is trained against
+# 2511&#x27;s architecture — passing a raw HF repo string overrides mflux&#x27;s
+# built-in --model enum, which has no 2511-specific entry.
+QWEN_EDIT_MODEL=&quot;${QWEN_EDIT_MODEL:-Qwen/Qwen-Image-Edit-2511}&quot;
+ANGLE_LORA=&quot;${ANGLE_LORA:-fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA}&quot;
+ANGLE_LORA_SCALE=&quot;${ANGLE_LORA_SCALE:-0.9}&quot;
+
+EXPLICIT_PROJECT=&quot;&quot;
+INPUT=&quot;&quot;
+INSTRUCTION=&quot;&quot;
+ANGLE=&quot;&quot;
+OUTPUT_NAME=&quot;&quot;
+SEED=&quot;&quot;
+QUANTIZE=8
+NO_DRIFT_CHECK=0
+JSON_MODE=0
+
+usage() {
+    cat &lt;&lt;EOF
+Usage: $(basename &quot;$0&quot;) -i IMAGE &quot;instruction&quot; [options]
+       $(basename &quot;$0&quot;) -i IMAGE --angle H,V [options]
+
+Required:
+  -i, --input PATH         Source image to edit (an existing concept)
+
+One of these (not both):
+  INSTRUCTION               Positional text instruction, e.g.
+                            &quot;make the wood darker&quot;
+  --angle H,V               Camera-angle view via the Multiple-Angles
+                            LoRA. H is azimuth in degrees (0=front,
+                            90=right, 180=back, 270=left — snapped to
+                            the nearest 45°). V is elevation in degrees
+                            (-30, 0, 30, or 60 — snapped to nearest).
+
+Project context:
+  --project PATH            Force a project root (skips auto-detection)
+
+Generation options:
+  -o, --output NAME         Output base name (default: derived from input)
+  -S, --seed N               Random seed (default: random)
+  -q, --quantize N           Quantization: 4 or 8 (default: 8)
+      --no-drift-check       Skip the DreamSim source-vs-result check
+      --json                 Emit a final JSON result line on stdout
+  -h, --help                 This help
+
+License: Qwen-Image-Edit-2511 and the Multiple-Angles LoRA are both
+commercial_safe (Apache 2.0; LoRA verified at gate G3).
+
+Examples:
+  edit.sh -i concept/chest.png &quot;make the wood darker&quot;
+  edit.sh -i concept/chest.png --angle 90,0
+  edit.sh -i concept/chest.png --angle 180,30 -o chest_hero
+EOF
+}
+
+if [[ $# -eq 0 ]]; then usage; exit 1; fi
+
+while [[ $# -gt 0 ]]; do
+    case &quot;$1&quot; in
+        --project)         EXPLICIT_PROJECT=&quot;$2&quot;; shift 2 ;;
+        -i|--input)        INPUT=&quot;$2&quot;;        shift 2 ;;
+        --angle)           ANGLE=&quot;$2&quot;;        shift 2 ;;
+        -o|--output)       OUTPUT_NAME=&quot;$2&quot;;  shift 2 ;;
+        -S|--seed)         SEED=&quot;$2&quot;;         shift 2 ;;
+        -q|--quantize)     QUANTIZE=&quot;$2&quot;;     shift 2 ;;
+        --no-drift-check)  NO_DRIFT_CHECK=1;  shift   ;;
+        --json)            JSON_MODE=1;       shift   ;;
+        -h|--help)         usage; exit 0 ;;
+        -*) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
+        *)  if [[ -z &quot;$INSTRUCTION&quot; ]]; then INSTRUCTION=&quot;$1&quot;; else INSTRUCTION=&quot;$INSTRUCTION $1&quot;; fi; shift ;;
+    esac
+done
+
+[[ -z &quot;$INPUT&quot; ]] &amp;&amp; { echo &quot;ERROR: -i/--input is required&quot; &gt;&amp;2; usage; exit 1; }
+[[ -f &quot;$INPUT&quot; ]] || { echo &quot;ERROR: input file not found: $INPUT&quot; &gt;&amp;2; exit 1; }
+if [[ -n &quot;$INSTRUCTION&quot; &amp;&amp; -n &quot;$ANGLE&quot; ]]; then
+    echo &quot;ERROR: pass an instruction OR --angle, not both&quot; &gt;&amp;2; exit 1
+fi
+if [[ -z &quot;$INSTRUCTION&quot; &amp;&amp; -z &quot;$ANGLE&quot; ]]; then
+    echo &quot;ERROR: provide an instruction (positional) or --angle H,V&quot; &gt;&amp;2; usage; exit 1
+fi
+case &quot;$QUANTIZE&quot; in 4|8) ;; *) echo &quot;ERROR: -q must be 4 or 8&quot; &gt;&amp;2; exit 1 ;; esac
+
+INPUT=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(basename &quot;$INPUT&quot;)&quot;
+
+COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[edit]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[edit]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+err()   { printf &quot;${COL_RED}[edit]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
+
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
+
+resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
+
+if [[ ! -d &quot;$MFLUX_VENV&quot; ]]; then
+    err &quot;mflux venv not found at $MFLUX_VENV&quot;
+    err &quot;Run the mflux setup from the setup guide first.&quot;
+    exit 1
+fi
+
+if [[ -z &quot;$OUTPUT_NAME&quot; ]]; then
+    OUTPUT_NAME=&quot;$(basename &quot;$INPUT&quot; | sed &#x27;s/\.[^.]*$//&#x27;)&quot;
+fi
+
+CONCEPT_DIR=&quot;$ASSETS_ROOT/concept&quot;
+mkdir -p &quot;$CONCEPT_DIR&quot;
+
+START_TS=$(date +%s)
+CREATED_AT=&quot;$(iso_now)&quot;
+MACHINE=&quot;$(hostname_safe)&quot;
+HW_TIER=&quot;$(hardware_tier)&quot;
+LICENSE_BUCKET=&quot;$(license_bucket_for_model qwen-image-edit)&quot;
+
+ITER_SEED=&quot;$SEED&quot;
+[[ -z &quot;$ITER_SEED&quot; ]] &amp;&amp; ITER_SEED=$RANDOM$RANDOM
+
+GENERATION_EXTRA=&quot;&quot;
+
+if [[ -n &quot;$ANGLE&quot; ]]; then
+    IFS=&#x27;,&#x27; read -r RAW_H RAW_V &lt;&lt;&lt; &quot;$ANGLE&quot;
+    [[ -n &quot;$RAW_H&quot; &amp;&amp; -n &quot;$RAW_V&quot; ]] || { err &quot;--angle needs H,V (e.g. --angle 90,0)&quot;; exit 1; }
+
+    # Snap the requested angle to the LoRA&#x27;s real 8-azimuth x 4-elevation
+    # grid (see docs/model-review-trellis2.md-style evidence trail — this
+    # mapping was read directly from the LoRA&#x27;s model card, not guessed)
+    # and build its exact required prompt: &quot;&lt;sks&gt; [azimuth] [elevation]
+    # [distance]&quot;.
+    ANGLE_INFO=&quot;$(python3 -c &quot;
+import sys
+h = float(sys.argv[1]) % 360
+v = float(sys.argv[2])
+
+azimuths = [0, 45, 90, 135, 180, 225, 270, 315]
+azimuth_desc = {
+    0: &#x27;front view&#x27;, 45: &#x27;front-right quarter view&#x27;, 90: &#x27;right side view&#x27;,
+    135: &#x27;back-right quarter view&#x27;, 180: &#x27;back view&#x27;, 225: &#x27;back-left quarter view&#x27;,
+    270: &#x27;left side view&#x27;, 315: &#x27;front-left quarter view&#x27;,
+}
+elevations = [-30, 0, 30, 60]
+elevation_desc = {
+    -30: &#x27;low-angle shot&#x27;, 0: &#x27;eye-level shot&#x27;, 30: &#x27;elevated shot&#x27;, 60: &#x27;high-angle shot&#x27;,
+}
+
+snapped_h = min(azimuths, key=lambda a: min(abs(a - h), abs(a - h + 360), abs(a - h - 360)))
+snapped_v = min(elevations, key=lambda e: abs(e - v))
+
+prompt = f&#x27;&lt;sks&gt; {azimuth_desc[snapped_h]} {elevation_desc[snapped_v]} medium shot&#x27;
+print(snapped_h)
+print(snapped_v)
+print(prompt)
+&quot; &quot;$RAW_H&quot; &quot;$RAW_V&quot;)&quot;
+    SNAPPED_H=&quot;$(echo &quot;$ANGLE_INFO&quot; | sed -n &#x27;1p&#x27;)&quot;
+    SNAPPED_V=&quot;$(echo &quot;$ANGLE_INFO&quot; | sed -n &#x27;2p&#x27;)&quot;
+    LORA_PROMPT=&quot;$(echo &quot;$ANGLE_INFO&quot; | sed -n &#x27;3p&#x27;)&quot;
+
+    ELEV_SUFFIX=&quot;&quot;
+    [[ &quot;$SNAPPED_V&quot; != &quot;0&quot; ]] &amp;&amp; ELEV_SUFFIX=&quot;_ev${SNAPPED_V}&quot;
+    OUT_PATH=&quot;$CONCEPT_DIR/${OUTPUT_NAME}_$(printf &#x27;%03d&#x27; &quot;$SNAPPED_H&quot;)deg${ELEV_SUFFIX}.png&quot;
+
+    info &quot;Mode:     angle view (requested ${RAW_H},${RAW_V} -&gt; snapped ${SNAPPED_H},${SNAPPED_V})&quot;
+    info &quot;Prompt:   $LORA_PROMPT&quot;
+    info &quot;Tier:     $HW_TIER  (machine: $MACHINE)&quot;
+    info &quot;Output:   $OUT_PATH&quot;
+
+    source &quot;$MFLUX_VENV/bin/activate&quot;
+    LORA_LOG=&quot;$(mktemp)&quot;
+    mflux-generate-qwen-edit \
+        --model &quot;$QWEN_EDIT_MODEL&quot; \
+        --image-paths &quot;$INPUT&quot; \
+        --prompt &quot;$LORA_PROMPT&quot; \
+        --lora &quot;$ANGLE_LORA&quot; &quot;$ANGLE_LORA_SCALE&quot; \
+        --seed &quot;$ITER_SEED&quot; \
+        -q &quot;$QUANTIZE&quot; \
+        --output &quot;$OUT_PATH&quot; 2&gt;&amp;1 | tee &quot;$LORA_LOG&quot;
+    deactivate
+
+    # mflux prints &quot;Applied to N layers (M/K keys matched)&quot; for each LoRA it
+    # loads, then a blanket &quot;All LoRA weights applied successfully&quot; even when
+    # N/M are 0 — that second line is not trustworthy on its own. Known
+    # mflux/Qwen-Image-Edit-2511 LoRA key-naming gap (see
+    # https://github.com/filipstrand/mflux/issues/298); the angle LoRA&#x27;s
+    # diffusers-style &quot;transformer_blocks.N.attn.*.lora_A/B&quot; keys currently
+    # don&#x27;t match mflux&#x27;s internal names, so it silently applies zero weight.
+    LORA_MATCH_LINE=&quot;$(grep -oE &#x27;Applied to [0-9]+ layers \([0-9]+/[0-9]+ keys matched\)&#x27; &quot;$LORA_LOG&quot; | tail -1 || true)&quot;
+    rm -f &quot;$LORA_LOG&quot;
+    LORA_APPLIED=true
+    [[ &quot;$LORA_MATCH_LINE&quot; == &quot;Applied to 0 layers&quot;* ]] &amp;&amp; LORA_APPLIED=false
+
+    if [[ &quot;$LORA_APPLIED&quot; == &quot;false&quot; ]]; then
+        err &quot;WARNING: the Multiple-Angles LoRA did not apply ($LORA_MATCH_LINE).&quot;
+        err &quot;This is a known mflux/Qwen-Image-Edit-2511 LoRA compatibility gap&quot;
+        err &quot;(github.com/filipstrand/mflux/issues/298), not a bug in this script.&quot;
+        err &quot;The image below was still generated, but it does NOT show the&quot;
+        err &quot;requested camera angle -- treat --angle as non-functional until&quot;
+        err &quot;mflux adds key remapping for this LoRA&#x27;s diffusers-style naming.&quot;
+    fi
+
+    GENERATION_EXTRA=&quot;\&quot;angle_azimuth_deg\&quot;: $SNAPPED_H, \&quot;angle_elevation_deg\&quot;: $SNAPPED_V, \&quot;angle_lora_applied\&quot;: $LORA_APPLIED&quot;
+else
+    N=1
+    OUT_PATH=&quot;$CONCEPT_DIR/${OUTPUT_NAME}_edit${N}.png&quot;
+    while [[ -f &quot;$OUT_PATH&quot; ]]; do
+        N=$((N + 1))
+        OUT_PATH=&quot;$CONCEPT_DIR/${OUTPUT_NAME}_edit${N}.png&quot;
+    done
+
+    info &quot;Mode:     instruction edit&quot;
+    info &quot;Instruction: $INSTRUCTION&quot;
+    info &quot;Tier:     $HW_TIER  (machine: $MACHINE)&quot;
+    info &quot;Output:   $OUT_PATH&quot;
+
+    source &quot;$MFLUX_VENV/bin/activate&quot;
+    mflux-generate-qwen-edit \
+        --model &quot;$QWEN_EDIT_MODEL&quot; \
+        --image-paths &quot;$INPUT&quot; \
+        --prompt &quot;$INSTRUCTION&quot; \
+        --seed &quot;$ITER_SEED&quot; \
+        -q &quot;$QUANTIZE&quot; \
+        --output &quot;$OUT_PATH&quot;
+    deactivate
+
+    ESCAPED_INSTRUCTION=&quot;$(python3 -c &quot;import json,sys; print(json.dumps(sys.argv[1]))&quot; &quot;$INSTRUCTION&quot;)&quot;
+    GENERATION_EXTRA=&quot;\&quot;edit_instruction\&quot;: $ESCAPED_INSTRUCTION&quot;
+fi
+
+[[ -f &quot;$OUT_PATH&quot; ]] || { err &quot;Edit did not produce $OUT_PATH&quot;; exit 1; }
+
+END_TS=$(date +%s)
+DURATION=$((END_TS - START_TS))
+done_ &quot;Generated in ${DURATION}s -&gt; $OUT_PATH&quot;
+
+META_PATH=&quot;${OUT_PATH}.meta.json&quot;
+META_HELPER_SCRIPT=&quot;$SCRIPT_DIR/meta_helper.py&quot;
+[[ -f &quot;$META_HELPER_SCRIPT&quot; ]] || META_HELPER_SCRIPT=&quot;$PIPELINE_ROOT/workspace/meta_helper.py&quot;
+PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+if [[ -f &quot;$META_HELPER_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$META_HELPER_SCRIPT&quot; merge &quot;$META_PATH&quot; \
+        --section generation \
+        --data &quot;{\&quot;backend\&quot;: \&quot;qwen-image-edit\&quot;, \&quot;model_role\&quot;: \&quot;edit\&quot;, \&quot;license_bucket\&quot;: \&quot;$LICENSE_BUCKET\&quot;, \&quot;inputs\&quot;: [{\&quot;path\&quot;: \&quot;$INPUT\&quot;}], $GENERATION_EXTRA, \&quot;duration_seconds\&quot;: $DURATION}&quot; \
+        &gt; /dev/null 2&gt;&amp;1 || true
+fi
+
+# Item 21 — DreamSim drift check (item 16 infra): flags an edit that had
+# no visible effect, or one that drifted too far from the source subject.
+DRIFT_SCRIPT=&quot;$SCRIPT_DIR/edit_drift_check.py&quot;
+[[ -f &quot;$DRIFT_SCRIPT&quot; ]] || DRIFT_SCRIPT=&quot;$PIPELINE_ROOT/workspace/edit_drift_check.py&quot;
+if [[ &quot;$NO_DRIFT_CHECK&quot; != &quot;1&quot; &amp;&amp; -f &quot;$DRIFT_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$DRIFT_SCRIPT&quot; \
+        --source &quot;$INPUT&quot; --edited &quot;$OUT_PATH&quot; --meta &quot;$META_PATH&quot; 2&gt;&amp;1 \
+        | grep &#x27;^\[dreamsim\]&#x27; | { while IFS= read -r line; do printf &quot;[edit] %s\n&quot; &quot;${line#\[dreamsim\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+fi
+
+if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+    json_mode_end
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        status=ok \
+        stage=edit \
+        input=&quot;$INPUT&quot; \
+        output=&quot;$OUT_PATH&quot; \
+        license_bucket=&quot;$LICENSE_BUCKET&quot; \
+        --int seed=&quot;$ITER_SEED&quot; \
+        --int duration_seconds=&quot;$DURATION&quot; \
+        assets_root=&quot;$ASSETS_ROOT&quot; \
+        project_mode=&quot;$PROJECT_MODE&quot; \
+        project_root=&quot;$PROJECT_ROOT&quot; \
+        machine=&quot;$MACHINE&quot; \
+        hardware_tier=&quot;$HW_TIER&quot; \
+        created=&quot;$CREATED_AT&quot;
+fi
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>edit_drift_check.py</code>
+                <span class="script-summary-desc">v0.3.7 DreamSim source-vs-edited drift check (item 21)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/edit_drift_check.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3.7 — DreamSim edit-drift check (item 21).
+
+After an instruction edit or an angle-view render, checks the result
+against its source image: a good edit should be &quot;similar but visibly
+changed&quot; — a DreamSim distance inside a target band, neither near-zero
+(edit had no real effect) nor large (identity drift; no longer reads
+as the same subject). Reuses the same DreamSim model/cache convention
+as scripts/dedup_variants.py (item 16), but for a single source/result
+pair with a banded verdict rather than N-variant duplicate grouping.
+
+Writes generation.drift into the edited image&#x27;s meta.json (spec item
+21: &quot;uses the existing generation shape&quot;).
+
+Usage:
+    edit_drift_check.py --source PATH --edited PATH --meta PATH
+                        [--min 0.03] [--max 0.45] [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+DREAMSIM_CACHE_DIR = os.environ.get(
+    &quot;DREAMSIM_CACHE_DIR&quot;,
+    os.path.expanduser(&quot;~/3d-pipeline/models/dreamsim&quot;),
+)
+
+# DreamSim distance: 0 = identical, ~1 = maximally different for natural
+# images. Bootstrap band, not yet calibrated against real edit history —
+# recalibrate alongside clip_calibration.json once real edits accumulate.
+DEFAULT_MIN = 0.03
+DEFAULT_MAX = 0.45
+
+
+def _imports():
+    try:
+        import torch  # type: ignore
+        from dreamsim import dreamsim  # type: ignore
+        from PIL import Image  # type: ignore
+        return dreamsim, torch, Image
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping. Activate pipeline-tools-env.&quot;,
+              file=sys.stderr)
+        return None, None, None
+
+
+def _band(distance: float, min_d: float, max_d: float) -&gt; str:
+    if distance &lt; min_d:
+        return &quot;too_similar&quot;
+    if distance &gt; max_d:
+        return &quot;too_different&quot;
+    return &quot;similar_but_changed&quot;
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--source&quot;, required=True)
+    p.add_argument(&quot;--edited&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--min&quot;, type=float, default=DEFAULT_MIN,
+                   help=f&quot;below this distance, verdict is too_similar (default: {DEFAULT_MIN})&quot;)
+    p.add_argument(&quot;--max&quot;, type=float, default=DEFAULT_MAX,
+                   help=f&quot;above this distance, verdict is too_different (default: {DEFAULT_MAX})&quot;)
+    p.add_argument(&quot;--device&quot;, default=&quot;mps&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    dreamsim, torch, Image = _imports()
+    if dreamsim is None:
+        return 0  # graceful no-op, matches dedup_variants.py precedent
+
+    t0 = time.time()
+    Path(DREAMSIM_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    model, preprocess = dreamsim(pretrained=True, device=args.device, cache_dir=DREAMSIM_CACHE_DIR)
+
+    source_img = preprocess(Image.open(os.path.expanduser(args.source)).convert(&quot;RGB&quot;)).to(args.device)
+    edited_img = preprocess(Image.open(os.path.expanduser(args.edited)).convert(&quot;RGB&quot;)).to(args.device)
+
+    with torch.no_grad():
+        distance = float(model(source_img, edited_img).item())
+
+    duration = round(time.time() - t0, 2)
+    verdict = _band(distance, args.min, args.max)
+
+    payload = {
+        &quot;drift&quot;: {
+            &quot;dreamsim_distance&quot;: round(distance, 4),
+            &quot;band&quot;: verdict,
+            &quot;min&quot;: args.min,
+            &quot;max&quot;: args.max,
+            &quot;duration_seconds&quot;: duration,
+        }
+    }
+    meta_path = Path(os.path.expanduser(args.meta))
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;generation&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=False,
+        capture_output=True,
+    )
+
+    if args.json:
+        print(json.dumps({**payload[&quot;drift&quot;]}, indent=2, sort_keys=True))
+    else:
+        print(f&quot;[dreamsim] edit drift: {distance:.3f} ({verdict})&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
                 <code>multiview.sh</code>
                 <span class="script-summary-desc">v0.3.2 multi-view 3D reconstruction wrapper (Flow 9)</span>
               </summary>
@@ -13365,7 +13895,7 @@ change behaviour. The wrappers do the same detection in `_pipeline_lib.sh`
 (function `hardware_tier`); every `--json` output includes the
 `hardware_tier` field so manifests and benchmark results stay tier-aware.
 
-## Three pipeline halves + four (now five) new lanes
+## Three pipeline halves + four (now six) new lanes
 
 The three core halves are unchanged:
 
@@ -13373,7 +13903,7 @@ The three core halves are unchanged:
 - **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS (v1) / TRELLIS.2 (v2), then Blender cleanup
 - **Print** — clean GLB → printable STL via Blender mesh repair + scaling
 
-v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
+v0.2 added four lanes; v0.3.2 adds a fifth; v0.4 adds a sixth. None are defaults:
 
 - **Texture inspect/upscale** (`texture.sh`) — GLB and image stats, optional
   Real-ESRGAN upscale. Paint mode (Hunyuan3D-Paint) approved v0.3.0.
@@ -13388,6 +13918,10 @@ v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
   Takes 3+ views of one subject and reconstructs a single mesh. Backend
   default is TRELLIS multi-view (`non_commercial`); openlrm
   (`commercial_safe`) and instantmesh (`unclear_risky`) opt-in.
+- **Edit lane** (`edit.sh`, v0.4+) — Flow 10. Instruction-based concept
+  edits and parametric camera-angle views via Qwen-Image-Edit-2511
+  (`commercial_safe`). Angle-view mode&#x27;s LoRA is currently a known
+  no-op upstream in mflux — see Flow 10.
 
 ---
 
@@ -14206,6 +14740,67 @@ manually to get the views and then `multiview.sh -m &lt;generated-manifest&gt;`;
 a future feature will wrap the chain behind a single
 `generate.sh --multiview-from-concept` flag once the benchmark picks
 a canonical chain.)
+
+---
+
+## Flow 10: Edit a concept / generate camera-angle views (v0.4+)
+
+Use `edit.sh` when the user wants to **change an existing concept image**
+in place, or wants **additional camera angles** of it to feed into
+Flow 9&#x27;s multi-view reconstruction. Both modes call
+Qwen-Image-Edit-2511 (`commercial_safe`, Apache 2.0) and always run a
+DreamSim drift check afterward so a no-op or over-aggressive edit is
+caught automatically instead of silently shipped.
+
+**Trigger phrases:** &quot;make this darker/older/mossier&quot;, &quot;edit this
+concept&quot;, &quot;I need a side view of this&quot;, &quot;give me more angles of this
+image&quot;, &quot;tweak the color on this&quot;.
+
+**Instruction-edit mode** — free-text change to a concept image:
+
+```bash
+edit.sh -i concept/chest.png &quot;make the wood darker and more weathered&quot;
+# -&gt; concept/chest_edit1.png (auto-numbered; re-running keeps prior edits)
+```
+
+**Angle-view mode** — parametric camera rotation via the official
+Multiple-Angles LoRA:
+
+```bash
+edit.sh -i concept/chest.png --angle 90,0
+# -&gt; concept/chest_090deg.png
+```
+
+`--angle H,V` takes azimuth (0=front, 90=right, 180=back, 270=left)
+and elevation (-30/0/30/60) in degrees, snapped to the LoRA&#x27;s real
+8×4 grid — read this off the tool&#x27;s own &quot;requested X,Y -&gt; snapped
+X,Y&quot; line, don&#x27;t assume the exact number you passed was used.
+
+&gt; **Known limitation — tell the user before they rely on `--angle`:**
+&gt; as of mflux 0.18.1, the Multiple-Angles LoRA&#x27;s diffusers-style key
+&gt; names (`transformer_blocks.N.attn.*.lora_A/B`) don&#x27;t match mflux&#x27;s
+&gt; internal Qwen-Image-Edit-2511 layer names, so mflux applies **zero**
+&gt; LoRA weight (confirmed live: &quot;Applied to 0 layers (0/1680 keys
+&gt; matched)&quot;, and the output image showed no rotation at all versus
+&gt; the source). This is tracked upstream at
+&gt; github.com/filipstrand/mflux/issues/298, not something fixable from
+&gt; this repo. `edit.sh` detects the 0-key-match case itself, prints a
+&gt; loud warning, and records `angle_lora_applied: false` in the
+&gt; output&#x27;s meta.json — always check that field (or watch for the
+&gt; warning) before treating an `--angle` output as a real rotated view.
+&gt; Instruction-edit mode is unaffected and fully working.
+
+Outputs from either mode land in the same `concept/` directory as
+`concept.sh`, so angle-view outputs (once the upstream LoRA gap is
+fixed) are ready to feed straight into `multiview.sh`.
+
+**Drift check:** every run prints `[edit] edit drift: 0.NNN (band)`.
+`too_similar` means the edit likely had no real effect (re-run with a
+stronger instruction); `too_different` means the subject may have
+changed rather than just the requested attribute. `similar_but_changed`
+is the expected healthy result. These bootstrap thresholds
+(0.03/0.45) are uncalibrated — treat the band as a hint, not a hard
+gate.
 
 ---
 

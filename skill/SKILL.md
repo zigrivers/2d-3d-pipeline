@@ -84,7 +84,7 @@ change behaviour. The wrappers do the same detection in `_pipeline_lib.sh`
 (function `hardware_tier`); every `--json` output includes the
 `hardware_tier` field so manifests and benchmark results stay tier-aware.
 
-## Three pipeline halves + four (now five) new lanes
+## Three pipeline halves + four (now six) new lanes
 
 The three core halves are unchanged:
 
@@ -92,7 +92,7 @@ The three core halves are unchanged:
 - **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS (v1) / TRELLIS.2 (v2), then Blender cleanup
 - **Print** — clean GLB → printable STL via Blender mesh repair + scaling
 
-v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
+v0.2 added four lanes; v0.3.2 adds a fifth; v0.4 adds a sixth. None are defaults:
 
 - **Texture inspect/upscale** (`texture.sh`) — GLB and image stats, optional
   Real-ESRGAN upscale. Paint mode (Hunyuan3D-Paint) approved v0.3.0.
@@ -107,6 +107,10 @@ v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
   Takes 3+ views of one subject and reconstructs a single mesh. Backend
   default is TRELLIS multi-view (`non_commercial`); openlrm
   (`commercial_safe`) and instantmesh (`unclear_risky`) opt-in.
+- **Edit lane** (`edit.sh`, v0.4+) — Flow 10. Instruction-based concept
+  edits and parametric camera-angle views via Qwen-Image-Edit-2511
+  (`commercial_safe`). Angle-view mode's LoRA is currently a known
+  no-op upstream in mflux — see Flow 10.
 
 ---
 
@@ -925,6 +929,67 @@ manually to get the views and then `multiview.sh -m <generated-manifest>`;
 a future feature will wrap the chain behind a single
 `generate.sh --multiview-from-concept` flag once the benchmark picks
 a canonical chain.)
+
+---
+
+## Flow 10: Edit a concept / generate camera-angle views (v0.4+)
+
+Use `edit.sh` when the user wants to **change an existing concept image**
+in place, or wants **additional camera angles** of it to feed into
+Flow 9's multi-view reconstruction. Both modes call
+Qwen-Image-Edit-2511 (`commercial_safe`, Apache 2.0) and always run a
+DreamSim drift check afterward so a no-op or over-aggressive edit is
+caught automatically instead of silently shipped.
+
+**Trigger phrases:** "make this darker/older/mossier", "edit this
+concept", "I need a side view of this", "give me more angles of this
+image", "tweak the color on this".
+
+**Instruction-edit mode** — free-text change to a concept image:
+
+```bash
+edit.sh -i concept/chest.png "make the wood darker and more weathered"
+# -> concept/chest_edit1.png (auto-numbered; re-running keeps prior edits)
+```
+
+**Angle-view mode** — parametric camera rotation via the official
+Multiple-Angles LoRA:
+
+```bash
+edit.sh -i concept/chest.png --angle 90,0
+# -> concept/chest_090deg.png
+```
+
+`--angle H,V` takes azimuth (0=front, 90=right, 180=back, 270=left)
+and elevation (-30/0/30/60) in degrees, snapped to the LoRA's real
+8×4 grid — read this off the tool's own "requested X,Y -> snapped
+X,Y" line, don't assume the exact number you passed was used.
+
+> **Known limitation — tell the user before they rely on `--angle`:**
+> as of mflux 0.18.1, the Multiple-Angles LoRA's diffusers-style key
+> names (`transformer_blocks.N.attn.*.lora_A/B`) don't match mflux's
+> internal Qwen-Image-Edit-2511 layer names, so mflux applies **zero**
+> LoRA weight (confirmed live: "Applied to 0 layers (0/1680 keys
+> matched)", and the output image showed no rotation at all versus
+> the source). This is tracked upstream at
+> github.com/filipstrand/mflux/issues/298, not something fixable from
+> this repo. `edit.sh` detects the 0-key-match case itself, prints a
+> loud warning, and records `angle_lora_applied: false` in the
+> output's meta.json — always check that field (or watch for the
+> warning) before treating an `--angle` output as a real rotated view.
+> Instruction-edit mode is unaffected and fully working.
+
+Outputs from either mode land in the same `concept/` directory as
+`concept.sh`, so angle-view outputs (once the upstream LoRA gap is
+fixed) are ready to feed straight into `multiview.sh`.
+
+**Drift check:** every run prints `[edit] edit drift: 0.NNN (band)`.
+`too_similar` means the edit likely had no real effect (re-run with a
+stronger instruction); `too_different` means the subject may have
+changed rather than just the requested attribute. `similar_but_changed`
+is the expected healthy result. These bootstrap thresholds
+(0.03/0.45) are uncalibrated — treat the band as a hint, not a hard
+gate.
 
 ---
 

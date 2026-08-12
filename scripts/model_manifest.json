@@ -103,6 +103,13 @@
         "trellis2-weights",
         "dinov3-encoder"
       ]
+    },
+    "edit-lane": {
+      "description": "Item 21 \u2014 instruction-based image editing + parametric camera-angle views (opt-in; edit.sh). Runs through the existing mflux-env venv, no separate install.",
+      "components": [
+        "qwen-image-edit-2511",
+        "qwen-multi-angle-lora"
+      ]
     }
   },
   "venvs": [
@@ -179,6 +186,16 @@
       "lockfile": "scripts/lockfiles/trellis2-env.txt",
       "pinned_commit": "d58628f4f5b9c3de8274cb110074154f4b31cef2",
       "repo_path": "~/3d-pipeline/trellis2-mac"
+    },
+    {
+      "name": "edit-lane",
+      "path": "~/3d-pipeline/mflux-env",
+      "required": false,
+      "feature_set": "edit-lane",
+      "size_gb": 0,
+      "purpose": "Item 21 — not a separate install. Shares the mflux-env venv (mflux-generate-qwen-edit); this entry exists only so the edit-lane feature_set has a venv to check against.",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/mflux-env.txt"
     }
   ],
   "models": [
@@ -397,6 +414,42 @@
       "storage_layout": "hf_snapshot",
       "warm_target": "dinov3-encoder",
       "comfyui_kind": null
+    },
+    {
+      "id": "qwen-image-edit-2511",
+      "filename": "",
+      "feature_set": "edit-lane",
+      "license_bucket": "commercial_safe",
+      "size_mb": 40000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "mflux",
+      "notes": "Apache 2.0. Instruction-based image editing with strong identity preservation. Runs via mflux-generate-qwen-edit (mflux-env — no separate venv). Downloaded automatically on first use.",
+      "requires_hf_auth": false,
+      "hf_repo": "Qwen/Qwen-Image-Edit-2511",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "qwen-image-edit-2511",
+      "comfyui_kind": null
+    },
+    {
+      "id": "qwen-multi-angle-lora",
+      "filename": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+      "feature_set": "edit-lane",
+      "license_bucket": "commercial_safe",
+      "size_mb": 300,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "mflux",
+      "notes": "Apache 2.0 (gate G3, R0.6 spike — HF card frontmatter license: apache-2.0, stronger than the spec's cautious unclear_risky default). 96 camera poses (8 azimuths x 4 elevations x 3 distances). edit.sh --angle passes this repo reference straight to mflux's --lora flag (HF repo form, no local download step needed).",
+      "requires_hf_auth": false,
+      "hf_repo": "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "qwen-multi-angle-lora",
+      "comfyui_kind": null
     }
   ],
   "wrappers": [
@@ -405,7 +458,8 @@
     "multiview.sh",
     "print.sh",
     "texture.sh",
-    "benchmark.sh"
+    "benchmark.sh",
+    "edit.sh"
   ],
   "internal_scripts": [
     "_pipeline_lib.sh",

@@ -284,6 +284,12 @@ license_bucket_for_model() {
         # (v1) entry above — MIT port + MIT weights (gate G1, R0.1 spike;
         # see docs/model-review-trellis2.md). Do not conflate v1 and v2.
         trellis2)                               echo commercial_safe ;;
+        # Item 21 (2026-08): Qwen-Image-Edit-2511 (Apache 2.0) and its
+        # official Multiple-Angles LoRA (gate G3, R0.6 spike: HF card
+        # frontmatter license: apache-2.0, no conflicting statement in the
+        # body — resolved commercial_safe, stronger than the spec's
+        # cautious unclear_risky default).
+        qwen-image-edit)                        echo commercial_safe ;;
         # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).

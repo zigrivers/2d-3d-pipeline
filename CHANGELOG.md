@@ -2,6 +2,66 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R2.2: edit lane (item 21)
+
+- New `scripts/edit.sh` — instruction-based concept editing and
+  parametric camera-angle views via Qwen-Image-Edit-2511 (Apache 2.0,
+  `commercial_safe`), both through the existing `mflux-env` venv (no
+  new venv). `mflux-generate-qwen-edit`'s own default is
+  Qwen/Qwen-Image-Edit-2509, not 2511 — confirmed live via the
+  download log — so `edit.sh` always passes `--model
+  Qwen/Qwen-Image-Edit-2511` explicitly.
+- Instruction-edit mode confirmed working end to end on the Studio:
+  real "make the wood darker and more weathered" edit against a real
+  concept image, visually verified (chest correctly darker/weathered,
+  subject and composition fully preserved), DreamSim drift 0.084–0.139
+  (`similar_but_changed`) across two runs.
+- `--angle H,V` camera-view mode uses the official
+  `fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA` (gate G3, R0.6 spike:
+  Apache 2.0 / `commercial_safe`, stronger than the spec's cautious
+  `unclear_risky` default). Prompt syntax (`<sks> [azimuth] [elevation]
+  [distance]`, 8×4 pose grid) read directly from the LoRA's own model
+  card, not guessed.
+- **`--angle`'s LoRA currently applies zero weight — confirmed live,
+  documented as a known limitation, not shippable as functional in
+  this PR.** mflux 0.18.1 logs `Applied to 0 layers (0/1680 keys
+  matched)` for this LoRA (its diffusers-style
+  `transformer_blocks.N.attn.*.lora_A/B` key names don't match
+  mflux's internal Qwen-Image-Edit-2511 layer names) right before its
+  own misleading `✅ All LoRA weights applied successfully` line.
+  Visually confirmed the output shows no rotation at all versus the
+  source (identical camera position on a requested 90° view). Tracked
+  upstream at github.com/filipstrand/mflux/issues/298 — not fixable
+  from this repo. `edit.sh` now parses mflux's own match-count line,
+  prints a loud warning, and records `angle_lora_applied: false` in
+  the output's `meta.json` instead of silently claiming the angle
+  worked. Instruction-edit mode is unaffected.
+- `scripts/edit_drift_check.py` — new DreamSim (MIT, `commercial_safe`)
+  source-vs-result drift check, run automatically after every edit
+  (`--no-drift-check` to skip). Bands the distance into
+  `too_similar` / `similar_but_changed` / `too_different` against
+  bootstrap thresholds (0.03 / 0.45, explicitly uncalibrated).
+- `scripts/meta_schema.json` — `generation` section gains
+  `edit_instruction`, `angle_azimuth_deg`, `angle_elevation_deg`,
+  `angle_lora_applied`, and a `drift` object.
+- `scripts/_pipeline_lib.sh` — `license_bucket_for_model` gains
+  `qwen-image-edit` → `commercial_safe`.
+- `scripts/model_manifest.json` — new `edit-lane` feature_set and a
+  lightweight virtual venv entry pointing at the existing `mflux-env`
+  path (`size_gb: 0`, so it satisfies the "every feature_set needs a
+  matching venv" structural rule without double-counting disk). New
+  `qwen-image-edit-2511` (~40 GB) and `qwen-multi-angle-lora`
+  (~300 MB) model entries. `edit.sh` added to `wrappers`. Verified:
+  `pipeline_doctor.py --check structure` clean, `--check disk
+  --include edit-lane` correctly sums the new entries and detects the
+  40 GB model as already-downloaded on this Studio.
+- `skill/SKILL.md` — new Flow 10 (edit + angle-view), with the
+  LoRA-limitation warning inline; "five new lanes" becomes "six new
+  lanes".
+- Both setup guides — new "Optional: edit lane (item 21)" step with
+  the same LoRA-limitation callout (edit.sh needs no separate install,
+  reuses the mflux-env venv from earlier in the guide).
+
 ## 2026-08-12 — R2.1: 2D model refresh (item 20)
 
 - `scripts/concept.sh` — two new `-m` models: `flux2-klein` (FLUX.2

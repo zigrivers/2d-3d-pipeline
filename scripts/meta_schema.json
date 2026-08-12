@@ -53,7 +53,7 @@
 
     "generation": {
       "type": "object",
-      "description": "Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview)",
+      "description": "Generator metadata (mflux / SF3D / SPAR3D / TRELLIS / ComfyUI / multiview / edit)",
       "additionalProperties": true,
       "properties": {
         "backend": { "type": "string" },
@@ -63,7 +63,26 @@
         "inputs": { "type": "array", "items": { "type": "object" } },
         "polycount_target": { "type": "integer" },
         "texture_resolution": { "type": "integer" },
-        "duration_seconds": { "type": "number" }
+        "duration_seconds": { "type": "number" },
+        "edit_instruction": { "type": "string" },
+        "angle_azimuth_deg": { "type": "integer" },
+        "angle_elevation_deg": { "type": "integer" },
+        "angle_lora_applied": {
+          "type": "boolean",
+          "description": "false means mflux matched 0 LoRA keys (known Qwen-Image-Edit-2511 LoRA naming gap, github.com/filipstrand/mflux/issues/298) -- the output does not actually reflect the requested angle."
+        },
+        "drift": {
+          "type": "object",
+          "description": "Item 21 — DreamSim source-vs-result drift check (edit_drift_check.py).",
+          "additionalProperties": true,
+          "properties": {
+            "dreamsim_distance": { "type": "number" },
+            "band": { "type": "string", "enum": ["too_similar", "similar_but_changed", "too_different"] },
+            "min": { "type": "number" },
+            "max": { "type": "number" },
+            "duration_seconds": { "type": "number" }
+          }
+        }
       }
     },
 
