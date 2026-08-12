@@ -69,6 +69,7 @@ EMBEDS: dict[str, str] = {
     "scripts/preference_score.py":          "~/3d-pipeline/workspace/preference_score.py",
     "scripts/dedup_variants.py":            "~/3d-pipeline/workspace/dedup_variants.py",
     "scripts/vlm_judge.py":                 "~/3d-pipeline/workspace/vlm_judge.py",
+    "scripts/prompt_doctor.py":             "~/3d-pipeline/workspace/prompt_doctor.py",
     "scripts/edit.sh":                      "~/3d-pipeline/workspace/edit.sh",
     "scripts/edit_drift_check.py":          "~/3d-pipeline/workspace/edit_drift_check.py",
     "scripts/hunyuan_paint_run.py":         "~/3d-pipeline/workspace/hunyuan_paint_run.py",
