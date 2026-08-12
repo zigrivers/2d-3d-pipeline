@@ -787,18 +787,31 @@ glTF JSON chunk directly.
 ### Upscale
 
 ```bash
-~/3d-pipeline/workspace/texture.sh -i <path> --mode upscale --scale 4 [--json]
+~/3d-pipeline/workspace/texture.sh -i <path> --mode upscale --scale 4 [--engine realesrgan|seedvr2] [--json]
 ```
 
-Uses `real-esrgan-ncnn-vulkan` if installed. If not installed, the
-wrapper fails with `status=error error=not_installed` JSON and stderr
-install guidance — relay that and offer to wait until the user installs
-it. **Do not invent a fallback path.** Real-ESRGAN ncnn-vulkan is the
-only supported upscaler today.
+Two engines (item 24, v0.4+):
+
+- **`realesrgan`** (default) — `real-esrgan-ncnn-vulkan` if installed.
+  If not installed, the wrapper fails with `status=error
+  error=not_installed` JSON and stderr install guidance — relay that
+  and offer to wait until the user installs it, or suggest `--engine
+  seedvr2` instead.
+- **`seedvr2`** — SeedVR2 3B (laptop tier) / 7B (studio tier) via
+  mflux's native `mflux-upscale-seedvr2`, no separate install (ships
+  in mflux ≥ 0.18, same venv as everything else in mflux-env).
+  `commercial_safe` (gate G5, R0.6 spike: both HF cards
+  `license: apache-2.0`; confirmed live on this Studio, real 2x
+  upscale). Modern and maintained where Real-ESRGAN ncnn-vulkan isn't
+  (last portable release 2022) — suggest it first if the user hasn't
+  already got Real-ESRGAN installed, since it needs zero extra setup.
+  Real-ESRGAN stays the *default* until a formal bake-off flips it
+  (principle P-A — no silent default change).
 
 Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine's `Textures/`
-folder when applicable.
+folder when applicable. `quality.textures.upscale_engine` in the
+output's meta.json records which engine ran.
 
 ### Paint mode — Hunyuan3D-Paint MLX port (v0.4+, item 19 retarget)
 
@@ -850,6 +863,37 @@ JSON and points at the install docs. Relay the install guidance;
 don't try to substitute a different texture generator, and don't
 suggest the Brainkeys MPS fork as a paint fallback — its paint stage
 is limited/disabled, shape-generation only.
+
+### PBR pass — StableDelight + Marigold-IID (v0.4+, item 24)
+
+```bash
+~/3d-pipeline/workspace/texture.sh -i <glb> --mode pbr [--json]
+```
+
+Albedo → StableDelight (removes baked-in specular highlights) →
+Marigold-IID Appearance (roughness + metallic decomposition) → writes
+a new GLB with the delighted albedo as `baseColorTexture` and a
+packed `metallicRoughnessTexture`. Both models `commercial_safe`:
+StableDelight (code + weights apache-2.0, verified directly) and
+Marigold-IID (CreativeML OpenRAIL++-M, gate G4 — commercial use
+allowed with narrow behavioral-use restrictions; mention this inline
+when recommending the pass, see `docs/decision-marigold-bucket.md`
+for the full call). No `--image` needed — the reference is the mesh's
+own existing `baseColorTexture`, extracted automatically.
+
+**Same hard-refusal rule as paint mode, same mechanism:** refuses
+with `status=error error=already_textured` when
+`quality.textures.textures_present` already includes `metallic` or
+`roughness` (TRELLIS.2 output, a prior paint/pbr pass) — use
+`--mode upscale` to improve an existing texture instead. Best fit is
+exactly SF3D's own output (`albedo`/`normal` present, no real
+metallic-roughness map — see the paint-mode routing table above,
+same signal).
+
+Install layout: `$PBR_PASS_ENV` (default `~/3d-pipeline/pbr-pass-env/`)
+— a dedicated diffusers + torch venv, not shared with
+pipeline-tools-env. Missing venv exits with structured
+`status=error error=not_installed` JSON; relay the install guidance.
 
 ## Flow 7: Model bake-off / benchmark
 

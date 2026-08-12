@@ -2,7 +2,79 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
-## 2026-08-12 — R3.1: LOD chain + UV re-unwrap (item 23)
+## 2026-08-12 — R3.2: texture post — PBR pass + SeedVR2 upscale (item 24)
+
+- `scripts/texture.sh` — new `--mode pbr`: extracts a GLB's existing
+  `baseColorTexture`, runs it through StableDelight (removes baked-in
+  specular highlights) then Marigold-IID Appearance (roughness +
+  metallic decomposition), and writes a new GLB with the delighted
+  albedo as `baseColorTexture` and a packed roughness/metallic as
+  `metallicRoughnessTexture` (glTF convention: G=roughness,
+  B=metallic). New `scripts/pbr_pass.py` driver. Same hard-refusal
+  pattern as `--reuv` and paint mode: live `texture_quality_check.py`
+  run (not a stale meta.json) refuses with
+  `status=error error=already_textured` if the mesh already has
+  metallic/roughness maps.
+- `--mode upscale` gains `--engine {realesrgan,seedvr2}` (default
+  stays `realesrgan`, no behavior change for existing callers).
+  `seedvr2` runs through mflux's own native
+  `mflux-upscale-seedvr2` console script (already ships in
+  `mflux-env` — no new venv needed) and auto-selects the 7B-parameter
+  tier on `studio` hardware, 3B on `laptop`.
+- **License gates resolved (spec gates G4, G5), both `commercial_safe`:**
+  StableDelight — code (`Stable-X/StableDelight`) and weights
+  (`Stable-X/yoso-delight-v0-4-base`) both apache-2.0, verified
+  directly against the GitHub LICENSE file and HF model card.
+  SeedVR2 — HF card states `license: apache-2.0` for both the 3B and
+  7B checkpoints. Marigold-IID Appearance
+  (`prs-eth/marigold-iid-appearance-v1-1`) is CreativeML
+  OpenRAIL++-M — commercial use is allowed with narrow behavioral-use
+  restrictions, not a commercial-use/MAU gate, so it's bucketed
+  `commercial_safe` with a use-restriction footnote; full rationale in
+  new `docs/decision-marigold-bucket.md`.
+- **Real finding: the spec's StableDelight link was wrong.** It
+  pointed at `sakalond/StableGen` (an unrelated/downstream Blender
+  addon); the real upstream is `Stable-X/StableDelight`, confirmed via
+  direct search before implementing against it.
+- **Real finding: SeedVR2's weights aren't hosted by its original
+  authors.** The HF repo mflux actually downloads from
+  (`numz/SeedVR2_comfyUI`) is a third-party repackaging of
+  ByteDance-Seed's own SeedVR2 for ComfyUI use — its license was
+  verified independently rather than assumed inherited.
+- **Two real StableDelight bugs found and fixed, baked into
+  `pbr_pass.py` (not manual workarounds):** (1) its
+  dynamically-downloaded pipeline module imports
+  `diffusers.models.controlnet`, a path diffusers reorganized into
+  `diffusers.models.controlnets.controlnet` — patching the downloaded
+  cache file doesn't stick (HF's loader re-syncs it against the
+  remote hash on every load), fixed with a `sys.modules` alias
+  registered before the dynamic import fires (same technique as R0.4's
+  MV-Adapter nvdiffrast/triton stub). (2) `torch.hub.load(...,
+  "StableDelight_turbo")` defaults to `device="cuda:0"` — the driver
+  passes `device="mps"` explicitly (a real, accepted kwarg).
+- Confirmed live end-to-end on a real SF3D-generated GLB: full PBR
+  chain (delight + decomposition) in ~17s standalone, ~23s through the
+  full `texture.sh --mode pbr` wrapper; refusal path confirmed on the
+  already-PBR output; `--engine seedvr2 --scale 2` confirmed on a real
+  1024→2048px upscale (36s, correctly selected the 7B tier on this
+  Studio's `studio` hardware tier).
+- **Known gap, documented rather than glossed over: the item 24
+  "engine parity fixture" AC (dimensions + sharpness metric recorded
+  for both upscale engines) is only half-verified.**
+  `realesrgan-ncnn-vulkan` is not installed on this Studio (was already
+  true before this PR — no Homebrew formula, same class of gap as
+  R1.5's SPAR3D exclusion). The `seedvr2` side has full real evidence
+  above; the `realesrgan` side is deferred until that binary is
+  actually installed somewhere in the fleet.
+- New dedicated `pbr-pass-env` venv (torch 2.13.0, diffusers 0.39.0,
+  transformers 5.15.0, accelerate 1.14.0, trimesh) — not folded into
+  `pipeline-tools-env`, same "dedicated per-feature venv" convention
+  as `hunyuan3d-paint-mlx` and `trellis2-env`. `seedvr2` uses the
+  "virtual venv" trick (manifest entry pointing at the existing
+  `mflux-env`, `size_gb: 0`) since it needs no separate install.
+  New setup-guide install step in both guides.
+- `skill/SKILL.md` — Upscale section rewritten to cover both engines;
+  new PBR pass section added.
 
 - `scripts/generate.sh` — new `--lods "N,N,N"` flag: descending target
   polycounts emit `clean/<name>_lod{0,1,...}.glb` via `gltfpack`, plus

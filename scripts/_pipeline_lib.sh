@@ -302,6 +302,21 @@ license_bucket_for_model() {
         # only, never shipped in output assets, but bucketed per
         # cross-cutting principle 4 for consistency + auditability.
         siglip2|imagereward|dreamsim)           echo commercial_safe ;;
+        # Item 24 texture post (2026-08). SeedVR2 3B/7B: HF cards
+        # both state `license: apache-2.0` (gate G5, R0.6 spike) —
+        # stronger than the spec's cautious unclear_risky-until-
+        # verified default. StableDelight: code + weights both
+        # apache-2.0 (verified directly, code repo LICENSE file +
+        # Stable-X/yoso-delight-v0-4-base HF card).
+        seedvr2|stabledelight)                  echo commercial_safe ;;
+        # Marigold-IID Appearance (gate G4, R0.6 spike): CreativeML
+        # OpenRAIL++-M — commercial use allowed, real but narrow
+        # behavioral-use restrictions (not a commercial-use/MAU gate).
+        # See docs/decision-marigold-bucket.md for the full call —
+        # mention the restriction inline whenever this pass is
+        # recommended, same convention as commercial_threshold's MAU
+        # footnote.
+        marigold-iid)                           echo commercial_safe ;;
         "")                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac

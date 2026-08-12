@@ -118,6 +118,19 @@
         "qwen-image-edit-2511",
         "qwen-multi-angle-lora"
       ]
+    },
+    "seedvr2": {
+      "description": "Item 24 \u2014 SeedVR2 3B/7B upscale engine (opt-in; texture.sh --mode upscale --engine seedvr2). Runs through the existing mflux-env venv, no separate install.",
+      "components": [
+        "seedvr2-weights"
+      ]
+    },
+    "pbr-pass": {
+      "description": "Item 24 \u2014 albedo -> StableDelight -> Marigold-IID roughness/metallic pass (opt-in; texture.sh --mode pbr). Dedicated venv (diffusers + torch, not shared with pipeline-tools-env).",
+      "components": [
+        "stabledelight",
+        "marigold-iid"
+      ]
     }
   },
   "venvs": [
@@ -206,6 +219,26 @@
       "purpose": "Item 21 — not a separate install. Shares the mflux-env venv (mflux-generate-qwen-edit); this entry exists only so the edit-lane feature_set has a venv to check against.",
       "python_version": "3.12",
       "lockfile": "scripts/lockfiles/mflux-env.txt"
+    },
+    {
+      "name": "seedvr2",
+      "path": "~/3d-pipeline/mflux-env",
+      "required": false,
+      "feature_set": "seedvr2",
+      "size_gb": 0,
+      "purpose": "Item 24 — not a separate install. Shares the mflux-env venv (mflux-upscale-seedvr2); this entry exists only so the seedvr2 feature_set has a venv to check against.",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/mflux-env.txt"
+    },
+    {
+      "name": "pbr-pass-env",
+      "path": "~/3d-pipeline/pbr-pass-env",
+      "required": false,
+      "feature_set": "pbr-pass",
+      "size_gb": 6,
+      "purpose": "Item 24 — dedicated diffusers + torch stack for texture.sh --mode pbr (StableDelight + Marigold-IID). Not shared with pipeline-tools-env to keep that venv's dependency set lean.",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/pbr-pass-env.txt"
     }
   ],
   "models": [
@@ -459,6 +492,60 @@
       "hf_repo": "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
       "storage_layout": "hf_snapshot",
       "warm_target": "qwen-multi-angle-lora",
+      "comfyui_kind": null
+    },
+    {
+      "id": "seedvr2-weights",
+      "filename": "",
+      "feature_set": "seedvr2",
+      "license_bucket": "commercial_safe",
+      "size_mb": 15000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "mflux",
+      "notes": "Item 24. Gate G5 (R0.6 spike): both ByteDance-Seed/SeedVR2-3B and -7B HF cards state license: apache-2.0. mflux's mflux-upscale-seedvr2 actually downloads from a repackaging repo, numz/SeedVR2_comfyUI (credits the ByteDance Seed upstream) -- verified separately, also apache-2.0/MIT (both permissive). Downloaded automatically on first use, no separate venv (mflux-env).",
+      "requires_hf_auth": false,
+      "hf_repo": "numz/SeedVR2_comfyUI",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "seedvr2-weights",
+      "comfyui_kind": null
+    },
+    {
+      "id": "stabledelight",
+      "filename": "",
+      "feature_set": "pbr-pass",
+      "license_bucket": "commercial_safe",
+      "size_mb": 2000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "stabledelight",
+      "notes": "Item 24. Code (Stable-X/StableDelight) and weights (Stable-X/yoso-delight-v0-4-base) both apache-2.0, verified by reading the repo LICENSE and HF card directly. Downloaded via torch.hub.load on first use into pbr-pass-env. Two real bugs worked around in scripts/pbr_pass.py (see its docstring): a stale diffusers.models.controlnet import path in the dynamically-downloaded pipeline module, and hubconf.py's device default of cuda:0.",
+      "requires_hf_auth": false,
+      "hf_repo": "Stable-X/yoso-delight-v0-4-base",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "stabledelight",
+      "comfyui_kind": null
+    },
+    {
+      "id": "marigold-iid",
+      "filename": "",
+      "feature_set": "pbr-pass",
+      "license_bucket": "commercial_safe",
+      "size_mb": 2000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "marigold-iid",
+      "notes": "Item 24. Gate G4 (R0.6 spike + docs/decision-marigold-bucket.md): CreativeML OpenRAIL++-M -- commercial use allowed, narrow behavioral-use restrictions (bucketed commercial_safe with a use-restriction note, not unclear_risky). diffusers>=0.39 ships MarigoldIntrinsicsPipeline natively, confirmed working on MPS (R0.7 spike + R3.2 live chain test with StableDelight).",
+      "requires_hf_auth": false,
+      "hf_repo": "prs-eth/marigold-iid-appearance-v1-1",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "marigold-iid",
       "comfyui_kind": null
     }
   ],

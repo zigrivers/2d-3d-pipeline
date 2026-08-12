@@ -5,13 +5,15 @@
 # Modes:
 #   inspect   Report stats about an input image, GLB, or texture folder.
 #             No filesystem changes.
-#   upscale   Run a 2x / 4x upscale via real-esrgan-ncnn-vulkan if installed.
-#             Fails clearly when the binary is missing — does NOT silently
-#             degrade to a different upscaler.
+#   upscale   Run a 2x / 4x upscale via --engine realesrgan (default) or
+#             seedvr2 (item 24: SeedVR2 3B/7B natively in mflux).
 #   paint     Paint PBR textures onto an existing GLB via Hunyuan3D-Paint
 #             (item 19: dgrauet/Hunyuan3D-2.1-mlx, Apple Silicon MLX port).
 #             License bucket commercial_threshold; see
 #             docs/license-review-hunyuan3d-paint.md. Requires --image.
+#   pbr       Item 24: albedo -> StableDelight -> Marigold-IID roughness +
+#             metallic decomposition, written into a new GLB. Refuses on a
+#             mesh that already has a real metallic-roughness map.
 
 set -euo pipefail
 
@@ -26,6 +28,8 @@ INPUT=""
 OUTPUT=""
 MODE="inspect"
 SCALE=4
+ENGINE="realesrgan"
+ESRGAN_BIN=""
 IMAGE_ARG=""
 ENGINE_STAGE=0
 JSON_MODE=0
@@ -42,8 +46,11 @@ Project context:
   --project PATH           Force a project root (skips auto-detection).
 
 Mode:
-      --mode MODE          inspect (default) | upscale | paint
+      --mode MODE          inspect (default) | upscale | paint | pbr
       --scale N            2 or 4 (default: 4) — used in upscale mode.
+      --engine NAME        realesrgan (default) | seedvr2 — used in
+                           upscale mode. seedvr2 runs natively in mflux
+                           (item 24; 3B on laptop tier, 7B on studio).
       --image PATH         Reference image for the multiview diffusion
                            pass — required in paint mode.
 
@@ -64,6 +71,14 @@ Apple Silicon port. License bucket commercial_threshold (Tencent Hunyuan
 Refuses to paint over a mesh that already has baked textures — use
 --mode upscale to improve an existing texture instead.
 
+PBR mode (item 24): albedo -> StableDelight -> Marigold-IID roughness +
+metallic decomposition. License bucket commercial_safe for both models
+(StableDelight: apache-2.0 code + weights; Marigold-IID: CreativeML
+OpenRAIL++-M, commercial use allowed with narrow behavioral-use
+restrictions — see docs/decision-marigold-bucket.md). Same refusal rule
+as paint mode: refuses on a mesh that already has a metallic-roughness
+map.
+
 Examples:
   # Quick inspection of a GLB
   $(basename "$0") -i assets/clean/chest_clean.glb
@@ -73,6 +88,12 @@ Examples:
 
   # 4x upscale a concept image
   $(basename "$0") -i assets/concept/chest.png --mode upscale --scale 4
+
+  # SeedVR2 upscale instead of Real-ESRGAN
+  $(basename "$0") -i assets/concept/chest.png --mode upscale --engine seedvr2
+
+  # PBR pass on an SF3D output (adds roughness + metallic)
+  $(basename "$0") -i assets/clean/chest_clean.glb --mode pbr
 
   # Paint a vertex-color-only TRELLIS output
   $(basename "$0") -i assets/raw/chest_trellis.glb --mode paint \\
@@ -87,6 +108,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT="$2";           shift 2 ;;
         --mode)            MODE="$2";             shift 2 ;;
         --scale)           SCALE="$2";            shift 2 ;;
+        --engine)          ENGINE="$2";           shift 2 ;;
         --image)           IMAGE_ARG="$2";        shift 2 ;;
         --engine-stage)    ENGINE_STAGE=1;        shift   ;;
         --json)            JSON_MODE=1;           shift   ;;
@@ -97,11 +119,14 @@ done
 
 [[ -z "$INPUT" ]] && { echo "ERROR: -i/--input is required" >&2; usage; exit 1; }
 [[ -e "$INPUT" ]] || { echo "ERROR: input does not exist: $INPUT" >&2; exit 1; }
-case "$MODE"  in inspect|upscale|paint) ;;
-    *) echo "ERROR: --mode must be inspect, upscale, or paint (got: $MODE)" >&2; exit 1 ;;
+case "$MODE"  in inspect|upscale|paint|pbr) ;;
+    *) echo "ERROR: --mode must be inspect, upscale, paint, or pbr (got: $MODE)" >&2; exit 1 ;;
 esac
 case "$SCALE" in 2|4) ;;
     *) echo "ERROR: --scale must be 2 or 4 (got: $SCALE)" >&2; exit 1 ;;
+esac
+case "$ENGINE" in realesrgan|seedvr2) ;;
+    *) echo "ERROR: --engine must be realesrgan or seedvr2 (got: $ENGINE)" >&2; exit 1 ;;
 esac
 
 # Under --json: route subcommand stdout to stderr so the JSON line is alone.
@@ -354,42 +379,132 @@ print('1' if ('metallic' in present or 'roughness' in present) else '0')
     exit 0
 fi
 
-# ---------- upscale mode ----------
-# Detect a real-esrgan-ncnn-vulkan binary. Different distributions name it
-# differently; check both common forms.
-ESRGAN_BIN=""
-for candidate in real-esrgan-ncnn-vulkan realesrgan-ncnn-vulkan; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        ESRGAN_BIN="$candidate"
-        break
-    fi
-done
+# ---------- pbr mode (StableDelight -> Marigold-IID, item 24) ----------
+# License buckets both commercial_safe: StableDelight (code + weights
+# apache-2.0, verified directly at implementation time) and Marigold-IID
+# (CreativeML OpenRAIL++-M, gate G4 -- see docs/decision-marigold-bucket.md).
+PBR_PASS_ENV="${PBR_PASS_ENV:-$PIPELINE_ROOT/pbr-pass-env}"
 
-if [[ -z "$ESRGAN_BIN" ]]; then
-    err "real-esrgan-ncnn-vulkan binary not found in PATH."
-    err "  Install one of:"
-    err "    https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases"
-    err "    https://github.com/nihui/realesrgan-ncnn-vulkan/releases"
-    err "  Place the binary on your PATH as one of:"
-    err "    real-esrgan-ncnn-vulkan"
-    err "    realesrgan-ncnn-vulkan"
+if [[ "$MODE" == "pbr" ]]; then
+    case "$INPUT_ABS" in
+        *.[Gg][Ll][Bb]|*.[Gg][Ll][Tt][Ff]) ;;
+        *)
+            err "pbr mode requires a .glb or .gltf input (got: $INPUT_ABS)"
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_mode_end
+                python3 "$SCRIPT_DIR/json_emit.py" \
+                    status=error stage=texture_pbr \
+                    error=unsupported_input tool=pbr-pass \
+                    license_bucket=commercial_safe \
+                    input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                    machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+            fi
+            exit 2
+            ;;
+    esac
+
+    # Same refusal rule and mechanism as paint mode: refuse when a real
+    # metallic-roughness map already exists (TRELLIS.2 output, a prior
+    # paint pass) -- a PBR pass on an already-PBR mesh is redundant/wrong.
+    PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+    TEXQUAL_SCRIPT="$SCRIPT_DIR/texture_quality_check.py"
+    [[ -f "$TEXQUAL_SCRIPT" ]] || TEXQUAL_SCRIPT="$PIPELINE_ROOT/workspace/texture_quality_check.py"
+    INPUT_META_PATH="${INPUT_ABS}.meta.json"
+    if [[ -f "$TEXQUAL_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        TEXQUAL_JSON="$("$PIPELINE_TOOLS_ENV/bin/python" "$TEXQUAL_SCRIPT" \
+            --input "$INPUT_ABS" --meta "$INPUT_META_PATH" --json 2>/dev/null || echo '{}')"
+        HAS_MR_MAP="$(python3 -c "
+import json, sys
+present = json.loads(sys.argv[1]).get('textures_present', [])
+print('1' if ('metallic' in present or 'roughness' in present) else '0')
+" "$TEXQUAL_JSON" 2>/dev/null || echo 0)"
+        if [[ "$HAS_MR_MAP" == "1" ]]; then
+            TEXTURES_PRESENT="$(python3 -c "import json,sys; print(', '.join(json.loads(sys.argv[1]).get('textures_present', [])))" "$TEXQUAL_JSON" 2>/dev/null || echo '')"
+            err "Input already has a real metallic-roughness map ($TEXTURES_PRESENT) -- refusing to run the PBR pass over existing PBR textures."
+            err "PBR mode is for meshes with no metallic-roughness map yet (SF3D-style"
+            err "scalar-factor output), not a re-pass of an already-full-PBR mesh (e.g."
+            err "TRELLIS.2 output or a prior paint/pbr pass)."
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_mode_end
+                python3 "$SCRIPT_DIR/json_emit.py" \
+                    status=error stage=texture_pbr \
+                    error=already_textured tool=pbr-pass \
+                    license_bucket=commercial_safe \
+                    existing_textures="$TEXTURES_PRESENT" \
+                    input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                    machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+            fi
+            exit 2
+        fi
+    fi
+
+    DRIVER_SCRIPT="$SCRIPT_DIR/pbr_pass.py"
+    [[ -f "$DRIVER_SCRIPT" ]] || DRIVER_SCRIPT="$PIPELINE_ROOT/workspace/pbr_pass.py"
+    if [[ ! -x "$PBR_PASS_ENV/bin/python" || ! -f "$DRIVER_SCRIPT" ]]; then
+        err "pbr-pass-env (StableDelight + Marigold-IID) not installed (expected $PBR_PASS_ENV)."
+        err "  Override location: export PBR_PASS_ENV=/path/to/venv"
+        err "  License: StableDelight apache-2.0; Marigold-IID CreativeML OpenRAIL++-M"
+        err "           (commercial_safe with a use-restriction note; see"
+        err "           docs/decision-marigold-bucket.md)"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=texture_pbr \
+                error=not_installed tool=pbr-pass \
+                license_bucket=commercial_safe \
+                input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    out_base="$(basename "${INPUT_ABS%.*}")"
+    PBR_PATH="$TEXTURES_DIR/${out_base}_pbr.glb"
+    PBR_META_PATH="${PBR_PATH}.meta.json"
+    info "Running PBR pass (StableDelight -> Marigold-IID, license: commercial_safe)"
+    info "Input mesh:  $INPUT_ABS"
+    info "Output:      $PBR_PATH"
+
+    PBR_START=$(date +%s)
+    "$PBR_PASS_ENV/bin/python" "$DRIVER_SCRIPT" \
+        --input "$INPUT_ABS" --output "$PBR_PATH" --meta "$PBR_META_PATH" 2>&1 \
+        | { while IFS= read -r line; do printf "[pbr] %s\n" "${line#\[pbr\] }" >&"$HUMAN_FD"; done; } || {
+        err "PBR pass failed"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=texture_pbr \
+                error=inference_failed tool=pbr-pass \
+                license_bucket=commercial_safe \
+                input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 1
+    }
+    PBR_END=$(date +%s)
+    PBR_DURATION=$((PBR_END - PBR_START))
+
+    [[ -f "$PBR_PATH" ]] || { err "PBR pass did not produce $PBR_PATH"; exit 1; }
+    done_ "PBR pass complete in ${PBR_DURATION}s -> $PBR_PATH"
+
     if [[ "$JSON_MODE" == "1" ]]; then
         json_mode_end
         python3 "$SCRIPT_DIR/json_emit.py" \
-            status=error \
-            stage=texture_upscale \
-            error=not_installed \
-            tool=real-esrgan-ncnn-vulkan \
-            input="$INPUT_ABS" \
+            status=ok stage=texture_pbr \
+            tool=pbr-pass \
+            license_bucket=commercial_safe \
+            input="$INPUT_ABS" output="$PBR_PATH" \
             assets_root="$ASSETS_ROOT" \
-            machine="$MACHINE" \
-            hardware_tier="$HW_TIER" \
-            created="$CREATED_AT"
+            --int duration_seconds="$PBR_DURATION" \
+            machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+    else
+        echo "$PBR_PATH"
     fi
-    exit 2
+    exit 0
 fi
 
-# Refuse to upscale directories / GLBs.
+# ---------- upscale mode ----------
+# Refuse to upscale directories / GLBs (both engines need an image input).
 KIND="$(echo "$INSPECT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("kind",""))')"
 if [[ "$KIND" != "image" ]]; then
     err "Upscale mode currently supports image inputs only (got kind=$KIND)."
@@ -410,12 +525,93 @@ else
 fi
 mkdir -p "$(dirname "$OUT_PATH")"
 
-info "Tool:    $ESRGAN_BIN"
-info "Scale:   ${SCALE}x"
-info "Output:  $OUT_PATH"
+if [[ "$ENGINE" == "realesrgan" ]]; then
+    # Detect a real-esrgan-ncnn-vulkan binary. Different distributions name
+    # it differently; check both common forms.
+    for candidate in real-esrgan-ncnn-vulkan realesrgan-ncnn-vulkan; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            ESRGAN_BIN="$candidate"
+            break
+        fi
+    done
 
-# Run the upscaler. Both common builds accept -i / -o / -s.
-"$ESRGAN_BIN" -i "$INPUT_ABS" -o "$OUT_PATH" -s "$SCALE"
+    if [[ -z "$ESRGAN_BIN" ]]; then
+        err "real-esrgan-ncnn-vulkan binary not found in PATH."
+        err "  Install one of:"
+        err "    https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases"
+        err "    https://github.com/nihui/realesrgan-ncnn-vulkan/releases"
+        err "  Place the binary on your PATH as one of:"
+        err "    real-esrgan-ncnn-vulkan"
+        err "    realesrgan-ncnn-vulkan"
+        err "  Or use --engine seedvr2 instead (item 24, no ncnn-vulkan dependency)."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error \
+                stage=texture_upscale \
+                error=not_installed \
+                tool=real-esrgan-ncnn-vulkan \
+                input="$INPUT_ABS" \
+                assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" \
+                hardware_tier="$HW_TIER" \
+                created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    info "Engine:  realesrgan ($ESRGAN_BIN)"
+    info "Scale:   ${SCALE}x"
+    info "Output:  $OUT_PATH"
+
+    # Run the upscaler. Both common builds accept -i / -o / -s.
+    "$ESRGAN_BIN" -i "$INPUT_ABS" -o "$OUT_PATH" -s "$SCALE"
+else
+    # seedvr2 (item 24): runs natively via mflux's mflux-upscale-seedvr2
+    # console script. --resolution takes an absolute target, not a ratio,
+    # so translate --scale into one from the input's own longest side.
+    MFLUX_VENV="${MFLUX_VENV:-$PIPELINE_ROOT/mflux-env}"
+    if [[ ! -x "$MFLUX_VENV/bin/mflux-upscale-seedvr2" ]]; then
+        err "mflux-upscale-seedvr2 not found (expected in $MFLUX_VENV)."
+        err "  SeedVR2 ships in mflux >= 0.18; run the mflux setup from the setup guide."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error \
+                stage=texture_upscale \
+                error=not_installed \
+                tool=seedvr2 \
+                license_bucket=commercial_safe \
+                input="$INPUT_ABS" \
+                assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" \
+                hardware_tier="$HW_TIER" \
+                created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    INPUT_W="$(echo "$INSPECT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("width") or 0)')"
+    INPUT_H="$(echo "$INSPECT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("height") or 0)')"
+    LONG_SIDE=$(( INPUT_W > INPUT_H ? INPUT_W : INPUT_H ))
+    TARGET_RES=$(( LONG_SIDE * SCALE ))
+
+    # Item 24: SeedVR2 3B on laptop tier, 7B on studio tier.
+    SEEDVR2_MODEL_ARGS=()
+    [[ "$HW_TIER" == "studio" ]] && SEEDVR2_MODEL_ARGS=(--model seedvr2-7b)
+
+    info "Engine:  seedvr2 (${SEEDVR2_MODEL_ARGS[1]:-seedvr2-3b}, license: commercial_safe)"
+    info "Scale:   ${SCALE}x (target resolution ${TARGET_RES}px)"
+    info "Output:  $OUT_PATH"
+
+    source "$MFLUX_VENV/bin/activate"
+    mflux-upscale-seedvr2 \
+        --image-path "$INPUT_ABS" \
+        --resolution "$TARGET_RES" \
+        --output "$OUT_PATH" \
+        "${SEEDVR2_MODEL_ARGS[@]}"
+    deactivate
+fi
 
 [[ -f "$OUT_PATH" ]] || { err "upscaler did not produce $OUT_PATH"; exit 1; }
 
@@ -427,6 +623,21 @@ if [[ $ENGINE_STAGE -eq 1 && -n "${ENGINE_PATH:-}" ]]; then
     ENGINE_STAGED="$ENGINE_TEX_DIR/$(basename "$OUT_PATH")"
     cp "$OUT_PATH" "$ENGINE_STAGED"
     info "Engine-staged: $ENGINE_STAGED"
+fi
+
+UPSCALE_TOOL="$ESRGAN_BIN"
+UPSCALE_LICENSE_BUCKET=""
+[[ "$ENGINE" == "seedvr2" ]] && { UPSCALE_TOOL="seedvr2"; UPSCALE_LICENSE_BUCKET="commercial_safe"; }
+
+# Item 24 — record which upscale engine produced this output.
+OUT_META_PATH="${OUT_PATH}.meta.json"
+PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+META_HELPER_SCRIPT="$SCRIPT_DIR/meta_helper.py"
+[[ -f "$META_HELPER_SCRIPT" ]] || META_HELPER_SCRIPT="$PIPELINE_ROOT/workspace/meta_helper.py"
+if [[ -f "$META_HELPER_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+    "$PIPELINE_TOOLS_ENV/bin/python" "$META_HELPER_SCRIPT" merge "$OUT_META_PATH" \
+        --section quality --data "{\"textures\": {\"upscale_engine\": \"$ENGINE\"}}" \
+        > /dev/null 2>&1 || true
 fi
 
 END_TS=$(date +%s)
@@ -441,7 +652,9 @@ if [[ "$JSON_MODE" == "1" ]]; then
         status=ok \
         stage=texture_upscale \
         mode=upscale \
-        tool="$ESRGAN_BIN" \
+        engine="$ENGINE" \
+        tool="$UPSCALE_TOOL" \
+        license_bucket="$UPSCALE_LICENSE_BUCKET" \
         --int scale="$SCALE" \
         input="$INPUT_ABS" \
         output="$OUT_PATH" \

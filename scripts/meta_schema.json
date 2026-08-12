@@ -163,7 +163,23 @@
           "properties": {
             "textures_present": { "type": "array", "items": { "type": "string" } },
             "issues": { "type": "array", "items": { "type": "string" } },
-            "stats": { "type": "object" }
+            "stats": { "type": "object" },
+            "upscale_engine": {
+              "type": "string",
+              "description": "Item 24 — texture.sh --mode upscale --engine: 'realesrgan' or 'seedvr2'."
+            },
+            "pbr_pass": {
+              "type": "object",
+              "description": "Item 24 — texture.sh --mode pbr (pbr_pass.py: StableDelight -> Marigold-IID).",
+              "additionalProperties": true,
+              "properties": {
+                "applied": { "type": "boolean" },
+                "maps_added": { "type": "array", "items": { "type": "string" } },
+                "delight_seconds": { "type": "number" },
+                "marigold_seconds": { "type": "number" },
+                "duration_seconds": { "type": "number" }
+              }
+            }
           }
         },
         "uv": {
