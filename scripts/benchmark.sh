@@ -34,6 +34,7 @@ POLYCOUNT=""
 TEXTURE_RES=""
 SKIP_2D=0
 SKIP_3D=0
+JUDGE_MESH=0
 JSON_MODE=0
 DRY_RUN=0
 
@@ -53,7 +54,7 @@ Suite selection:
 
 Models:
   --generators LIST            Comma-separated list (default: sf3d).
-                               Allowed: sf3d, spar3d, trellis
+                               Allowed: sf3d, spar3d, trellis, trellis2
   --models-2d LIST             Comma-separated list (default: z-image-turbo).
                                Allowed: z-image-turbo, flux-schnell, flux-dev
 
@@ -66,6 +67,12 @@ Skip flags:
   --skip-2d                    Reuse existing concept images instead of
                                regenerating them
   --skip-3d                    Concept-only bake-off (2D models only)
+
+Quality:
+  --judge-mesh                 Item 18 — score each 3D output with the
+                               local VLM mesh judge (generate.sh
+                               --judge-mesh). No-op when vlm-env isn't
+                               installed.
 
 Output / behaviour:
   --json                       Emit the path to the results JSON on stdout
@@ -96,6 +103,7 @@ while [[ $# -gt 0 ]]; do
         --texture-resolution)   TEXTURE_RES="$2";       shift 2 ;;
         --skip-2d)              SKIP_2D=1;              shift   ;;
         --skip-3d)              SKIP_3D=1;              shift   ;;
+        --judge-mesh)           JUDGE_MESH=1;           shift   ;;
         --json)                 JSON_MODE=1;            shift   ;;
         --dry-run)              DRY_RUN=1;              shift   ;;
         -h|--help)              usage; exit 0 ;;
@@ -134,6 +142,7 @@ ARGS=(
 [[ -n "$TEXTURE_RES" ]]  && ARGS+=( --texture-resolution "$TEXTURE_RES" )
 [[ $SKIP_2D -eq 1 ]]     && ARGS+=( --skip-2d )
 [[ $SKIP_3D -eq 1 ]]     && ARGS+=( --skip-3d )
+[[ $JUDGE_MESH -eq 1 ]]  && ARGS+=( --judge-mesh )
 [[ $DRY_RUN -eq 1 ]]     && ARGS+=( --dry-run )
 [[ $JSON_MODE -eq 1 ]]   && ARGS+=( --json )
 

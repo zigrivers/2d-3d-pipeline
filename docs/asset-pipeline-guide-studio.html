@@ -4165,6 +4165,7 @@ POLYCOUNT=&quot;&quot;
 TEXTURE_RES=&quot;&quot;
 SKIP_2D=0
 SKIP_3D=0
+JUDGE_MESH=0
 JSON_MODE=0
 DRY_RUN=0
 
@@ -4184,7 +4185,7 @@ Suite selection:
 
 Models:
   --generators LIST            Comma-separated list (default: sf3d).
-                               Allowed: sf3d, spar3d, trellis
+                               Allowed: sf3d, spar3d, trellis, trellis2
   --models-2d LIST             Comma-separated list (default: z-image-turbo).
                                Allowed: z-image-turbo, flux-schnell, flux-dev
 
@@ -4197,6 +4198,12 @@ Skip flags:
   --skip-2d                    Reuse existing concept images instead of
                                regenerating them
   --skip-3d                    Concept-only bake-off (2D models only)
+
+Quality:
+  --judge-mesh                 Item 18 — score each 3D output with the
+                               local VLM mesh judge (generate.sh
+                               --judge-mesh). No-op when vlm-env isn&#x27;t
+                               installed.
 
 Output / behaviour:
   --json                       Emit the path to the results JSON on stdout
@@ -4227,6 +4234,7 @@ while [[ $# -gt 0 ]]; do
         --texture-resolution)   TEXTURE_RES=&quot;$2&quot;;       shift 2 ;;
         --skip-2d)              SKIP_2D=1;              shift   ;;
         --skip-3d)              SKIP_3D=1;              shift   ;;
+        --judge-mesh)           JUDGE_MESH=1;           shift   ;;
         --json)                 JSON_MODE=1;            shift   ;;
         --dry-run)              DRY_RUN=1;              shift   ;;
         -h|--help)              usage; exit 0 ;;
@@ -4265,6 +4273,7 @@ ARGS=(
 [[ -n &quot;$TEXTURE_RES&quot; ]]  &amp;&amp; ARGS+=( --texture-resolution &quot;$TEXTURE_RES&quot; )
 [[ $SKIP_2D -eq 1 ]]     &amp;&amp; ARGS+=( --skip-2d )
 [[ $SKIP_3D -eq 1 ]]     &amp;&amp; ARGS+=( --skip-3d )
+[[ $JUDGE_MESH -eq 1 ]]  &amp;&amp; ARGS+=( --judge-mesh )
 [[ $DRY_RUN -eq 1 ]]     &amp;&amp; ARGS+=( --dry-run )
 [[ $JSON_MODE -eq 1 ]]   &amp;&amp; ARGS+=( --json )
 
@@ -4297,6 +4306,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -4335,7 +4345,24 @@ LICENSE_BUCKET = {
     &quot;sf3d&quot;: &quot;commercial_threshold&quot;,
     &quot;spar3d&quot;: &quot;commercial_threshold&quot;,
     &quot;trellis&quot;: &quot;non_commercial&quot;,
+    &quot;trellis2&quot;: &quot;commercial_safe&quot;,
 }
+
+# Wrappers print e.g. &quot;Peak Memory: 11514.7 MB&quot; or &quot;Peak MLX memory: 31.86 GB&quot;
+# to stderr (human logs, routed there under --json). Kept out of the JSON
+# result, so we scrape it here — item 15/R1.5&#x27;s bake-off needs real memory
+# figures per generator, not just timings.
+_PEAK_MEM_RE = re.compile(r&quot;Peak(?:\s+MLX)?\s+[Mm]emory:\s*([\d.]+)\s*(MB|GB)&quot;)
+
+
+def _extract_peak_memory_mb(text: str) -&gt; float | None:
+    best: float | None = None
+    for match in _PEAK_MEM_RE.finditer(text):
+        value, unit = float(match.group(1)), match.group(2)
+        mb = value * 1024 if unit == &quot;GB&quot; else value
+        if best is None or mb &gt; best:
+            best = mb
+    return round(best, 1) if best is not None else None
 
 EVAL_SCAFFOLD = {
     &quot;prompt_match&quot;: None,
@@ -4389,7 +4416,7 @@ def _load_prompts(args) -&gt; list[str]:
 
 
 def _run_wrapper(cmd: list[str], dry_run: bool) -&gt; tuple[int, dict[str, Any] | None, str]:
-    &quot;&quot;&quot;Run a wrapper under --json. Returns (exit_code, parsed_json_or_None, stderr_tail).&quot;&quot;&quot;
+    &quot;&quot;&quot;Run a wrapper under --json. Returns (exit_code, parsed_json_or_None, stderr_full).&quot;&quot;&quot;
     if dry_run:
         return 0, {&quot;status&quot;: &quot;dry_run&quot;, &quot;cmd&quot;: cmd}, &quot;&quot;
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -4404,8 +4431,7 @@ def _run_wrapper(cmd: list[str], dry_run: bool) -&gt; tuple[int, dict[str, Any] 
         except json.JSONDecodeError:
             parsed = None
         break
-    stderr_tail = &quot;\n&quot;.join(proc.stderr.splitlines()[-20:])
-    return proc.returncode, parsed, stderr_tail
+    return proc.returncode, parsed, proc.stderr
 
 
 def main() -&gt; int:
@@ -4429,6 +4455,8 @@ def main() -&gt; int:
     p.add_argument(&quot;--texture-resolution&quot;, type=int, default=0)
     p.add_argument(&quot;--skip-2d&quot;, action=&quot;store_true&quot;)
     p.add_argument(&quot;--skip-3d&quot;, action=&quot;store_true&quot;)
+    p.add_argument(&quot;--judge-mesh&quot;, dest=&quot;judge_mesh&quot;, action=&quot;store_true&quot;,
+                   help=&quot;Item 18 — score each 3D output with generate.sh --judge-mesh&quot;)
     p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;)
     p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
     args = p.parse_args()
@@ -4450,7 +4478,7 @@ def main() -&gt; int:
             print(f&quot;ERROR: unknown 2D model: {m}&quot;, file=sys.stderr)
             return 2
     for g in generators:
-        if g not in {&quot;sf3d&quot;, &quot;spar3d&quot;, &quot;trellis&quot;}:
+        if g not in {&quot;sf3d&quot;, &quot;spar3d&quot;, &quot;trellis&quot;, &quot;trellis2&quot;}:
             print(f&quot;ERROR: unknown 3D generator: {g}&quot;, file=sys.stderr)
             return 2
 
@@ -4477,6 +4505,7 @@ def main() -&gt; int:
         &quot;texture_resolution&quot;: args.texture_resolution,
         &quot;skip_2d&quot;: args.skip_2d,
         &quot;skip_3d&quot;: args.skip_3d,
+        &quot;judge_mesh&quot;: args.judge_mesh,
         &quot;dry_run&quot;: args.dry_run,
         &quot;prompts&quot;: prompts,
         &quot;runs&quot;: [],
@@ -4499,7 +4528,7 @@ def main() -&gt; int:
                 if args.project_root:
                     cmd.extend([&quot;--project&quot;, args.project_root])
                 t0 = time.time()
-                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                rc, j, stderr_full = _run_wrapper(cmd, args.dry_run)
                 dt = time.time() - t0
                 outputs = (j or {}).get(&quot;outputs&quot;, []) if j else []
                 concept_paths[(prompt, model_2d)] = outputs
@@ -4510,10 +4539,11 @@ def main() -&gt; int:
                     &quot;license_bucket&quot;: LICENSE_BUCKET.get(model_2d, &quot;unknown&quot;),
                     &quot;exit_code&quot;: rc,
                     &quot;duration_seconds&quot;: round(dt, 2),
+                    &quot;peak_memory_mb&quot;: _extract_peak_memory_mb(stderr_full),
                     &quot;outputs&quot;: outputs,
                     &quot;output_sizes_bytes&quot;: [_file_size(o) for o in outputs],
                     &quot;status&quot;: &quot;ok&quot; if rc == 0 else &quot;error&quot;,
-                    &quot;stderr_tail&quot;: stderr_tail if rc != 0 else &quot;&quot;,
+                    &quot;stderr_tail&quot;: &quot;\n&quot;.join(stderr_full.splitlines()[-20:]) if rc != 0 else &quot;&quot;,
                     &quot;wrapper_json&quot;: j,
                 })
 
@@ -4549,8 +4579,10 @@ def main() -&gt; int:
                     cmd.extend([&quot;-p&quot;, str(args.polycount)])
                 if args.texture_resolution:
                     cmd.extend([&quot;-t&quot;, str(args.texture_resolution)])
+                if args.judge_mesh:
+                    cmd.append(&quot;--judge-mesh&quot;)
                 t0 = time.time()
-                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                rc, j, stderr_full = _run_wrapper(cmd, args.dry_run)
                 dt = time.time() - t0
                 clean_path = (j or {}).get(&quot;clean_path&quot;, &quot;&quot;)
                 raw_path = (j or {}).get(&quot;raw_path&quot;, &quot;&quot;)
@@ -4563,12 +4595,15 @@ def main() -&gt; int:
                     &quot;license_bucket&quot;: LICENSE_BUCKET.get(gen, &quot;unknown&quot;),
                     &quot;exit_code&quot;: rc,
                     &quot;duration_seconds&quot;: round(dt, 2),
+                    &quot;peak_memory_mb&quot;: _extract_peak_memory_mb(stderr_full),
                     &quot;raw_path&quot;: raw_path,
                     &quot;clean_path&quot;: clean_path,
                     &quot;raw_size_bytes&quot;: _file_size(raw_path),
                     &quot;clean_size_bytes&quot;: _file_size(clean_path),
+                    &quot;judge_mesh_verdict&quot;: (j or {}).get(&quot;judge_mesh_verdict&quot;),
+                    &quot;judge_mesh_rejected&quot;: (j or {}).get(&quot;judge_mesh_rejected&quot;),
                     &quot;status&quot;: &quot;ok&quot; if rc == 0 else &quot;error&quot;,
-                    &quot;stderr_tail&quot;: stderr_tail if rc != 0 else &quot;&quot;,
+                    &quot;stderr_tail&quot;: &quot;\n&quot;.join(stderr_full.splitlines()[-20:]) if rc != 0 else &quot;&quot;,
                     &quot;wrapper_json&quot;: j,
                 })
 
