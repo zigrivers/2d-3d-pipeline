@@ -62,7 +62,13 @@ Project context:
                            Falls back to ~/3d-pipeline/workspace/
 
 Generation options:
-  -m, --model NAME         z-image-turbo (default) | flux-schnell | flux-dev
+  -m, --model NAME         z-image-turbo (default) | flux-schnell | flux-dev |
+                           flux2-klein | ernie-image
+                           flux2-klein (item 20): Apache 2.0, FLUX-ecosystem
+                           LoRA + built-in instruction editing in one
+                           checkpoint. ernie-image (item 20): Apache 2.0,
+                           strongest-at-release open t2i for prompt
+                           adherence. Both commercial_safe.
   -w, --width N            Width in pixels (default: 1024)
   -H, --height N           Height in pixels (default: 1024)
   -s, --steps N            Inference steps (default per model: 9 / 4 / 30)
@@ -150,13 +156,30 @@ fi
 
 # Validate model
 case "$MODEL" in
-    z-image-turbo|flux-schnell|flux-dev) ;;
-    *) echo "ERROR: model must be z-image-turbo, flux-schnell, or flux-dev" >&2; exit 1 ;;
+    z-image-turbo|flux-schnell|flux-dev|flux2-klein|ernie-image) ;;
+    *) echo "ERROR: model must be z-image-turbo, flux-schnell, flux-dev, flux2-klein, or ernie-image" >&2; exit 1 ;;
 esac
 case "$QUANTIZE" in 4|8) ;; *) echo "ERROR: -q must be 4 or 8" >&2; exit 1 ;; esac
-if [[ -n "$LORA_PATH" && "$MODEL" == "z-image-turbo" ]]; then
-    echo "WARNING: LoRA support is FLUX-only; ignoring for Z-Image" >&2
-    LORA_PATH=""
+if [[ -n "$LORA_PATH" ]]; then
+    case "$MODEL" in
+        z-image-turbo)
+            echo "WARNING: LoRA support is FLUX-only; ignoring for Z-Image" >&2
+            LORA_PATH=""
+            ;;
+        flux2-klein|ernie-image)
+            # Item 20/21: FLUX.1 LoRAs (trained for flux-schnell/flux-dev)
+            # are a different checkpoint architecture than FLUX.2 klein or
+            # ERNIE-Image — loading one against the wrong model family
+            # fails deep inside mflux with a confusing tensor-shape error,
+            # or silently degrades output. Fail fast with a clear message
+            # instead of forwarding the mismatch.
+            echo "ERROR: --lora points at a FLUX.1-era LoRA path, but -m $MODEL is a" >&2
+            echo "       different model family. FLUX.1 LoRAs (trained for flux-schnell" >&2
+            echo "       or flux-dev) are not compatible with $MODEL. Pick a LoRA trained" >&2
+            echo "       for $MODEL, or switch to -m flux-dev." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # Default steps per model
@@ -165,6 +188,8 @@ if [[ -z "$STEPS" ]]; then
         z-image-turbo) STEPS=9 ;;
         flux-schnell)  STEPS=4 ;;
         flux-dev)      STEPS=30 ;;
+        flux2-klein)   STEPS=20 ;;
+        ernie-image)   STEPS=20 ;;
     esac
 fi
 
@@ -306,6 +331,29 @@ for i in $(seq 1 "$COUNT"); do
                     -q "$QUANTIZE" \
                     --output "$OUT_PATH" \
                     "${LORA_ARGS[@]}"
+                ;;
+            flux2-klein)
+                # Item 20. flux2-klein-4b is the Apache 2.0 exception in the
+                # FLUX.2 family (klein 9B/dev are BFL non-commercial) — do
+                # not change this to a 9B variant without a license re-check.
+                # mflux-generate itself refuses FLUX.2 Klein ("Use
+                # mflux-generate-flux2 instead") — confirmed live.
+                mflux-generate-flux2 \
+                    --prompt "$FINAL_PROMPT" \
+                    --model flux2-klein-4b \
+                    --width "$WIDTH" --height "$HEIGHT" \
+                    --steps "$STEPS" --seed "$ITER_SEED" \
+                    -q "$QUANTIZE" \
+                    --output "$OUT_PATH"
+                ;;
+            ernie-image)
+                mflux-generate \
+                    --prompt "$FINAL_PROMPT" \
+                    --model ernie-image \
+                    --width "$WIDTH" --height "$HEIGHT" \
+                    --steps "$STEPS" --seed "$ITER_SEED" \
+                    -q "$QUANTIZE" \
+                    --output "$OUT_PATH"
                 ;;
         esac
     fi

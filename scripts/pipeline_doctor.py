@@ -670,6 +670,34 @@ def _check_pinned_commit(repo_path: Path, expected_commit: str) -> dict:
     return {"status": "ok"}
 
 
+def _check_min_package_version(venv_path: Path, package: str, min_version: str) -> dict:
+    """Item 20: mflux <0.18 silently lacks flux2-klein/ernie-image support —
+    the model names parse but mflux errors deep inside model loading rather
+    than at the point a user would think to check a version number. This
+    check surfaces that before dispatch, with an upgrade hint."""
+    pip = venv_path / "bin" / "pip"
+    if not pip.exists():
+        return {"status": "drift", "reason": "venv-missing", "path": str(venv_path)}
+    try:
+        result = subprocess.run(
+            [str(pip), "show", package],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+    except Exception as e:
+        return {"status": "drift", "reason": f"pip-show-failed: {e}"}
+    version = None
+    for line in result.stdout.splitlines():
+        if line.lower().startswith("version:"):
+            version = line.split(":", 1)[1].strip()
+            break
+    if version is None:
+        return {"status": "drift", "reason": f"{package}-not-installed"}
+    if _version_tuple(version) < _version_tuple(min_version):
+        return {"status": "drift", "reason": "version-too-old",
+                "actual_version": version, "min_version": min_version}
+    return {"status": "ok", "actual_version": version}
+
+
 def check_venv(venv: dict) -> dict:
     name = venv["name"]
     path = _expand(venv["path"])
@@ -682,6 +710,14 @@ def check_venv(venv: dict) -> dict:
         if commit_check["status"] != "ok":
             return {"status": "drift", "name": name, **commit_check,
                     "fix_command": f"cd {repo_path} && git checkout {pinned_commit}"}
+
+    min_pkg = venv.get("min_package_version")
+    if min_pkg:
+        pkg_check = _check_min_package_version(path, min_pkg["package"], min_pkg["version"])
+        if pkg_check["status"] != "ok":
+            return {"status": "drift", "name": name, **pkg_check,
+                    "fix_command": f"source {path}/bin/activate && "
+                                    f"pip install --upgrade {min_pkg['package']}"}
 
     if not lockfile.exists() or not lockfile.read_text().strip():
         return {"status": "skipped", "name": name,

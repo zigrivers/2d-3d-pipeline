@@ -2,6 +2,72 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R2.1: 2D model refresh (item 20)
+
+- `scripts/concept.sh` — two new `-m` models: `flux2-klein` (FLUX.2
+  klein 4B, Apache 2.0 — the FLUX.2 family's permissive exception; 9B
+  and dev variants stay unadded, those are BFL non-commercial) and
+  `ernie-image` (ERNIE-Image 8B, Apache 2.0, wired but currently
+  non-functional — see below). Default 20 steps each. `flux-schnell` is
+  not removed — still works, no longer the recommended LoRA path (see
+  SKILL.md).
+- `scripts/concept.sh` — `flux2-klein` dispatches through
+  `mflux-generate-flux2`, not the generic `mflux-generate`: confirmed
+  live that `mflux-generate` explicitly refuses FLUX.2 Klein
+  (`"FLUX.2 Klein is not supported by mflux-generate. Use
+  mflux-generate-flux2 instead."`). `ernie-image` uses the generic
+  `mflux-generate --model ernie-image` path (that part of the CLI does
+  accept it — the failure is deeper, in weight loading; see below).
+  Real smoke test on the Studio: `flux2-klein` generated a correct,
+  well-composed 3/4-view treasure chest in 163s (incl. first-time
+  weight download), `--json` carrying the correct
+  `"license_bucket": "commercial_safe"`.
+- **`ernie-image` is wired but currently broken upstream, confirmed
+  live, not shippable as working in this PR.** mflux 0.18.1 (the latest
+  release) expects a `text_encoder_2` weight component that doesn't
+  exist in either `baidu/ERNIE-Image`'s or `baidu/ERNIE-Image-Turbo`'s
+  actual current Hugging Face repo layout — verified by listing both
+  repos' files directly (neither has anything named `text_encoder_2`;
+  both have `pe`/`pe_tokenizer`/`text_encoder`/`transformer`/`vae`
+  instead). Both variants fail identically with `FileNotFoundError: No
+  safetensors files found in .../text_encoder_2`. This is an upstream
+  mflux/HF-repo mismatch, not a `concept.sh` wiring bug, and not fixable
+  from this side — the dispatch code is correct and needs no further
+  changes once mflux ships a fix. Documented clearly in `skill/SKILL.md`
+  and both setup guides so nobody wastes time chasing this blind.
+- `scripts/concept.sh` — `--lora` now hard-errors (not just warns) when
+  combined with `flux2-klein` or `ernie-image`: FLUX.1 LoRAs (trained
+  for `flux-schnell`/`flux-dev`) are a different checkpoint
+  architecture and are not interchangeable with these — without this
+  check, mflux would fail deep inside model loading with a confusing
+  tensor-shape error instead of a clear message naming the mismatch.
+  Verified live: `concept.sh "test" -m flux2-klein --lora
+  /tmp/fake.safetensors` exits 1 with the mismatch message before
+  touching mflux at all.
+- `scripts/_pipeline_lib.sh` — `license_bucket_for_model` gains
+  `flux2-klein`, `ernie-image` → `commercial_safe`.
+- `scripts/pipeline_doctor.py` — new generic `min_package_version` venv
+  check (parallel to R1.4's `pinned_commit` check): compares a venv's
+  installed package version via `pip show` against a manifest-declared
+  minimum, reports `drift` with an upgrade `fix_command` on mismatch.
+  `mflux-env` now declares `mflux >= 0.18` (required for both new
+  models — an older mflux parses the model name fine but fails deep
+  inside model loading, not at an obvious version-check point).
+  Verified both directions live: real install passes at 0.18.1,
+  correctly reports `version-too-old` against an artificially high
+  minimum.
+- `skill/SKILL.md` — Flow 1 gains a model-selection table (mirroring
+  Flow 2's generator matrix): `flux2-klein` recommended for new
+  FLUX-ecosystem LoRA work or built-in editing, `ernie-image` as the
+  prompt-adherence retry model when Z-Image Turbo's known
+  face-the-camera weakness keeps failing 3/4-view judging, `flux-schnell`
+  demoted to "legacy, still works." Z-Image Turbo stays the default
+  (principle P-A — no silent default change). New translation-adjacent
+  guidance on the LoRA-family-mismatch error.
+- Both setup guides — mflux ≥ 0.18 upgrade callout (with the exact
+  `pip show` / `pip install --upgrade mflux` commands) right after the
+  venv-creation step, plus a new smoke-test step for both models with a
+  warning against substituting the FLUX.2 klein 9B/dev variants.
 ## 2026-08-12 — R1.5: TRELLIS.2 vs SF3D/SPAR3D bake-off (docs-only)
 
 - `docs/model-review-trellis2.md` — real bake-off results filled into

@@ -187,7 +187,7 @@ don't have to pre-check.
 
 - `engine`: `"unity" | "unreal" | "none"` — overrides auto-detection
 - `engine_path`: relative-to-project or absolute path for final GLB staging
-- `defaults.generator_2d`: `"z-image-turbo" | "flux-schnell" | "flux-dev" | "qwen-image"`
+- `defaults.generator_2d`: `"z-image-turbo" | "flux-schnell" | "flux-dev" | "flux2-klein" | "ernie-image" | "qwen-image"`
 - `defaults.generator_3d`: `"sf3d" | "spar3d" | "trellis" | "trellis2"`
 - `defaults.polycount`: integer
 - `defaults.texture_resolution`: integer
@@ -249,9 +249,45 @@ routed to stderr so they don't corrupt the result.
 ## Flow 1: Text → 2D image
 
 Use `concept.sh` with the user's prompt. Default model is Z-Image Turbo
-(commercial_safe, ~10-30s). Use `flux-schnell` only when a LoRA is needed;
-use `flux-dev` only if user accepts non-commercial output (mention the
-bucket).
+(commercial_safe, ~10-30s) — this default is unchanged by item 20; don't
+switch it silently (principle P-A).
+
+| Situation | Model | Why |
+|---|---|---|
+| Default | `z-image-turbo` | Fast, `commercial_safe`, good general quality |
+| A FLUX-ecosystem LoRA is needed, or built-in instruction editing | `flux2-klein` (item 20) | Same checkpoint does generation + instruction edits; `commercial_safe` (Apache 2.0 — the FLUX.2 family's permissive exception; 9B/dev variants are NOT, don't substitute those) |
+| A FLUX.1-era LoRA specifically is needed (legacy) | `flux-schnell` | `commercial_safe`; kept working, no longer the recommended LoRA path — prefer `flux2-klein` for new LoRA work |
+| Prompt adherence is weak / 3/4-view compliance keeps failing on Z-Image | ~~`ernie-image`~~ **currently broken, see below** | Would be the strongest-at-release open t2i for prompt adherence; wired but non-functional pending an upstream fix |
+| User accepts non-commercial output | `flux-dev` | Mention the `non_commercial` bucket explicitly |
+
+**Z-Image Turbo's known weakness**: subjects tend to face the camera
+head-on rather than at a 3/4 angle, even with the game-asset prompt
+suffix. The suffix + `--judge`/`--best-of` (item 17) compensate for most
+of this, but if a user keeps getting front-on results despite judge
+rejections, suggest retrying with `flux2-klein` rather than just
+re-rolling Z-Image seeds indefinitely — `ernie-image` would be the
+other retry option but is currently broken (see below), so don't
+suggest it yet.
+
+**`ernie-image` is wired but currently non-functional** (verified live,
+2026-08-12): mflux 0.18.1 (the latest release) expects a `text_encoder_2`
+component that doesn't exist in either `baidu/ERNIE-Image`'s or
+`baidu/ERNIE-Image-Turbo`'s actual current Hugging Face repo layout
+(confirmed by listing both repos directly) — both fail identically with
+`FileNotFoundError: No safetensors files found in .../text_encoder_2`.
+This is an upstream mflux/HF-repo mismatch, not a pipeline bug, and not
+fixable by re-wiring `concept.sh`. Don't suggest `-m ernie-image` to a
+user until a newer mflux release fixes this — check `pip index versions
+mflux` for a release past 0.18.1 first. The dispatch code stays in
+place so no further wiring is needed once mflux does fix it.
+
+**LoRA + FLUX.2/ERNIE**: FLUX.1 LoRAs (trained for `flux-schnell` /
+`flux-dev`) are a different checkpoint architecture than `flux2-klein`
+or `ernie-image` and are not interchangeable — `concept.sh` errors out
+immediately with a message naming the mismatch rather than forwarding
+it into a confusing mflux crash. If a user wants LoRA output on the
+newer models, they need a LoRA actually trained for that model family;
+there isn't a curated one in this pipeline yet.
 
 For variations, use `-n N`. For specific names, `-o NAME`. Default output
 is in `<project>/assets/concept/` or `~/3d-pipeline/workspace/concept/`.
