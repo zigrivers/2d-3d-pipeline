@@ -560,6 +560,52 @@ Use this as a signal of generator output quality. Heuristics:
 For prints (Flow 4 / 5): higher cleanup counts correlate with
 slicer trouble. Worth surfacing when the destination is a printer.
 
+### LOD chain + UV re-unwrap (v0.4+, item 23)
+
+```bash
+generate.sh -i concept/chest.png --lods "3000,1000,300"
+generate.sh -i concept/chest.png --reuv
+```
+
+**`--lods "N,N,N"`** (descending target polycounts) emits
+`clean/<name>_lod{0,1,2}.glb` via `gltfpack`, plus runs a gltfpack
+optimize pass (no quantization) on the base clean GLB itself. Engine
+staging copies the whole LOD set alongside the main GLB when
+applicable, same `_lod0`/`_lod1`/... suffix.
+
+**Real finding worth relaying to the user:** gltfpack's default
+quality cap (`-se`, 1% max deviation) means the *actual* resulting
+polycount can land well above the target, especially for aggressive
+reductions — `generate.sh` uses `-sa` (aggressive) to get closer, but
+still won't hit the exact number. Each `cleanup.lods[]` entry in
+meta.json records both `polycount` (actual) and `polycount_target`
+(requested) — check both, don't assume they match. Requires
+`gltfpack` on PATH; **no Homebrew formula exists** — it's a prebuilt
+binary from
+[meshoptimizer's GitHub Releases](https://github.com/zeux/meshoptimizer/releases).
+`--lods` fails clearly (`status=error error=not_installed`) rather
+than silently skipping when missing.
+
+**`--reuv`** re-unwraps UVs from scratch via `xatlas` when item 13's
+UV check (`quality.uv.occupancy_ratio`) reports low occupancy
+(< 40%) or a high island count. **Warn-suggested, never automatic**
+— only run it when the user asks or you've flagged low occupancy and
+they agree.
+
+**Hard refusal, not just a warning:** `generate.sh` checks
+`quality.textures.textures_present` (already computed by the quality
+checks that run before this) and refuses with
+`status=error error=already_textured` if the mesh already has baked
+textures — re-unwrapping would invalidate them. `--reuv` is only for
+untextured meshes (vertex-color-only output, or before a
+`texture.sh --mode paint` pass — same "before paint" rule as item
+19's paint-mode refusal). Relay the refusal message; don't retry.
+
+**Known ceiling:** the re-unwrapped mesh does not preserve vertex
+colors if the input had them (`cleanup.reuv.vertex_colors_discarded`
+in meta.json) — reuv's own worldview is "about to be freshly
+textured," not "the vertex colors are the final look."
+
 ### Input quality check (v0.3+)
 
 When `pipeline-tools-env` is installed, the wrapper runs an input

@@ -32,7 +32,7 @@ def test_check_prereqs_finds_python_and_git():
 def test_check_prereqs_max_version_warn_does_not_fail():
     # Mock python3 to report 3.13 (above max)
     with patch("scripts.pipeline_doctor._binary_version",
-               side_effect=lambda name: "3.13.0" if name == "python3" else "2.40.0"):
+               side_effect=lambda name, version_flag="--version": "3.13.0" if name == "python3" else "2.40.0"):
         prereqs = [
             {"id": "python", "kind": "binary", "name": "python3",
              "min_version": "3.10", "max_version": "3.12",
@@ -48,17 +48,30 @@ def test_check_prereqs_max_version_warn_does_not_fail():
 
 def test_check_prereqs_min_version_fails():
     with patch("scripts.pipeline_doctor._binary_version",
-               side_effect=lambda name: "3.9.0" if name == "python3" else "2.40.0"):
+               side_effect=lambda name, version_flag="--version": "3.9.0" if name == "python3" else "2.40.0"):
         prereqs = [{"id": "python", "kind": "binary", "name": "python3",
                     "min_version": "3.10", "max_version_severity": "warn"}]
         result = pipeline_doctor.check_prereqs(manifest={"prereqs": prereqs})
         assert result["status"] == "critical"
 
 
+def test_check_prereqs_optional_missing_does_not_escalate():
+    """Item 23: required=false prereqs (e.g. gltfpack) missing -> info only."""
+    with patch("scripts.pipeline_doctor._binary_version", return_value=None):
+        prereqs = [
+            {"id": "gltfpack", "kind": "binary", "name": "gltfpack",
+             "required": False, "version_flag": ""},
+        ]
+        result = pipeline_doctor.check_prereqs(manifest={"prereqs": prereqs})
+        entry = next(p for p in result["prereqs"] if p["id"] == "gltfpack")
+        assert entry["status"] == "missing_optional"
+        assert result["status"] == "ok"
+
+
 def test_check_prereqs_max_version_fail_severity_escalates():
     """When max_version_severity is 'fail', exceeding max produces critical."""
     with patch("scripts.pipeline_doctor._binary_version",
-               side_effect=lambda name: "3.13.0"):
+               side_effect=lambda name, version_flag="--version": "3.13.0"):
         prereqs = [{"id": "python", "kind": "binary", "name": "python3",
                     "min_version": "3.10", "max_version": "3.12",
                     "max_version_severity": "fail"}]

@@ -104,7 +104,31 @@
             "error": { "type": ["string", "null"] }
           }
         },
-        "duration_seconds": { "type": ["number", "null"] }
+        "duration_seconds": { "type": ["number", "null"] },
+        "lods": {
+          "type": "array",
+          "description": "Item 23 — generate.sh --lods, one entry per LOD level via gltfpack.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "polycount": { "type": "integer", "description": "Actual resulting face count -- gltfpack's default quality cap (-se, 1% max deviation) means this can land well above polycount_target; -sa (aggressive) is used to get closer." },
+              "polycount_target": { "type": "integer" }
+            }
+          }
+        },
+        "reuv": {
+          "type": "object",
+          "description": "Item 23 — generate.sh --reuv (xatlas UV re-unwrap).",
+          "additionalProperties": true,
+          "properties": {
+            "applied": { "type": "boolean" },
+            "occupancy_before": { "type": "number" },
+            "occupancy_after": { "type": "number" },
+            "vertex_colors_discarded": { "type": "boolean" },
+            "duration_seconds": { "type": "number" }
+          }
+        }
       }
     },
 

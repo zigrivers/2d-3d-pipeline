@@ -432,12 +432,16 @@ def check_skill(manifest: dict, mutable_paths: list[str]) -> dict:
     return {"status": overall, "skill": rows}
 
 
-def _binary_version(name: str) -> str | None:
+def _binary_version(name: str, version_flag: str = "--version") -> str | None:
     if shutil.which(name) is None:
         return None
+    # Item 23: gltfpack has no --version flag (prints its usage banner, with
+    # the version on the first line, to any unrecognized/no args instead) --
+    # version_flag="" means "invoke with no args", not "pass an empty string
+    # as an argument".
+    cmd = [name] if version_flag == "" else [name, version_flag]
     try:
-        r = subprocess.run([name, "--version"], capture_output=True,
-                            text=True, timeout=5)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
     stdout = r.stdout if isinstance(r.stdout, str) else ""
@@ -462,12 +466,17 @@ def check_prereqs(manifest: dict) -> dict:
     overall = "ok"
     for p in (manifest.get("prereqs") or []):
         name = p["name"]
-        version = _binary_version(name)
-        entry: dict = {"id": p["id"], "name": name, "version": version}
+        version = _binary_version(name, p.get("version_flag", "--version"))
+        # Item 23: opt-in binaries (gltfpack) declare required=false so their
+        # absence surfaces as info, not a critical failure for every user who
+        # never runs --lods. Defaults to true (existing prereqs unaffected).
+        required = p.get("required", True)
+        entry: dict = {"id": p["id"], "name": name, "version": version, "required": required}
         if version is None:
-            entry["status"] = "missing"
+            entry["status"] = "missing" if required else "missing_optional"
             entry["install_hint"] = p.get("install_hint", "")
-            overall = "critical"
+            if required:
+                overall = "critical"
             rows.append(entry)
             continue
         vt = _version_tuple(version)
