@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -55,7 +56,24 @@ LICENSE_BUCKET = {
     "sf3d": "commercial_threshold",
     "spar3d": "commercial_threshold",
     "trellis": "non_commercial",
+    "trellis2": "commercial_safe",
 }
+
+# Wrappers print e.g. "Peak Memory: 11514.7 MB" or "Peak MLX memory: 31.86 GB"
+# to stderr (human logs, routed there under --json). Kept out of the JSON
+# result, so we scrape it here — item 15/R1.5's bake-off needs real memory
+# figures per generator, not just timings.
+_PEAK_MEM_RE = re.compile(r"Peak(?:\s+MLX)?\s+[Mm]emory:\s*([\d.]+)\s*(MB|GB)")
+
+
+def _extract_peak_memory_mb(text: str) -> float | None:
+    best: float | None = None
+    for match in _PEAK_MEM_RE.finditer(text):
+        value, unit = float(match.group(1)), match.group(2)
+        mb = value * 1024 if unit == "GB" else value
+        if best is None or mb > best:
+            best = mb
+    return round(best, 1) if best is not None else None
 
 EVAL_SCAFFOLD = {
     "prompt_match": None,
@@ -109,7 +127,7 @@ def _load_prompts(args) -> list[str]:
 
 
 def _run_wrapper(cmd: list[str], dry_run: bool) -> tuple[int, dict[str, Any] | None, str]:
-    """Run a wrapper under --json. Returns (exit_code, parsed_json_or_None, stderr_tail)."""
+    """Run a wrapper under --json. Returns (exit_code, parsed_json_or_None, stderr_full)."""
     if dry_run:
         return 0, {"status": "dry_run", "cmd": cmd}, ""
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -124,8 +142,7 @@ def _run_wrapper(cmd: list[str], dry_run: bool) -> tuple[int, dict[str, Any] | N
         except json.JSONDecodeError:
             parsed = None
         break
-    stderr_tail = "\n".join(proc.stderr.splitlines()[-20:])
-    return proc.returncode, parsed, stderr_tail
+    return proc.returncode, parsed, proc.stderr
 
 
 def main() -> int:
@@ -149,6 +166,8 @@ def main() -> int:
     p.add_argument("--texture-resolution", type=int, default=0)
     p.add_argument("--skip-2d", action="store_true")
     p.add_argument("--skip-3d", action="store_true")
+    p.add_argument("--judge-mesh", dest="judge_mesh", action="store_true",
+                   help="Item 18 — score each 3D output with generate.sh --judge-mesh")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
@@ -170,7 +189,7 @@ def main() -> int:
             print(f"ERROR: unknown 2D model: {m}", file=sys.stderr)
             return 2
     for g in generators:
-        if g not in {"sf3d", "spar3d", "trellis"}:
+        if g not in {"sf3d", "spar3d", "trellis", "trellis2"}:
             print(f"ERROR: unknown 3D generator: {g}", file=sys.stderr)
             return 2
 
@@ -197,6 +216,7 @@ def main() -> int:
         "texture_resolution": args.texture_resolution,
         "skip_2d": args.skip_2d,
         "skip_3d": args.skip_3d,
+        "judge_mesh": args.judge_mesh,
         "dry_run": args.dry_run,
         "prompts": prompts,
         "runs": [],
@@ -219,7 +239,7 @@ def main() -> int:
                 if args.project_root:
                     cmd.extend(["--project", args.project_root])
                 t0 = time.time()
-                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                rc, j, stderr_full = _run_wrapper(cmd, args.dry_run)
                 dt = time.time() - t0
                 outputs = (j or {}).get("outputs", []) if j else []
                 concept_paths[(prompt, model_2d)] = outputs
@@ -230,10 +250,11 @@ def main() -> int:
                     "license_bucket": LICENSE_BUCKET.get(model_2d, "unknown"),
                     "exit_code": rc,
                     "duration_seconds": round(dt, 2),
+                    "peak_memory_mb": _extract_peak_memory_mb(stderr_full),
                     "outputs": outputs,
                     "output_sizes_bytes": [_file_size(o) for o in outputs],
                     "status": "ok" if rc == 0 else "error",
-                    "stderr_tail": stderr_tail if rc != 0 else "",
+                    "stderr_tail": "\n".join(stderr_full.splitlines()[-20:]) if rc != 0 else "",
                     "wrapper_json": j,
                 })
 
@@ -269,8 +290,10 @@ def main() -> int:
                     cmd.extend(["-p", str(args.polycount)])
                 if args.texture_resolution:
                     cmd.extend(["-t", str(args.texture_resolution)])
+                if args.judge_mesh:
+                    cmd.append("--judge-mesh")
                 t0 = time.time()
-                rc, j, stderr_tail = _run_wrapper(cmd, args.dry_run)
+                rc, j, stderr_full = _run_wrapper(cmd, args.dry_run)
                 dt = time.time() - t0
                 clean_path = (j or {}).get("clean_path", "")
                 raw_path = (j or {}).get("raw_path", "")
@@ -283,12 +306,15 @@ def main() -> int:
                     "license_bucket": LICENSE_BUCKET.get(gen, "unknown"),
                     "exit_code": rc,
                     "duration_seconds": round(dt, 2),
+                    "peak_memory_mb": _extract_peak_memory_mb(stderr_full),
                     "raw_path": raw_path,
                     "clean_path": clean_path,
                     "raw_size_bytes": _file_size(raw_path),
                     "clean_size_bytes": _file_size(clean_path),
+                    "judge_mesh_verdict": (j or {}).get("judge_mesh_verdict"),
+                    "judge_mesh_rejected": (j or {}).get("judge_mesh_rejected"),
                     "status": "ok" if rc == 0 else "error",
-                    "stderr_tail": stderr_tail if rc != 0 else "",
+                    "stderr_tail": "\n".join(stderr_full.splitlines()[-20:]) if rc != 0 else "",
                     "wrapper_json": j,
                 })
 
