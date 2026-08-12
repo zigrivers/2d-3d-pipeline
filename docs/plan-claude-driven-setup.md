@@ -2896,7 +2896,7 @@ source /tmp/lockgen-mflux/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install mflux Pillow
 pip freeze --exclude pip --exclude setuptools --exclude wheel \
-    > /Users/kenallred/Documents/dev-projects/2d-3d-pipeline/scripts/lockfiles/mflux-env.txt
+    > /Users/kenallred/Developer/2d-3d-pipeline/scripts/lockfiles/mflux-env.txt
 deactivate
 rm -rf /tmp/lockgen-mflux
 ```
@@ -2909,7 +2909,7 @@ source /tmp/lockgen-pt/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install trimesh numpy scipy Pillow "rembg[cpu]" open_clip_torch torch tqdm requests
 pip freeze --exclude pip --exclude setuptools --exclude wheel \
-    > /Users/kenallred/Documents/dev-projects/2d-3d-pipeline/scripts/lockfiles/pipeline-tools-env.txt
+    > /Users/kenallred/Developer/2d-3d-pipeline/scripts/lockfiles/pipeline-tools-env.txt
 deactivate
 rm -rf /tmp/lockgen-pt
 ```

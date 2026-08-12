@@ -70,10 +70,12 @@ def write(queue_dir: Path, *, machine: str,
     t = threading.Thread(target=do_rename, daemon=True)
     t.start()
     if not finished.wait(timeout=timeout_seconds):
-        result["status"] = "degraded"
-        result["reason"] = f"rename did not complete within {timeout_seconds}s"
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        # Fresh dict: the worker thread may still finish (or fail) later and
+        # mutate `result`; the caller must see a stable "degraded" outcome.
+        return {"status": "degraded", "ts": ts,
+                "reason": f"rename did not complete within {timeout_seconds}s"}
     return result

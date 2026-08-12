@@ -2,6 +2,29 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-11 — heartbeat race fix + post-squash repo hygiene
+
+- `scripts/_heartbeat.py` — `write()` timeout path now returns a fresh
+  result dict. Previously the still-running rename thread could mutate
+  the shared dict after return (its `tmp.replace` races the timeout
+  path's `tmp.unlink`), flipping a caller's `degraded` outcome to
+  `failed` (`FileNotFoundError`). Surfaced as an order-dependent
+  failure of `test_heartbeat_write_timeout_returns_degraded`; suite now
+  green (132 passed, verified 3 consecutive runs). Embeds regenerated.
+- `docs/pipeline_decision_analysis.md` (+ `.html`) — committed the
+  v0.3 nine-decision analysis record that resolved the improvement-spec
+  gates (was sitting untracked from a prior session).
+- `docs/plan-claude-driven-setup.md` — lockfile-generation paths
+  corrected to the repo's current location (`~/Developer/...`).
+- Removed a stale Finder duplicate (`plan-claude-driven-setup 2.md`,
+  byte-subset of the tracked file) and a misplaced root
+  `asset-pipeline-bundle.zip` (regenerable via `make bundle` into
+  `dist/`). `.antigravitycli/` added to `.gitignore`.
+- Note: PR #2's squash flattened 25 previously-unpushed local commits
+  (P1.0–P5.8, the v0.4 Claude-driven-setup workstream) into one commit
+  on `main`. Granular history preserved on the
+  `archive/v0.4-setup-workstream` branch.
+
 ## 2026-05-20 — Q5: pipeline-doctor CI integration
 
 - `scripts/pipeline_doctor.py` — new `--check structure` subcheck (CI-only,
