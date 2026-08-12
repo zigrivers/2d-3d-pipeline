@@ -11799,12 +11799,14 @@ def write(queue_dir: Path, *, machine: str,
     t = threading.Thread(target=do_rename, daemon=True)
     t.start()
     if not finished.wait(timeout=timeout_seconds):
-        result[&quot;status&quot;] = &quot;degraded&quot;
-        result[&quot;reason&quot;] = f&quot;rename did not complete within {timeout_seconds}s&quot;
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        # Fresh dict: the worker thread may still finish (or fail) later and
+        # mutate `result`; the caller must see a stable &quot;degraded&quot; outcome.
+        return {&quot;status&quot;: &quot;degraded&quot;, &quot;ts&quot;: ts,
+                &quot;reason&quot;: f&quot;rename did not complete within {timeout_seconds}s&quot;}
     return result
 PIPELINE_EOF</pre></div>
             </details>

@@ -1,0 +1,1671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2d-3d-pipeline · Decision Analysis Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --base: #1e1e2e;
+        --mantle: #181825;
+        --crust: #11111b;
+        --surface0: #313244;
+        --surface1: #45475a;
+        --surface2: #585b70;
+        --text: #cdd6f4;
+        --subtext1: #bac2de;
+        --subtext0: #a6adc8;
+        --mauve: #cba6f7;
+        --pink: #f5c2e7;
+        --green: #a6e3a1;
+        --yellow: #f9e2af;
+        --red: #f38ba8;
+        --sky: #89dceb;
+        --blue: #89b4fa;
+        --lavender: #b4befe;
+        
+        /* Speaker custom tints */
+        --arch-color: #cba6f7; /* Mauve */
+        --dev-color: #89b4fa;  /* Blue */
+        --legal-color: #f9e2af; /* Yellow */
+        --perf-color: #f5c2e7;  /* Pink */
+    }
+    
+    * {
+        box-sizing: border-box;
+        scrollbar-width: thin;
+        scrollbar-color: var(--surface1) var(--mantle);
+    }
+    
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: var(--mantle);
+    }
+    ::-webkit-scrollbar-thumb {
+        background: var(--surface1);
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: var(--surface2);
+    }
+    
+    body {
+        margin: 0;
+        padding: 0;
+        background: var(--base);
+        color: var(--text);
+        font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+    }
+    
+    header {
+        background: linear-gradient(180deg, var(--crust) 0%, var(--base) 100%);
+        border-bottom: 1px solid var(--surface0);
+        padding: 2.5rem 1.5rem 1.5rem;
+    }
+    
+    .header-container {
+        max-width: 1200px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    
+    .header-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        font-size: 0.85rem;
+        color: var(--subtext0);
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .badge {
+        padding: 0.25rem 0.6rem;
+        border-radius: 50px;
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+    
+    .badge-primary { background: rgba(203, 166, 247, 0.15); color: var(--mauve); border: 1px solid rgba(203, 166, 247, 0.3); }
+    .badge-success { background: rgba(166, 227, 161, 0.15); color: var(--green); border: 1px solid rgba(166, 227, 161, 0.3); }
+    .badge-warning { background: rgba(249, 226, 175, 0.15); color: var(--yellow); border: 1px solid rgba(249, 226, 175, 0.3); }
+    .badge-danger { background: rgba(243, 139, 168, 0.15); color: var(--red); border: 1px solid rgba(243, 139, 168, 0.3); }
+    .badge-info { background: rgba(137, 220, 235, 0.15); color: var(--sky); border: 1px solid rgba(137, 220, 235, 0.3); }
+    
+    h1 {
+        font-size: 2.5rem;
+        margin: 0;
+        background: linear-gradient(90deg, var(--mauve) 0%, var(--pink) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+    }
+    
+    .tagline {
+        color: var(--subtext1);
+        font-size: 1.1rem;
+        margin: 0.25rem 0 1.5rem;
+        font-weight: 300;
+    }
+    
+    /* Navigation Tabs */
+    .tabs-nav {
+        display: flex;
+        gap: 0.5rem;
+        border-bottom: 1px solid var(--surface0);
+        margin-top: 1rem;
+        padding-bottom: 1px;
+        overflow-x: auto;
+    }
+    
+    .tab-btn {
+        background: none;
+        border: none;
+        color: var(--subtext0);
+        padding: 0.75rem 1.25rem;
+        font-family: 'Outfit', sans-serif;
+        font-size: 0.95rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.25s ease;
+        border-bottom: 2px solid transparent;
+        white-space: nowrap;
+        border-radius: 6px 6px 0 0;
+    }
+    
+    .tab-btn:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.03);
+    }
+    
+    .tab-btn.active {
+        color: var(--pink);
+        border-bottom-color: var(--pink);
+        background: rgba(245, 194, 231, 0.05);
+    }
+    
+    main {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 2rem 1.5rem 6rem;
+    }
+    
+    .tab-content {
+        display: none;
+        animation: fadeIn 0.4s ease forwards;
+    }
+    
+    .tab-content.active {
+        display: block;
+    }
+    
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    /* Grid system */
+    .grid-2 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2.5rem;
+    }
+    
+    .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2.5rem;
+    }
+    
+    /* Cards styling */
+    .card {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 12px;
+        padding: 1.5rem;
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .card:hover {
+        border-color: var(--surface2);
+        transform: translateY(-2px);
+        box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+    }
+    
+    .card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 3px;
+        background: linear-gradient(90deg, var(--sky) 0%, var(--mauve) 100%);
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    }
+    
+    .card:hover::before {
+        opacity: 1;
+    }
+    
+    .card-title {
+        font-size: 1.25rem;
+        color: var(--lavender);
+        margin: 0 0 0.75rem;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .card-desc {
+        color: var(--subtext1);
+        font-size: 0.95rem;
+        margin-bottom: 1.25rem;
+    }
+    
+    /* System stats layout */
+    .stat-row {
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        background: var(--crust);
+        border: 1px solid var(--surface0);
+        border-radius: 10px;
+        padding: 1.25rem;
+        margin-bottom: 2rem;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    
+    .stat-item {
+        text-align: center;
+        padding: 0.5rem 1rem;
+        min-width: 120px;
+    }
+    
+    .stat-val {
+        font-size: 2.2rem;
+        font-weight: 800;
+        color: var(--mauve);
+        line-height: 1;
+        margin-bottom: 0.25rem;
+        font-family: 'Outfit', sans-serif;
+    }
+    
+    .stat-lbl {
+        font-size: 0.8rem;
+        color: var(--subtext0);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }
+    
+    /* Interactive accordion for debates */
+    .accordion-item {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        overflow: hidden;
+        transition: border-color 0.25s ease;
+    }
+    
+    .accordion-item:hover {
+        border-color: var(--surface2);
+    }
+    
+    .accordion-header {
+        padding: 1.25rem 1.5rem;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        user-select: none;
+        transition: background-color 0.2s ease;
+    }
+    
+    .accordion-header:hover {
+        background: rgba(255, 255, 255, 0.01);
+    }
+    
+    .accordion-title-block {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    
+    .accordion-num {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        color: var(--mauve);
+        background: var(--crust);
+        width: 32px;
+        height: 32px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.9rem;
+    }
+    
+    .accordion-title {
+        font-size: 1.15rem;
+        font-weight: 600;
+        color: var(--text);
+    }
+    
+    .accordion-icon {
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        color: var(--subtext0);
+    }
+    
+    .accordion-item.active .accordion-icon {
+        transform: rotate(180deg);
+        color: var(--pink);
+    }
+    
+    .accordion-content {
+        max-height: 0;
+        overflow: hidden;
+        transition: max-height 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+        background: var(--crust);
+        border-top: 0 solid var(--surface0);
+    }
+    
+    .accordion-item.active .accordion-content {
+        border-top-width: 1px;
+    }
+    
+    .accordion-inner {
+        padding: 1.5rem;
+    }
+    
+    .tension-box {
+        background: rgba(137, 180, 250, 0.05);
+        border-left: 3px solid var(--blue);
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin-bottom: 1.5rem;
+        font-size: 0.95rem;
+    }
+    
+    .tension-title {
+        font-weight: 700;
+        color: var(--blue);
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        font-size: 0.8rem;
+        letter-spacing: 0.05em;
+    }
+    
+    /* Debate transcription style */
+    .chat-transcript {
+        display: flex;
+        flex-direction: column;
+        gap: 1.25rem;
+        margin-bottom: 1.75rem;
+    }
+    
+    .chat-bubble {
+        display: flex;
+        gap: 1rem;
+        align-items: flex-start;
+    }
+    
+    .speaker-avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: var(--mantle);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        font-size: 1.1rem;
+        flex-shrink: 0;
+        border: 1px solid var(--surface1);
+        text-transform: uppercase;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .avatar-arch { color: var(--arch-color); border-color: var(--arch-color); background: rgba(203, 166, 247, 0.1); }
+    .avatar-dev { color: var(--dev-color); border-color: var(--dev-color); background: rgba(137, 180, 250, 0.1); }
+    .avatar-legal { color: var(--legal-color); border-color: var(--legal-color); background: rgba(249, 226, 175, 0.1); }
+    .avatar-perf { color: var(--perf-color); border-color: var(--perf-color); background: rgba(245, 194, 231, 0.1); }
+    
+    .chat-msg-block {
+        flex-grow: 1;
+    }
+    
+    .speaker-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.25rem;
+    }
+    
+    .speaker-name {
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: var(--text);
+    }
+    
+    .speaker-role {
+        font-size: 0.75rem;
+        color: var(--subtext0);
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .chat-text {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        padding: 0.85rem 1.1rem;
+        border-radius: 0 12px 12px 12px;
+        font-size: 0.95rem;
+        color: var(--subtext1);
+    }
+    
+    .verdict-box {
+        background: rgba(166, 227, 161, 0.05);
+        border: 1px solid rgba(166, 227, 161, 0.2);
+        border-radius: 8px;
+        padding: 1.25rem;
+    }
+    
+    .verdict-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+    }
+    
+    .verdict-title {
+        font-weight: 700;
+        color: var(--green);
+        text-transform: uppercase;
+        font-size: 0.85rem;
+        letter-spacing: 0.05em;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    
+    .verdict-text {
+        font-size: 0.95rem;
+        color: var(--text);
+        margin: 0;
+    }
+    
+    /* Expert profile tab card */
+    .expert-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1.5rem;
+    }
+    
+    .expert-card {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 12px;
+        padding: 1.75rem 1.5rem;
+        text-align: center;
+        transition: all 0.3s ease;
+    }
+    
+    .expert-card:hover {
+        transform: translateY(-5px);
+        border-color: var(--pink);
+    }
+    
+    .expert-avatar-big {
+        width: 80px;
+        height: 80px;
+        border-radius: 20px;
+        margin: 0 auto 1.25rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2.2rem;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .expert-name {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: var(--text);
+        margin: 0 0 0.25rem;
+    }
+    
+    .expert-title {
+        font-size: 0.85rem;
+        color: var(--pink);
+        font-family: 'JetBrains Mono', monospace;
+        margin-bottom: 1.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    
+    .expert-focus {
+        font-size: 0.9rem;
+        color: var(--subtext1);
+        line-height: 1.5;
+        border-top: 1px solid var(--surface0);
+        padding-top: 1rem;
+        text-align: left;
+    }
+    
+    /* Tables style */
+    .table-container {
+        overflow-x: auto;
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 10px;
+        margin-bottom: 2.5rem;
+    }
+    
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+        font-size: 0.95rem;
+    }
+    
+    th {
+        background: var(--crust);
+        color: var(--lavender);
+        font-weight: 600;
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--surface0);
+        font-family: 'Outfit', sans-serif;
+    }
+    
+    td {
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--surface0);
+        color: var(--subtext1);
+        vertical-align: middle;
+    }
+    
+    tr:last-child td {
+        border-bottom: none;
+    }
+    
+    tr:hover td {
+        background: rgba(255, 255, 255, 0.01);
+        color: var(--text);
+    }
+    
+    code {
+        font-family: 'JetBrains Mono', monospace;
+        background: var(--crust);
+        color: var(--green);
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+        font-size: 0.88em;
+    }
+    
+    /* Custom SVGs Container */
+    .svg-container {
+        background: var(--crust);
+        border: 1px solid var(--surface0);
+        border-radius: 10px;
+        padding: 1.5rem;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin-bottom: 1.5rem;
+        overflow-x: auto;
+    }
+    
+    .svg-container svg {
+        min-width: 600px;
+        width: 100%;
+        max-width: 850px;
+    }
+    
+    /* Search Bar Filter */
+    .filter-bar {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    
+    .search-input {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        color: var(--text);
+        font-family: 'Outfit', sans-serif;
+        font-size: 0.95rem;
+        flex-grow: 1;
+        transition: all 0.2s ease;
+    }
+    
+    .search-input:focus {
+        border-color: var(--mauve);
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.15);
+    }
+    
+    .filter-btn {
+        background: var(--mantle);
+        border: 1px solid var(--surface0);
+        border-radius: 8px;
+        padding: 0.75rem 1.25rem;
+        color: var(--subtext1);
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: all 0.2s ease;
+        font-family: 'Outfit', sans-serif;
+        font-weight: 500;
+    }
+    
+    .filter-btn:hover {
+        border-color: var(--mauve);
+        color: var(--text);
+    }
+    
+    .filter-btn.active {
+        background: rgba(203, 166, 247, 0.1);
+        border-color: var(--mauve);
+        color: var(--mauve);
+    }
+    
+    footer {
+        max-width: 1200px;
+        margin: 4rem auto 0;
+        padding: 2rem 1.5rem;
+        border-top: 1px solid var(--surface0);
+        text-align: center;
+        color: var(--subtext0);
+        font-size: 0.85rem;
+    }
+    
+    footer a {
+        color: var(--sky);
+        text-decoration: none;
+    }
+    
+    footer a:hover {
+        text-decoration: underline;
+    }
+    
+    /* Animation helper for tabs */
+    .fade-out {
+        animation: fadeOut 0.25s ease forwards;
+    }
+    
+    @keyframes fadeOut {
+        from { opacity: 1; transform: translateY(0); }
+        to { opacity: 0; transform: translateY(-10px); }
+    }
+    
+    /* SVG elements micro-interactions */
+    .svg-node {
+        transition: all 0.3s ease;
+        cursor: pointer;
+    }
+    .svg-node:hover {
+        filter: brightness(1.2);
+    }
+    
+    .svg-bar {
+        transition: width 1s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    
+    /* Key decision highlight tags on the dashboard */
+    .decision-badge {
+        font-size: 0.7rem;
+        font-family: 'JetBrains Mono', monospace;
+        background: rgba(245, 194, 231, 0.1);
+        color: var(--pink);
+        padding: 0.15rem 0.4rem;
+        border-radius: 4px;
+        border: 1px solid rgba(245, 194, 231, 0.2);
+    }
+</style>
+</head>
+<body>
+
+<header>
+    <div class="header-container">
+        <div class="header-meta">
+            <span class="badge badge-primary">Release: v0.3.x</span>
+            <span>·</span>
+            <span>Target: macOS (Apple Silicon)</span>
+            <span>·</span>
+            <span>Decision Log Hub</span>
+        </div>
+        <h1>2D-to-3D Asset Pipeline</h1>
+        <div class="tagline">Interactive Decision Analysis, Expert Panel Debates & Architectural Reviews.</div>
+        
+        <nav class="tabs-nav">
+            <button class="tab-btn active" onclick="switchTab(event, 'tab-dashboard')">Overview Dashboard</button>
+            <button class="tab-btn" onclick="switchTab(event, 'tab-experts')">Expert Panel</button>
+            <button class="tab-btn" onclick="switchTab(event, 'tab-debates')">Expert Debates</button>
+            <button class="tab-btn" onclick="switchTab(event, 'tab-matrix')">Recommendations Matrix</button>
+        </nav>
+    </div>
+</header>
+
+<main>
+    
+    <!-- TAB 1: OVERVIEW DASHBOARD -->
+    <section id="tab-dashboard" class="tab-content active">
+        <div class="stat-row">
+            <div class="stat-item">
+                <div class="stat-val">9</div>
+                <div class="stat-lbl">Core Decisions</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-val">15 → 6 GB</div>
+                <div class="stat-lbl">Venv Optimization</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-val">100M</div>
+                <div class="stat-lbl">MAU License Floor</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-val">Auto</div>
+                <div class="stat-lbl">BG Removal Mode</div>
+            </div>
+        </div>
+        
+        <h2 style="color:var(--lavender); margin: 0 0 1rem;">Asset Production Lifecycle Flow</h2>
+        <p style="color:var(--subtext1); margin-top:0; margin-bottom: 1.5rem;">Click workflow blocks to explore related decisions below.</p>
+        
+        <div class="svg-container">
+            <!-- Pipeline Flow Diagram SVG -->
+            <svg viewBox="0 0 800 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <!-- Grid background for look -->
+                <defs>
+                    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+                        <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,0.02)" stroke-width="1"/>
+                    </pattern>
+                    <linearGradient id="grad-mauve-pink" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stop-color="#cba6f7"/>
+                        <stop offset="100%" stop-color="#f5c2e7"/>
+                    </linearGradient>
+                </defs>
+                <rect width="100%" height="100%" fill="url(#grid)" rx="8"/>
+                
+                <!-- Connections -->
+                <path d="M 120 120 L 160 120" stroke="#313244" stroke-width="3" marker-end="url(#arrow)"/>
+                <path d="M 280 120 L 320 120" stroke="#313244" stroke-width="3"/>
+                <path d="M 440 120 L 480 120" stroke="#313244" stroke-width="3"/>
+                <path d="M 600 120 L 640 120" stroke="#313244" stroke-width="3"/>
+                
+                <!-- Markers -->
+                <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#313244"/>
+                    </marker>
+                </defs>
+                
+                <!-- Step 1: Input -->
+                <g class="svg-node" onclick="showSpecificDebate(4)">
+                    <rect x="20" y="70" width="100" height="100" rx="8" fill="#181825" stroke="#45475a" stroke-width="2"/>
+                    <text x="70" y="115" font-family="'Outfit', sans-serif" font-weight="700" font-size="14" fill="#89dceb" text-anchor="middle">1. INPUT</text>
+                    <text x="70" y="135" font-family="'JetBrains Mono', monospace" font-size="10" fill="#a6adc8" text-anchor="middle">Image Quality</text>
+                    <text x="70" y="150" font-family="'JetBrains Mono', monospace" font-size="10" fill="#a6adc8" text-anchor="middle">&amp; Normalisation</text>
+                </g>
+                
+                <!-- Step 2: Preprocess -->
+                <g class="svg-node" onclick="showSpecificDebate(2)">
+                    <rect x="160" y="70" width="120" height="100" rx="8" fill="#181825" stroke="#45475a" stroke-width="2"/>
+                    <text x="220" y="110" font-family="'Outfit', sans-serif" font-weight="700" font-size="14" fill="#cba6f7" text-anchor="middle">2. PREPROCESS</text>
+                    <text x="220" y="130" font-family="'JetBrains Mono', monospace" font-size="10" fill="#a6adc8" text-anchor="middle">rembg (auto)</text>
+                    <text x="220" y="145" font-family="'JetBrains Mono', monospace" font-size="10" fill="#cba6f7" text-anchor="middle">[Decision 2]</text>
+                </g>
+                
+                <!-- Step 3: Generation -->
+                <g class="svg-node" onclick="showSpecificDebate(5)">
+                    <rect x="320" y="70" width="120" height="100" rx="8" fill="#181825" stroke="#f5c2e7" stroke-width="2"/>
+                    <text x="380" y="105" font-family="'Outfit', sans-serif" font-weight="700" font-size="14" fill="#f5c2e7" text-anchor="middle">3. GENERATION</text>
+                    <text x="380" y="125" font-family="'JetBrains Mono', monospace" font-size="9" fill="#a6adc8" text-anchor="middle">mflux / ComfyUI</text>
+                    <text x="380" y="140" font-family="'JetBrains Mono', monospace" font-size="9" fill="#a6adc8" text-anchor="middle">Multi-View lane</text>
+                    <text x="380" y="155" font-family="'JetBrains Mono', monospace" font-size="10" fill="#f5c2e7" text-anchor="middle">[Decisions 4,5]</text>
+                </g>
+                
+                <!-- Step 4: Cleanup -->
+                <g class="svg-node" onclick="showSpecificDebate(1)">
+                    <rect x="480" y="70" width="120" height="100" rx="8" fill="#181825" stroke="#45475a" stroke-width="2"/>
+                    <text x="540" y="110" font-family="'Outfit', sans-serif" font-weight="700" font-size="14" fill="#a6e3a1" text-anchor="middle">4. CLEANUP</text>
+                    <text x="540" y="130" font-family="'JetBrains Mono', monospace" font-size="10" fill="#a6adc8" text-anchor="middle">clean_asset.py</text>
+                    <text x="540" y="145" font-family="'JetBrains Mono', monospace" font-size="10" fill="#a6e3a1" text-anchor="middle">meta.json locking</text>
+                </g>
+                
+                <!-- Step 5: Outputs -->
+                <g class="svg-node" onclick="showSpecificDebate(7)">
+                    <rect x="640" y="70" width="140" height="100" rx="8" fill="#181825" stroke="#45475a" stroke-width="2"/>
+                    <text x="710" y="105" font-family="'Outfit', sans-serif" font-weight="700" font-size="14" fill="#89b4fa" text-anchor="middle">5. EXPORT/CHECKS</text>
+                    <text x="710" y="125" font-family="'JetBrains Mono', monospace" font-size="9" fill="#a6adc8" text-anchor="middle">Watertight / Print</text>
+                    <text x="710" y="140" font-family="'JetBrains Mono', monospace" font-size="9" fill="#a6adc8" text-anchor="middle">Turntable preview</text>
+                    <text x="710" y="155" font-family="'JetBrains Mono', monospace" font-size="10" fill="#89b4fa" text-anchor="middle">[Decisions 6,7,8]</text>
+                </g>
+            </svg>
+        </div>
+        
+        <div class="grid-3" style="margin-top: 2rem;">
+            <div class="card" onclick="showSpecificDebate(9)" style="cursor:pointer;">
+                <div class="card-title">
+                    <span>Virtual Env Savings</span>
+                    <span class="decision-badge">Decision 9</span>
+                </div>
+                <p class="card-desc">How consolidating six duplicate dependencies into one venv saved 9 GB of developer disk storage.</p>
+                <div style="height: 60px; display: flex; align-items: flex-end; gap: 10px; background: var(--crust); padding: 10px; border-radius: 6px;">
+                    <div style="flex-grow: 1; text-align: center;">
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--subtext0);">15 GB</div>
+                        <div style="height: 25px; background: var(--red); border-radius: 3px;"></div>
+                        <div style="font-size: 8px; color: var(--subtext0); margin-top:2px;">Old Duplicated</div>
+                    </div>
+                    <div style="flex-grow: 1; text-align: center;">
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--green);">6 GB</div>
+                        <div style="height: 10px; background: var(--green); border-radius: 3px;"></div>
+                        <div style="font-size: 8px; color: var(--subtext0); margin-top:2px;">Consolidated</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card" onclick="showSpecificDebate(3)" style="cursor:pointer;">
+                <div class="card-title">
+                    <span>Commercial Licensing</span>
+                    <span class="decision-badge">Decision 3</span>
+                </div>
+                <p class="card-desc">Approved Hunyuan3D-Paint under a 100M active user boundary for game releases of Grithkin and GripCraft.</p>
+                <span class="badge badge-success">Commercial Safe &lt; 100M MAU</span>
+            </div>
+            
+            <div class="card" onclick="showSpecificDebate(5)" style="cursor:pointer;">
+                <div class="card-title">
+                    <span>Multi-View Benchmarks</span>
+                    <span class="decision-badge">Decision 5</span>
+                </div>
+                <p class="card-desc">Evaluating candidate backends. Automated licensing disqualification for InstantMesh; OpenLRM is commercial-safe.</p>
+                <span class="badge badge-warning">Empirical Verification required</span>
+            </div>
+        </div>
+    </section>
+    
+    <!-- TAB 2: EXPERT PANEL -->
+    <section id="tab-experts" class="tab-content">
+        <div class="expert-grid">
+            
+            <!-- Expert 1 -->
+            <div class="expert-card">
+                <div class="expert-avatar-big avatar-arch">ET</div>
+                <h3 class="expert-name">Dr. Evelyn Thorne</h3>
+                <div class="expert-title">Lead Pipeline Architect</div>
+                <div class="expert-focus">
+                    <strong>Focus:</strong> Concurrency validation, clean APIs, schema design, and system maintainability.
+                    <br><br>
+                    <strong>Core Philosophy:</strong> Structure and predictability are critical when non-technical designers interact with automation layers.
+                </div>
+            </div>
+            
+            <!-- Expert 2 -->
+            <div class="expert-card">
+                <div class="expert-avatar-big avatar-dev">KA</div>
+                <h3 class="expert-name">Ken Allred</h3>
+                <div class="expert-title">Lead Game Developer</div>
+                <div class="expert-focus">
+                    <strong>Focus:</strong> Asset quality, production velocity, generator suitability, and editor integration.
+                    <br><br>
+                    <strong>Core Philosophy:</strong> A robust pipeline is useless if it restricts artistic identity or produces low-quality geometry.
+                </div>
+            </div>
+            
+            <!-- Expert 3 -->
+            <div class="expert-card">
+                <div class="expert-avatar-big avatar-legal">CV</div>
+                <h3 class="expert-name">Clara Vance</h3>
+                <div class="expert-title">Legal &amp; Compliance Counsel</div>
+                <div class="expert-focus">
+                    <strong>Focus:</strong> Licensing buckets, MAU constraints, region exclusion checks, and copyright safety.
+                    <br><br>
+                    <strong>Core Philosophy:</strong> Mitigate legal exposure aggressively before a game release, ensuring clear separation of GPL assets.
+                </div>
+            </div>
+            
+            <!-- Expert 4 -->
+            <div class="expert-card">
+                <div class="expert-avatar-big avatar-perf">JM</div>
+                <h3 class="expert-name">Jax Mercer</h3>
+                <div class="expert-title">Performance &amp; Systems Eng.</div>
+                <div class="expert-focus">
+                    <strong>Focus:</strong> Hardware limitations, memory leaks, thermal gating, and disk storage optimization.
+                    <br><br>
+                    <strong>Core Philosophy:</strong> Every process must earn its keep. Laptop resources are precious and must not be wasted.
+                </div>
+            </div>
+            
+        </div>
+    </section>
+    
+    <!-- TAB 3: EXPERT DEBATES -->
+    <section id="tab-debates" class="tab-content">
+        <div class="filter-bar">
+            <input type="text" id="debateSearch" class="search-input" placeholder="Search debates by title, keyword, or expert name..." onkeyup="filterDebates()">
+            <button class="filter-btn active" onclick="filterCategory('all', event)">All Decisions</button>
+            <button class="filter-btn" onclick="filterCategory('architecture', event)">Architecture</button>
+            <button class="filter-btn" onclick="filterCategory('licensing', event)">Licensing</button>
+            <button class="filter-btn" onclick="filterCategory('performance', event)">Performance</button>
+        </div>
+        
+        <div id="debatesList">
+            
+            <!-- Accordion 1: Metadata Consolidation -->
+            <div class="accordion-item" data-category="architecture">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">01</div>
+                        <div class="accordion-title">Metadata Consolidation: Single JSON vs. Multiple Sidecars</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Ensuring transactional data updates and race-condition elimination during concurrent runs vs. maintaining simple, modular, text-based metadata outputs.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Our v1 design generated separate sidecars (`clean_meta.json`, `print_meta.json`). This created massive race conditions when stages executed concurrently. A consolidated `<output>.meta.json` with namespace separation (`input`, `quality`, etc.) and a locker helper (`meta_helper.py`) utilizing file-level locking ensures that write conflicts are impossible.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        I like having a single file to read inside the Unity/Unreal editors. My only concern is crash safety. If the cleanup module crashes, does it corrupt the metadata written by the generation step?
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        No. The `meta_helper.py` script performs field-level merges rather than full overrides. It locks the file, reads it, updates only its designated namespace, validates it against `meta_schema.json`, and writes it back. It leaves other namespaces untouched.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Approved</span>
+                            </div>
+                            <p class="verdict-text">Consolidated metadata schema is implemented. All scripts must merge their outputs via `scripts/meta_helper.py` utilizing the schema validation contract.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 2: Background Removal -->
+            <div class="accordion-item" data-category="performance">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">02</div>
+                        <div class="accordion-title">Conditional Background Removal: Auto vs. Forced Execution</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Applying high-quality pre-processing to eliminate background geometries vs. avoiding execution time overhead (2-3s) and destructive segmentation errors on complex shapes.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Background removal is the most important preprocessing step. If a designer inputs a photo with a shadow, the shadow becomes part of the 3D mesh. We need `rembg` active by default.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-perf">JM</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Jax Mercer</span>
+                                        <span class="speaker-role">Systems Engineer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Wait. Running `rembg` takes 2 to 3 seconds on an Apple Silicon laptop. If the input image is already a transparent PNG or a clean studio shot with white backgrounds, we are wasting power. More importantly, `rembg` can segment out thin geometry, like antennas or wires, completely ruining the asset without warning.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        A conditional approach is best. We run a background uniformity check first. If it's above 0.85 or already alpha-mapped, we skip `rembg`. We also check the output. If the foreground coverage drops below 5%, the background removal was likely destructive; we fall back to the original image and log a warning.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Conditional Auto</span>
+                            </div>
+                            <p class="verdict-text">Configure `--bg-removal auto` as the default. Allow manual overrides via `on` or `off` flags for edge cases.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 3: Hunyuan3D-Paint Licensing -->
+            <div class="accordion-item" data-category="licensing">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">03</div>
+                        <div class="accordion-title">Hunyuan3D-Paint Integration: Licensing &amp; Commercial Risk</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Adding state-of-the-art PBR texture generation to improve asset visual quality vs. legal compliance limits of the Tencent Hunyuan Community License.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We are building commercial games. The basic texture upscalers look flat. Hunyuan3D-Paint generates realistic normals, roughness, and metallic maps. We need to ungate the deliberate error stub in `scripts/texture.sh`.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-legal">CV</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Clara Vance</span>
+                                        <span class="speaker-role">Legal Counsel</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        The Tencent Hunyuan Community License permits commercial use of generated outputs. The primary catch is that if a product using outputs exceeds 100 million Monthly Active Users (MAU), a separate commercial agreement is required. There are also standard exclusions for military use and illegal content.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        If our indie games hit 100 million active users, paying Tencent for a commercial license is a minor problem we'd love to have. For now, it's virtually a free pass.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Approved (Threshold)</span>
+                            </div>
+                            <p class="verdict-text">Hunyuan3D-Paint approved under `commercial_threshold` bucket. The stub is removed, and all textured assets will record their license status in the metadata log.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 4: ComfyUI Backend -->
+            <div class="accordion-item" data-category="architecture">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">04</div>
+                        <div class="accordion-title">ComfyUI 2D Backend Integration: Option A (Direct Backend)</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Supporting visual character identity consistency across poses vs. managing massive dependency stacks and separate Python environment overheads.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We cannot generate character assets as one-offs; we need identity consistency. If we create a weapon set, they must match. We need SDXL + ControlNet + IP-Adapter, which ComfyUI supports headlessly.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-perf">JM</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Jax Mercer</span>
+                                        <span class="speaker-role">Systems Engineer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        ComfyUI requires a completely different version of Torch and conflicts with libraries in our main pipeline. If we try to combine them, the installer will fail or overwrite dependencies.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We will implement Option A. ComfyUI is added as a separate 2D backend, isolated in its own `comfyui-env/` directory. It remains completely optional. Default generations still run fast via `mflux`. We also enforce the consistency pack manifest format in `docs/consistency-pack-format.md` to cleanly separate assets.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Approved (Isolated Venv)</span>
+                            </div>
+                            <p class="verdict-text">Option A is selected. ComfyUI runs inside a separate environment, triggered only by the `--backend comfyui` flag.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 5: Multi-view backend -->
+            <div class="accordion-item" data-category="licensing">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">05</div>
+                        <div class="accordion-title">Multi-View 3D Backend Selection: TRELLIS vs. OpenLRM vs. InstantMesh</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Achieving superior 3D structural reconstruction from multiple angles vs. complying with licensing limitations (non-commercial or proprietary).
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-legal">CV</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Clara Vance</span>
+                                        <span class="speaker-role">Legal Counsel</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        InstantMesh is disqualified immediately due to Tencent license issues. TRELLIS has a non-commercial code license, which is unsafe for *Grithkin*. OpenLRM is Apache 2.0 and fully commercial-safe.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Wait. OpenLRM's reconstruction quality is significantly lower in our initial tests compared to TRELLIS. If the assets look bad, we cannot ship them anyway. We must measure them objectively.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We have checking tools in `scripts/multiview_benchmark.py`. We will run OpenLRM, TRELLIS, and InstantMesh against a test suite of humanoid, mechanical, and organic subjects. If OpenLRM's score is above 6.5, we use it. If not, we fall back to TRELLIS for prototyping, while parallel-tracking a license review for InstantMesh.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-warning">Awaiting Data</span>
+                            </div>
+                            <p class="verdict-text">Run benchmark using `multiview_benchmark.py`. Default to OpenLRM for commercial distribution if it passes; fallback to TRELLIS for local prototyping only.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 6: Turntable Preview -->
+            <div class="accordion-item" data-category="performance">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">06</div>
+                        <div class="accordion-title">Turntable Preview Gating: GIF Render Costs on Laptop vs. Studio</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Providing interactive visual validation for designers vs. wasting CPU/GPU runtime on local laptops (3-6s per asset).
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-perf">JM</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Jax Mercer</span>
+                                        <span class="speaker-role">Systems Engineer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Rendering a 12-frame turntable GIF at 8 FPS takes about 4 seconds on a laptop. If a user runs batch generation, this delays the queue dramatically and causes thermal throttling.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        But visual inspection is critical. I can't check for mesh gaps or backside distortion in a single static frame. I need to see it spin.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We will make this tier-conditional using the `hardware_tier` function. On the Studio tier, the GIF is default-on. On the Laptop tier, we generate only a static hero PNG (<0.2s) by default, and make the GIF generation an opt-in flag.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Tier Gated</span>
+                            </div>
+                            <p class="verdict-text">Gated turntable GIF to opt-in on laptop tier. Studio tier retains default-on spinning GIF. Static hero PNG remains default for both.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 7: Watertight Mesh -->
+            <div class="accordion-item" data-category="architecture">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">07</div>
+                        <div class="accordion-title">Watertight Mesh Verification: Warning vs. Strict Blocking</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Preventing physical print failures and wasted plastic vs. allowing slicer auto-recovery and flexible testing.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        If we block export just because a model has a single open boundary edge, it will break our automated asset runs. Slicing software like Cura can repair minor holes anyway.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We must not block, but we must report. The watertight checks will write details (hole count, boundary count) to the metadata file under `quality.manifold`. The user-facing tool will warn the user with translated, human-friendly terms rather than technical jargon.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Warn Only</span>
+                            </div>
+                            <p class="verdict-text">The print check will warn the user about non-manifold geometry, but only block if the model physically exceeds build plate bounds (270mm).</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 8: CLIP Metric -->
+            <div class="accordion-item" data-category="performance">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">08</div>
+                        <div class="accordion-title">CLIP Consistency Metric: Soft Signal vs. Hard Threshold Gating</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Enforcing semantic consistency between input images and 3D outputs vs. accounting for style variance and subjective prompts.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        We want a machine metric to verify 3D reconstruction quality. Comparing the 3D model render to the original input image via open_clip ViT-L/14 seemed like an ideal gating criteria. We planned to block models scoring below 0.80.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-dev">KA</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Ken Allred</span>
+                                        <span class="speaker-role">Lead Developer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        A hard threshold is highly problematic. CLIP scores vary wildly depending on whether the asset is a simple voxel shape, line art, or a photo. A cartoon character might score 0.72 and look great, but a noisy mess might score 0.82. We shouldn't fail runs based on this.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-perf">JM</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Jax Mercer</span>
+                                        <span class="speaker-role">Systems Engineer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Running CLIP also demands extra memory. We should treat it as an advisory metric for ranking variants, rather than a hard fail gate.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Advisory Metric</span>
+                            </div>
+                            <p class="verdict-text">CLIP score is designated as a soft signal. We write it to metadata and warn if it falls below 0.75, but never abort the pipeline run.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Accordion 9: Environment Consolidation -->
+            <div class="accordion-item" data-category="performance">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <div class="accordion-title-block">
+                        <div class="accordion-num">09</div>
+                        <div class="accordion-title">Environment Consolidation: Single Shared venv vs. Multiple venvs</div>
+                    </div>
+                    <div class="accordion-icon">▼</div>
+                </div>
+                <div class="accordion-content">
+                    <div class="accordion-inner">
+                        <div class="tension-box">
+                            <div class="tension-title">The Core Tension</div>
+                            Saving local disk storage space (15GB vs 6GB) vs. avoiding library dependency conflicts.
+                        </div>
+                        <div class="chat-transcript">
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-perf">JM</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Jax Mercer</span>
+                                        <span class="speaker-role">Systems Engineer</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Installing separate Python environments for `rembg`, CLIP, and mesh tools takes over 15 GB of disk space due to duplicated PyTorch libraries. Consolidating into a single `pipeline-tools-env` saves about 9 GB on developers' laptops.
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-bubble">
+                                <div class="speaker-avatar avatar-arch">ET</div>
+                                <div class="chat-msg-block">
+                                    <div class="speaker-header">
+                                        <span class="speaker-name">Dr. Evelyn Thorne</span>
+                                        <span class="speaker-role">Lead Architect</span>
+                                    </div>
+                                    <div class="chat-text">
+                                        Consolidating PyTorch is complex because different packages require different sub-versions. However, after auditing the requirements, we confirmed `rembg`, `open_clip_torch`, and `trimesh` can run cleanly on a shared Torch 2.x environment. ComfyUI is the only library that remains isolated.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="verdict-box">
+                            <div class="verdict-header">
+                                <span class="verdict-title">✔ Verdict &amp; Architecture</span>
+                                <span class="badge badge-success">Consolidated</span>
+                            </div>
+                            <p class="verdict-text">Approved unified venv `pipeline-tools-env/`. ComfyUI stays isolated to prevent configuration drift.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+    </section>
+    
+    <!-- TAB 4: RECOMMENDATIONS MATRIX -->
+    <section id="tab-matrix" class="tab-content">
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Decision / Feature</th>
+                        <th>Status</th>
+                        <th>License Bucket</th>
+                        <th>Hardware constraint</th>
+                        <th>Core Impact</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Metadata Lock merging</strong></td>
+                        <td><span class="badge badge-success">Active</span></td>
+                        <td><code>commercial_safe</code></td>
+                        <td>All tiers</td>
+                        <td>Resolves file race conditions via <code>fcntl</code> locks.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Auto Background removal</strong></td>
+                        <td><span class="badge badge-success">Active</span></td>
+                        <td><code>commercial_safe</code></td>
+                        <td>All tiers (2.5s overhead)</td>
+                        <td>Skips removal if image background is already uniform.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Hunyuan3D-Paint</strong></td>
+                        <td><span class="badge badge-warning">Active (Limit)</span></td>
+                        <td><code>commercial_threshold</code></td>
+                        <td>Studio tier default</td>
+                        <td>Allowed up to 100M Monthly Active Users (MAU).</td>
+                    </tr>
+                    <tr>
+                        <td><strong>ComfyUI consistency</strong></td>
+                        <td><span class="badge badge-info">Opt-in</span></td>
+                        <td><code>commercial_threshold</code></td>
+                        <td>Studio tier default</td>
+                        <td>Isolated in separate venv; locks visual identity.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Multi-view reconstruction</strong></td>
+                        <td><span class="badge badge-warning">In Research</span></td>
+                        <td><code>non_commercial</code> fallback</td>
+                        <td>Benchmark gated</td>
+                        <td>TRELLIS fallback; OpenLRM commercial-safe.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Turntable GIF Preview</strong></td>
+                        <td><span class="badge badge-info">Tier-gated</span></td>
+                        <td><code>commercial_safe</code></td>
+                        <td>Laptop opt-in / Studio default</td>
+                        <td>Gated on laptops to avoid 4-6s rendering overheads.</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Watertight mesh checks</strong></td>
+                        <td><span class="badge badge-success">Warnings only</span></td>
+                        <td><code>commercial_safe</code></td>
+                        <td>All tiers</td>
+                        <td>Emits warning labels rather than aborting runs.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+    
+</main>
+
+<footer>
+    <p>© 2026 2d-3d-pipeline Maintainers. Grounded in project files. Document register conforms to <a href="CONVENTIONS.md">CONVENTIONS.md</a>.</p>
+</footer>
+
+<script>
+    function switchTab(evt, tabId) {
+        const tabcontents = document.getElementsByClassName("tab-content");
+        const tablinks = document.getElementsByClassName("tab-btn");
+        
+        // Add fade-out animation first, then hide and show
+        const activeTab = document.querySelector(".tab-content.active");
+        if (activeTab) {
+            activeTab.classList.remove("active");
+        }
+        
+        for (let i = 0; i < tablinks.length; i++) {
+            tablinks[i].classList.remove("active");
+        }
+        
+        document.getElementById(tabId).classList.add("active");
+        evt.currentTarget.classList.add("active");
+    }
+    
+    function toggleAccordion(header) {
+        const item = header.parentElement;
+        const content = item.querySelector(".accordion-content");
+        
+        if (item.classList.contains("active")) {
+            content.style.maxHeight = null;
+            item.classList.remove("active");
+        } else {
+            // Collapse all others
+            const activeItems = document.querySelectorAll(".accordion-item.active");
+            activeItems.forEach(ai => {
+                ai.querySelector(".accordion-content").style.maxHeight = null;
+                ai.classList.remove("active");
+            });
+            
+            // Expand this one
+            item.classList.add("active");
+            content.style.maxHeight = content.scrollHeight + "px";
+        }
+    }
+    
+    function showSpecificDebate(num) {
+        // Switch to debates tab
+        const debatesTabBtn = document.querySelector("button[onclick*='tab-debates']");
+        debatesTabBtn.click();
+        
+        // Find corresponding accordion item and expand it
+        const accordions = document.querySelectorAll(".accordion-item");
+        const target = accordions[num - 1]; // 1-indexed
+        
+        if (target) {
+            setTimeout(() => {
+                const header = target.querySelector(".accordion-header");
+                if (!target.classList.contains("active")) {
+                    header.click();
+                }
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 100);
+        }
+    }
+    
+    function filterCategory(cat, evt) {
+        // Toggle active button class
+        const filterBtns = document.querySelectorAll(".filter-btn");
+        filterBtns.forEach(btn => btn.classList.remove("active"));
+        evt.currentTarget.classList.add("active");
+        
+        const items = document.querySelectorAll(".accordion-item");
+        items.forEach(item => {
+            if (cat === "all" || item.getAttribute("data-category") === cat) {
+                item.style.display = "block";
+            } else {
+                item.style.display = "none";
+                if (item.classList.contains("active")) {
+                    item.querySelector(".accordion-header").click();
+                }
+            }
+        });
+    }
+    
+    function filterDebates() {
+        const query = document.getElementById("debateSearch").value.toLowerCase();
+        const items = document.querySelectorAll(".accordion-item");
+        
+        items.forEach(item => {
+            const text = item.textContent.toLowerCase();
+            if (text.includes(query)) {
+                item.style.display = "block";
+            } else {
+                item.style.display = "none";
+                if (item.classList.contains("active")) {
+                    item.querySelector(".accordion-header").click();
+                }
+            }
+        });
+    }
+</script>
+</body>
+</html>
