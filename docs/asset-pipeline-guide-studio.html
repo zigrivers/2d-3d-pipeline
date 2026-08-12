@@ -2459,6 +2459,7 @@ OVERWRITE_ENGINE=0
 JSON_MODE=0
 BG_REMOVAL_MODE=&quot;&quot;
 PREVIEW_MODE=&quot;&quot;
+JUDGE_MESH=0
 
 usage() {
     cat &lt;&lt;EOF
@@ -2487,6 +2488,12 @@ Generation options:
       --json               Emit a final JSON result line on stdout.
                            Human-readable logs are routed to stderr so
                            stdout contains only the JSON object.
+      --judge-mesh         Render turntable views and score the mesh with
+                           a local VLM judge (recognizable, back-face
+                           plausibility, geometry artifacts, texture
+                           coherence). Warn-don&#x27;t-block: a below-floor
+                           verdict flags the asset but does not fail the
+                           run. No-op when vlm-env isn&#x27;t installed.
   -h, --help               This help
 
 Examples:
@@ -2521,6 +2528,7 @@ while [[ $# -gt 0 ]]; do
         --preview)           PREVIEW_MODE=&quot;$2&quot;; shift 2 ;;
         --no-preview)        PREVIEW_MODE=&quot;none&quot;; shift ;;
         --json)              JSON_MODE=1;       shift ;;
+        --judge-mesh)        JUDGE_MESH=1;      shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
     esac
@@ -2905,6 +2913,97 @@ PY
     fi
 fi
 
+# v0.3.6 (item 18) — opt-in mesh judge: render N turntable views
+# (independent of the user-facing $PREVIEW_MODE/frame count) and score
+# geometry/texture with the local VLM judge. Warn-don&#x27;t-block: a
+# below-floor verdict flags the asset but never fails the run. No-op when
+# vlm-env or vlm_judge.py isn&#x27;t installed.
+JUDGE_MESH_VERDICT=&quot;&quot;
+JUDGE_MESH_REJECTED=&quot;&quot;
+if [[ &quot;$JUDGE_MESH&quot; == &quot;1&quot; ]]; then
+    VLM_ENV=&quot;${VLM_ENV:-$PIPELINE_ROOT/vlm-env}&quot;
+    JUDGE_SCRIPT=&quot;$SCRIPT_DIR/vlm_judge.py&quot;
+    [[ -f &quot;$JUDGE_SCRIPT&quot; ]] || JUDGE_SCRIPT=&quot;$PIPELINE_ROOT/workspace/vlm_judge.py&quot;
+    if [[ -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -x &quot;$VLM_ENV/bin/python&quot; &amp;&amp; -f &quot;$TURNTABLE_SCRIPT&quot; &amp;&amp; -x &quot;$BLENDER&quot; ]]; then
+        MESH_JUDGE_VIEWS=&quot;$(read_pipeline_config mesh_judge_views 8)&quot;
+        MESH_JUDGE_FLOOR=&quot;$(read_pipeline_config mesh_judge_floor 2.0)&quot;
+        MESH_JUDGE_DIR=&quot;$ASSETS_ROOT/preview/mesh_judge&quot;
+        info &quot;Rendering $MESH_JUDGE_VIEWS view(s) for mesh judge...&quot;
+        # meta_path=&quot;&quot; here (last arg) — this render&#x27;s own manifest is a
+        # scratch artifact; the judge writes its own meta.json section below.
+        &quot;$BLENDER&quot; --background --python &quot;$TURNTABLE_SCRIPT&quot; -- \
+            &quot;$CLEAN_PATH&quot; &quot;$MESH_JUDGE_DIR&quot; &quot;${OUTPUT_NAME}_judge&quot; gif \
+            &quot;$MESH_JUDGE_VIEWS&quot; 640 16 &quot;&quot; 2&gt;&amp;1 \
+            | grep &#x27;^\[turntable\]&#x27; | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[turntable\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+        JUDGE_VIEW_MANIFEST=&quot;$MESH_JUDGE_DIR/${OUTPUT_NAME}_judge_preview_manifest.json&quot;
+        JUDGE_VIEW_PATHS=()
+        if [[ -f &quot;$JUDGE_VIEW_MANIFEST&quot; ]]; then
+            while IFS= read -r line; do
+                [[ -n &quot;$line&quot; ]] &amp;&amp; JUDGE_VIEW_PATHS+=( &quot;$line&quot; )
+            done &lt; &lt;(python3 -c &quot;
+import json, sys
+m = json.load(open(sys.argv[1]))
+for p in (m.get(&#x27;frame_paths&#x27;) or []):
+    print(p)
+&quot; &quot;$JUDGE_VIEW_MANIFEST&quot; 2&gt;/dev/null)
+        fi
+        if [[ &quot;${#JUDGE_VIEW_PATHS[@]}&quot; -gt 0 ]]; then
+            JUDGE_STDERR_FILE=&quot;$(mktemp)&quot;
+            JUDGE_JSON_FILE=&quot;$(mktemp)&quot;
+            &quot;$VLM_ENV/bin/python&quot; &quot;$JUDGE_SCRIPT&quot; \
+                --mode mesh --images &quot;${JUDGE_VIEW_PATHS[@]}&quot; \
+                --meta &quot;$META_PATH&quot; --floor &quot;$MESH_JUDGE_FLOOR&quot; --json \
+                &gt; &quot;$JUDGE_JSON_FILE&quot; 2&gt; &quot;$JUDGE_STDERR_FILE&quot; || true
+            grep &#x27;^\[judge\]&#x27; &quot;$JUDGE_STDERR_FILE&quot; | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;${line#\[judge\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+            rm -f &quot;$JUDGE_STDERR_FILE&quot;
+            MESH_JUDGE_SUMMARY=&quot;$(python3 -c &quot;
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+verdict = d.get(&#x27;verdict&#x27;, 0)
+rejected = bool(d.get(&#x27;rejected&#x27;, False))
+notes = d.get(&#x27;notes&#x27;, &#x27;&#x27;)
+flag = &#x27; — likely degenerate, regenerate recommended&#x27; if rejected else &#x27;&#x27;
+line = f\&quot;3D check: {verdict:.0f}/10{flag}\&quot;
+if notes:
+    line += f\&quot; ({notes})\&quot;
+print(line)
+print(verdict)
+print(&#x27;1&#x27; if rejected else &#x27;0&#x27;)
+&quot; &quot;$JUDGE_JSON_FILE&quot; 2&gt;/dev/null || true)&quot;
+            if [[ -n &quot;$MESH_JUDGE_SUMMARY&quot; ]]; then
+                info &quot;$(printf &#x27;%s&#x27; &quot;$MESH_JUDGE_SUMMARY&quot; | sed -n &#x27;1p&#x27;)&quot;
+                JUDGE_MESH_VERDICT=&quot;$(printf &#x27;%s&#x27; &quot;$MESH_JUDGE_SUMMARY&quot; | sed -n &#x27;2p&#x27;)&quot;
+                JUDGE_MESH_REJECTED_RAW=&quot;$(printf &#x27;%s&#x27; &quot;$MESH_JUDGE_SUMMARY&quot; | sed -n &#x27;3p&#x27;)&quot;
+                if [[ &quot;$JUDGE_MESH_REJECTED_RAW&quot; == &quot;1&quot; ]]; then
+                    JUDGE_MESH_REJECTED=true
+                else
+                    JUDGE_MESH_REJECTED=false
+                fi
+                # Cross-check against clean_asset.py&#x27;s loose-elements count
+                # before the judge&#x27;s floater note reads as a hard fact (item
+                # 18 failure-mode note): cleanup may have already removed
+                # what the judge is now flagging as floaters.
+                LOOSE_DELETED=&quot;$(python3 -c &quot;
+import json
+try:
+    d = json.load(open(&#x27;$META_PATH&#x27;))
+    v = d.get(&#x27;cleanup&#x27;, {}).get(&#x27;loose_elements_deleted&#x27;)
+    print(v if v is not None else &#x27;&#x27;)
+except Exception:
+    pass
+&quot; 2&gt;/dev/null || true)&quot;
+                if [[ -n &quot;$LOOSE_DELETED&quot; &amp;&amp; &quot;$LOOSE_DELETED&quot; != &quot;0&quot; ]]; then
+                    info &quot;  (cleanup already removed $LOOSE_DELETED loose element(s) before this judge ran)&quot;
+                fi
+            fi
+            rm -f &quot;$JUDGE_JSON_FILE&quot;
+        fi
+    fi
+fi
+
 # v0.3 — also stage the hero preview PNG alongside the GLB in the engine
 # folder when applicable. Useful for in-editor thumbnails / quick visual
 # previews without opening the asset. Same naming as the GLB (just .png).
@@ -2929,30 +3028,38 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     ENGINE_STAGED_BOOL=false
     [[ -n &quot;$ENGINE_STAGED_PATH&quot; ]] &amp;&amp; ENGINE_STAGED_BOOL=true
     json_mode_end
-    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
-        status=ok \
-        stage=image_to_3d \
-        generator=&quot;$GENERATOR&quot; \
-        license_bucket=&quot;$LICENSE_BUCKET&quot; \
-        input=&quot;$INPUT&quot; \
-        raw_path=&quot;$RAW_PATH&quot; \
-        clean_path=&quot;$CLEAN_PATH&quot; \
-        engine_path=&quot;$ENGINE_STAGED_PATH&quot; \
-        --int polycount_target=&quot;$POLYCOUNT&quot; \
-        --int texture_resolution=&quot;$TEXTURE_RES&quot; \
-        remesh=&quot;$REMESH&quot; \
-        up_axis=&quot;$UP_AXIS&quot; \
-        --bool skip_clean=false \
-        --bool engine_staged=&quot;$ENGINE_STAGED_BOOL&quot; \
-        assets_root=&quot;$ASSETS_ROOT&quot; \
-        manifest_path=&quot;$MANIFEST_PATH&quot; \
-        project_mode=&quot;$PROJECT_MODE&quot; \
-        project_root=&quot;$PROJECT_ROOT&quot; \
-        project_engine=&quot;$PROJECT_ENGINE&quot; \
-        --int duration_seconds=&quot;$DURATION&quot; \
-        machine=&quot;$MACHINE&quot; \
-        hardware_tier=&quot;$HW_TIER&quot; \
+    JSON_EMIT_ARGS=(
+        status=ok
+        stage=image_to_3d
+        generator=&quot;$GENERATOR&quot;
+        license_bucket=&quot;$LICENSE_BUCKET&quot;
+        input=&quot;$INPUT&quot;
+        raw_path=&quot;$RAW_PATH&quot;
+        clean_path=&quot;$CLEAN_PATH&quot;
+        engine_path=&quot;$ENGINE_STAGED_PATH&quot;
+        --int polycount_target=&quot;$POLYCOUNT&quot;
+        --int texture_resolution=&quot;$TEXTURE_RES&quot;
+        remesh=&quot;$REMESH&quot;
+        up_axis=&quot;$UP_AXIS&quot;
+        --bool skip_clean=false
+        --bool engine_staged=&quot;$ENGINE_STAGED_BOOL&quot;
+        assets_root=&quot;$ASSETS_ROOT&quot;
+        manifest_path=&quot;$MANIFEST_PATH&quot;
+        project_mode=&quot;$PROJECT_MODE&quot;
+        project_root=&quot;$PROJECT_ROOT&quot;
+        project_engine=&quot;$PROJECT_ENGINE&quot;
+        --int duration_seconds=&quot;$DURATION&quot;
+        machine=&quot;$MACHINE&quot;
+        hardware_tier=&quot;$HW_TIER&quot;
         created=&quot;$CREATED_AT&quot;
+    )
+    # Item 18 — additive-only: these keys only appear when --judge-mesh ran
+    # and produced a verdict, so a no-flag run&#x27;s --json output is unchanged.
+    if [[ -n &quot;$JUDGE_MESH_VERDICT&quot; ]]; then
+        JSON_EMIT_ARGS+=( --float judge_mesh_verdict=&quot;$JUDGE_MESH_VERDICT&quot; )
+        JSON_EMIT_ARGS+=( --bool judge_mesh_rejected=&quot;$JUDGE_MESH_REJECTED&quot; )
+    fi
+    python3 &quot;$SCRIPT_DIR/json_emit.py&quot; &quot;${JSON_EMIT_ARGS[@]}&quot;
 fi
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/generate.sh</pre></div>
@@ -3263,12 +3370,16 @@ meshes = [o for o in bpy.context.scene.objects if o.type == &#x27;MESH&#x27;]
 if not meshes:
     raise RuntimeError(&quot;No mesh found in input file&quot;)
 
+# Blender&#x27;s glTF importer does not always set the active object itself
+# (confirmed absent on a single-mesh import in Blender 5.2 LTS) — set it
+# explicitly rather than relying on import side effects.
+bpy.context.view_layer.objects.active = meshes[0]
+
 # join if multiple parts
 if len(meshes) &gt; 1:
     bpy.ops.object.select_all(action=&#x27;DESELECT&#x27;)
     for m in meshes:
         m.select_set(True)
-    bpy.context.view_layer.objects.active = meshes[0]
     bpy.ops.object.join()
 
 obj = bpy.context.view_layer.objects.active
@@ -3471,12 +3582,16 @@ meshes = [o for o in bpy.context.scene.objects if o.type == &#x27;MESH&#x27;]
 if not meshes:
     raise RuntimeError(f&quot;No mesh found in {input_path}&quot;)
 
+# Blender&#x27;s glTF importer does not always set the active object itself
+# (confirmed absent on a single-mesh import in Blender 5.2 LTS) — set it
+# explicitly rather than relying on import side effects.
+bpy.context.view_layer.objects.active = meshes[0]
+
 # Join multiple parts into a single mesh — required for a single STL solid
 if len(meshes) &gt; 1:
     bpy.ops.object.select_all(action=&#x27;DESELECT&#x27;)
     for m in meshes:
         m.select_set(True)
-    bpy.context.view_layer.objects.active = meshes[0]
     bpy.ops.object.join()
 
 obj = bpy.context.view_layer.objects.active
@@ -6060,7 +6175,28 @@ PIPELINE_EOF</pre></div>
         &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
         &quot;mesh&quot;: {
           &quot;type&quot;: &quot;object&quot;,
-          &quot;additionalProperties&quot;: true
+          &quot;description&quot;: &quot;Item 18 — turntable-view mesh judging (--mode mesh).&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;model&quot;: { &quot;type&quot;: &quot;string&quot; },
+            &quot;views_rendered&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;scores&quot;: {
+              &quot;type&quot;: &quot;object&quot;,
+              &quot;additionalProperties&quot;: true,
+              &quot;properties&quot;: {
+                &quot;shape_consistency&quot;: { &quot;type&quot;: &quot;string&quot; },
+                &quot;recognizable&quot;: { &quot;type&quot;: &quot;integer&quot; },
+                &quot;back_face_plausibility&quot;: { &quot;type&quot;: &quot;integer&quot; },
+                &quot;geometry_artifacts&quot;: { &quot;type&quot;: &quot;integer&quot; },
+                &quot;texture_coherence&quot;: { &quot;type&quot;: [&quot;integer&quot;, &quot;null&quot;] },
+                &quot;overall&quot;: { &quot;type&quot;: &quot;integer&quot; }
+              }
+            },
+            &quot;notes&quot;: { &quot;type&quot;: &quot;string&quot; },
+            &quot;verdict&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;rejected&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+          }
         }
       }
     }
@@ -8510,6 +8646,7 @@ def _merge_into_meta(meta_path: Path, payload: dict) -&gt; None:
          &quot;--section&quot;, &quot;input&quot;,
          &quot;--data&quot;, json.dumps(payload)],
         check=True,
+        capture_output=True,
     )
 
 
@@ -8706,6 +8843,7 @@ def _merge_into_meta(meta_path: Path, payload: dict) -&gt; None:
          &quot;--section&quot;, &quot;quality&quot;,
          &quot;--data&quot;, json.dumps(payload)],
         check=True,
+        capture_output=True,
     )
 
 
@@ -8923,6 +9061,7 @@ def _merge(meta_path: Path, payload: dict) -&gt; None:
          &quot;--section&quot;, &quot;quality&quot;,
          &quot;--data&quot;, json.dumps({&quot;textures&quot;: payload})],
         check=True,
+        capture_output=True,
     )
 
 
@@ -9155,6 +9294,7 @@ def main() -&gt; int:
          &quot;--section&quot;, &quot;preprocessing&quot;,
          &quot;--data&quot;, json.dumps({&quot;bg_removal&quot;: payload})],
         check=False,
+        capture_output=True,
     )
 
     result = {**payload, &quot;output_path&quot;: output_path}
@@ -9236,11 +9376,14 @@ meshes = [o for o in scene.objects if o.type == &#x27;MESH&#x27;]
 if not meshes:
     print(f&quot;[turntable] ERROR: no mesh in {input_path}&quot;, file=sys.stderr)
     sys.exit(1)
+# Blender&#x27;s glTF importer does not always set the active object itself
+# (confirmed absent on a single-mesh import in Blender 5.2 LTS) — set it
+# explicitly rather than relying on import side effects.
+bpy.context.view_layer.objects.active = meshes[0]
 if len(meshes) &gt; 1:
     bpy.ops.object.select_all(action=&#x27;DESELECT&#x27;)
     for m in meshes:
         m.select_set(True)
-    bpy.context.view_layer.objects.active = meshes[0]
     bpy.ops.object.join()
 obj = bpy.context.view_layer.objects.active
 
@@ -9589,6 +9732,7 @@ def main() -&gt; int:
          &quot;--section&quot;, &quot;quality&quot;,
          &quot;--data&quot;, json.dumps(payload)],
         check=False,
+        capture_output=True,
     )
 
     if args.json:
@@ -9865,6 +10009,7 @@ def main() -&gt; int:
          &quot;--section&quot;, &quot;print&quot;,
          &quot;--data&quot;, json.dumps({&quot;structural&quot;: result})],
         check=False,
+        capture_output=True,
     )
 
     if args.json:
@@ -10102,6 +10247,7 @@ def main() -&gt; int:
                  &quot;duration_seconds&quot;: duration,
              })],
             check=False,
+            capture_output=True,
         )
         if args.json:
             print(json.dumps({&quot;results&quot;: result}, indent=2, sort_keys=True))
@@ -10124,6 +10270,7 @@ def main() -&gt; int:
              &quot;--section&quot;, &quot;clip&quot;,
              &quot;--data&quot;, json.dumps(payload)],
             check=False,
+            capture_output=True,
         )
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -10887,6 +11034,7 @@ def main() -&gt; int:
          &quot;--section&quot;, &quot;clip&quot;,
          &quot;--data&quot;, json.dumps(payload)],
         check=False,
+        capture_output=True,
     )
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -11037,6 +11185,7 @@ def main() -&gt; int:
          &quot;--section&quot;, &quot;clip&quot;,
          &quot;--data&quot;, json.dumps(payload)],
         check=False,
+        capture_output=True,
     )
     if args.json:
         print(json.dumps({
@@ -11065,26 +11214,32 @@ PIPELINE_EOF</pre></div>
               </summary>
               <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/vlm_judge.py << 'PIPELINE_EOF'
 #!/usr/bin/env python3
-&quot;&quot;&quot;v0.3.5 — local VLM judge for 2D concepts, best-of-N auto-select
-(item 17 of the 2026-08 generation-quality refresh).
+&quot;&quot;&quot;v0.3.6 — local VLM judge: 2D concepts (best-of-N) + 3D mesh turntables
+(items 17-18 of the 2026-08 generation-quality refresh).
 
 Uses mlx-vlm (MIT; commercial_safe) with a Qwen3-VL model (Apache 2.0;
-commercial_safe) to score concept images against a fixed rubric:
-subject match, 3/4-view compliance, background cleanliness, lighting
-flatness, single-subject, silhouette readability. Catches failures
-CLIP/SigLIP-family scoring misses — composition and framing, not just
-prompt/subject match.
+commercial_safe).
 
-De-biasing protocol (arXiv:2606.20364): fixed image order, one image
-per judge call (no cross-image context that could bias relative
+--mode image scores concept images against a fixed rubric: subject
+match, 3/4-view compliance, background cleanliness, lighting flatness,
+single-subject, silhouette readability. Catches failures CLIP/SigLIP-
+family scoring misses — composition and framing, not just prompt/subject
+match. De-biasing protocol (arXiv:2606.20364): fixed image order, one
+image per judge call (no cross-image context that could bias relative
 scoring).
 
---mode mesh (item 18) is not yet implemented — this PR ships image
-concept judging only.
+--mode mesh scores a set of turntable render views of ONE 3D mesh
+(rendered by turntable_render.py) in a single joint call — unlike
+--mode image, cross-view context is exactly what&#x27;s wanted here, since
+all views show the same object and back-face plausibility / geometry
+artifacts can only be judged by comparing views. Catches degenerate
+meshes (arXiv:2606.18451 shows heuristic checks are bimodal: they catch
+catastrophic failure but miss &quot;bad but valid&quot; geometry).
 
 Usage:
     vlm_judge.py --mode image --image PATH --meta PATH [--model MODEL] [--json]
     vlm_judge.py --mode image --images PATH1 PATH2 ... --meta PATH --rank [--json]
+    vlm_judge.py --mode mesh --images VIEW1 VIEW2 ... --meta PATH [--json]
 &quot;&quot;&quot;
 from __future__ import annotations
 
@@ -11146,6 +11301,62 @@ SCORE_KEYS = [
 ]
 STRING_KEYS = [&quot;visible_faces&quot;]
 
+# Item 18. One call sees ALL views at once (num_images=N) so the model can
+# compare views against each other — the opposite of the image rubric&#x27;s
+# one-call-per-image isolation, and deliberately so.
+MESH_RUBRIC = &quot;&quot;&quot;You are grading a 3D mesh from a sequence of turntable render views (the
+same object photographed from N evenly-spaced angles around a full rotation), intended for
+use as a game asset. Judge the OBJECT across ALL views together — you are looking at one
+mesh, not independent images.
+
+FIRST, before scoring, answer this literally: across the view sequence, does the object&#x27;s
+silhouette maintain a consistent, believable volume (real width AND depth, not just a flat
+outline), or does it collapse into a hairline- or paper-thin sliver in ANY view (apparent
+width near-zero relative to height, like looking at a blade edge-on)? Name what you see
+plainly, e.g. &quot;consistent solid volume in all views&quot; or &quot;collapses to a hairline sliver in
+several views&quot;.
+
+If ANY view shows a hairline/paper-thin collapse, this is a catastrophically degenerate
+mesh (typically a flattened/scale-collapsed export bug) — &quot;geometry_artifacts&quot;, &quot;recognizable&quot;,
+and &quot;overall&quot; MUST all score 0-1, regardless of how clean or recognizable any single
+non-degenerate view looks. A mesh that is a sliver from even one angle is not a usable
+asset — do not let a good-looking view elsewhere talk you out of this.
+
+If the object appears untextured (flat grey / vertex-color-only, no photographic surface
+detail), set &quot;texture_coherence&quot; to null and judge geometry only — do not penalize a
+correctly-formed but untextured mesh for lacking texture.
+
+Return strict JSON, no other prose, matching exactly this schema:
+
+{&quot;shape_consistency&quot;: &quot;&lt;your literal answer from above&gt;&quot;, &quot;recognizable&quot;: int,
+&quot;back_face_plausibility&quot;: int, &quot;geometry_artifacts&quot;: int, &quot;texture_coherence&quot;: int_or_null,
+&quot;artifacts_note&quot;: &quot;&lt;short phrase or empty string&gt;&quot;, &quot;overall&quot;: int}
+
+Score each numeric dimension 0-10 (integers), where 10 is ideal.
+
+Dimension meanings:
+- recognizable: across all views, does this read as one coherent, identifiable object
+  (not a formless blob, not a sliver — see the hairline-collapse rule above)?
+- back_face_plausibility: do the views away from the &quot;front&quot; look like a plausible
+  continuation of the object (not flat/blank, not missing geometry, not warped)?
+- geometry_artifacts: 10 = clean mesh, no visible slivers, holes, or floating fragments
+  in ANY view. Deduct heavily for each artifact type you see across the sequence — a
+  hairline collapse (see above) is not a minor deduction, it scores 0-1.
+- texture_coherence: is the texture consistent and seam-free across views (not smeared,
+  not duplicated/mirrored oddly)? null if the mesh has no texture to judge.
+- artifacts_note: if geometry_artifacts &lt; 8, briefly name what you saw (e.g. &quot;2 floating
+  fragments near the base&quot;, &quot;collapses to a hairline sliver from the side&quot;). Empty string
+  if nothing notable.
+- overall: holistic 0-10 score for suitability as a finished game asset.
+
+Return ONLY the JSON object, nothing before or after it.&quot;&quot;&quot;
+
+MESH_SCORE_KEYS = [
+    &quot;recognizable&quot;, &quot;back_face_plausibility&quot;, &quot;geometry_artifacts&quot;,
+    &quot;texture_coherence&quot;, &quot;overall&quot;,
+]
+MESH_STRING_KEYS = [&quot;shape_consistency&quot;]
+
 
 def _imports():
     try:
@@ -11176,12 +11387,37 @@ def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_pat
     return parsed
 
 
+def _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config, image_paths: list[str]) -&gt; dict:
+    &quot;&quot;&quot;One joint call over all turntable views of a single mesh.&quot;&quot;&quot;
+    formatted = apply_chat_template(processor, config, MESH_RUBRIC, num_images=len(image_paths))
+    result = mlx_vlm.generate(
+        model, processor, formatted, image=image_paths,
+        max_tokens=400, temperature=0.0, verbose=False,
+    )
+    text = result.text.strip()
+    start = text.index(&quot;{&quot;)
+    end = text.rindex(&quot;}&quot;) + 1
+    data = json.loads(text[start:end])
+    parsed = {}
+    for k in MESH_SCORE_KEYS:
+        if k not in data:
+            continue
+        v = data[k]
+        parsed[k] = int(v) if v is not None else None
+    for k in MESH_STRING_KEYS:
+        if k in data:
+            parsed[k] = str(data[k])
+    parsed[&quot;artifacts_note&quot;] = str(data.get(&quot;artifacts_note&quot;, &quot;&quot;))
+    return parsed
+
+
 def main() -&gt; int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument(&quot;--mode&quot;, choices=[&quot;image&quot;], default=&quot;image&quot;,
-                   help=&quot;Judge mode. Only &#x27;image&#x27; is implemented (item 18 adds &#x27;mesh&#x27;).&quot;)
+    p.add_argument(&quot;--mode&quot;, choices=[&quot;image&quot;, &quot;mesh&quot;], default=&quot;image&quot;,
+                   help=&quot;&#x27;image&#x27; judges a 2D concept; &#x27;mesh&#x27; judges turntable views of a GLB.&quot;)
     p.add_argument(&quot;--image&quot;, help=&quot;Single image path (or use --images for --rank)&quot;)
-    p.add_argument(&quot;--images&quot;, nargs=&quot;+&quot;, help=&quot;Multiple image paths for --rank&quot;)
+    p.add_argument(&quot;--images&quot;, nargs=&quot;+&quot;,
+                   help=&quot;Multiple image paths — variants for --rank, or turntable views for --mode mesh&quot;)
     p.add_argument(&quot;--meta&quot;, required=True)
     p.add_argument(&quot;--model&quot;, default=DEFAULT_MODEL,
                    help=f&quot;mlx-vlm model repo (default: {DEFAULT_MODEL})&quot;)
@@ -11195,7 +11431,12 @@ def main() -&gt; int:
     if mlx_vlm is None:
         return 0  # graceful no-op
 
-    if args.rank:
+    if args.mode == &quot;mesh&quot;:
+        if not args.images:
+            print(&quot;ERROR: --mode mesh requires --images VIEW1 VIEW2 ...&quot;, file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(p)) for p in args.images]
+    elif args.rank:
         if not args.images:
             print(&quot;ERROR: --rank requires --images PATH1 PATH2 ...&quot;, file=sys.stderr)
             return 2
@@ -11210,6 +11451,41 @@ def main() -&gt; int:
     model, processor = mlx_vlm.load(args.model)
     config = model.config
     t_load = time.time()
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    if args.mode == &quot;mesh&quot;:
+        t_img0 = time.time()
+        scores = _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config,
+                              [str(p) for p in image_paths])
+        verdict = float(scores.get(&quot;overall&quot;, 0))
+        rejected = verdict &lt; args.floor
+        payload = {
+            &quot;model&quot;: args.model,
+            &quot;views_rendered&quot;: len(image_paths),
+            &quot;scores&quot;: {k: v for k, v in scores.items() if k != &quot;artifacts_note&quot;},
+            &quot;notes&quot;: scores.get(&quot;artifacts_note&quot;, &quot;&quot;),
+            &quot;verdict&quot;: verdict,
+            &quot;rejected&quot;: rejected,
+            &quot;duration_seconds&quot;: round(time.time() - t_img0, 2),
+        }
+        subprocess.run(
+            [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+             &quot;--section&quot;, &quot;judge&quot;,
+             &quot;--data&quot;, json.dumps({&quot;mesh&quot;: payload})],
+            check=False,
+            capture_output=True,
+        )
+        if args.json:
+            print(json.dumps({
+                **payload,
+                &quot;pipeline_load_seconds&quot;: round(t_load - t0, 2),
+            }, indent=2, sort_keys=True))
+        else:
+            flag = &quot; (below floor — likely degenerate)&quot; if rejected else &quot;&quot;
+            print(f&quot;[judge] mesh {verdict:.0f}/10{flag} ({len(image_paths)} views)&quot;)
+            if payload[&quot;notes&quot;]:
+                print(f&quot;[judge] notes: {payload[&#x27;notes&#x27;]}&quot;)
+        return 0
 
     results = []
     for img in image_paths:
@@ -11220,8 +11496,6 @@ def main() -&gt; int:
             &quot;scores&quot;: scores,
             &quot;duration_seconds&quot;: round(time.time() - t_img0, 2),
         })
-
-    meta_path = Path(os.path.expanduser(args.meta))
 
     if args.rank:
         ranked = sorted(enumerate(results), key=lambda kv: -kv[1][&quot;scores&quot;].get(&quot;overall&quot;, 0))
@@ -13068,6 +13342,42 @@ conversation. Example:
 
 If unclear, ask one short question to disambiguate intent.
 
+### Mesh judge (v0.3.6+, item 18)
+
+`generate.sh --judge-mesh` renders a turntable (default 8 views,
+independent of `--preview`) of the cleaned GLB and scores it with the
+same local VLM judge as Flow 1&#x27;s concept judge: recognizable-as-object,
+back-face plausibility, geometry artifacts (slivers/holes/floaters),
+and texture coherence. It catches &quot;bad but valid&quot; meshes that heuristic
+checks miss — a mesh can pass every structural check and still look
+wrong to a person.
+
+```bash
+generate.sh -i concept/chest.png --judge-mesh
+```
+
+**Warn, don&#x27;t block.** A below-floor verdict (default &lt;2/10) flags the
+asset as &quot;likely degenerate — regenerate recommended&quot; in meta.json and
+the console output. It never fails the run — the GLB is still produced
+and staged normally.
+
+**Recognition signals.** Suggest `--judge-mesh` when the user is about
+to commit an asset to their project and wants a sanity check, or has
+seen degenerate output from this generator/prompt combination before.
+Skip it for quick iteration passes where they&#x27;ll eyeball the result
+themselves anyway.
+
+**Relay findings in plain language.** If `judge.mesh.notes` names a
+specific artifact (e.g. &quot;2 floating fragments near the base&quot;), say
+that — not the raw score. If `cleanup.loose_elements_deleted` is
+non-zero, mention that cleanup already removed some loose geometry
+before the judge ran, so a floater note may be describing something
+already partly addressed.
+
+**When NOT to suggest it:** `vlm-env` not installed; the user is mid
+rapid-iteration and doesn&#x27;t want the extra render+judge latency (a few
+seconds of render plus judge time on top of the normal pipeline).
+
 ### Translation map (v0.3+ user-friendly language)
 
 The wrappers and Claude both speak engine-jargon natively, but the
@@ -13095,6 +13405,9 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | &quot;judge.verdict 9, three_quarter_view 9&quot; | &quot;judge picked this one — good angle, clean composition (9/10)&quot; |
 | &quot;judge.verdict 5, three_quarter_view 3, visible_faces: front only&quot; | &quot;judge flagged this — shot straight-on, no side visible, may hurt the 3D reconstruction&quot; |
 | &quot;judge.rejected: true&quot; | &quot;judge thinks this one is likely unusable — consider regenerating&quot; |
+| &quot;judge.mesh.verdict 8, geometry_artifacts 9&quot; | &quot;3D check: looks solid — clean geometry, recognizable shape (8/10)&quot; |
+| &quot;judge.mesh.rejected: true, notes: &#x27;2 floating fragments...&#x27;&quot; | &quot;3D check flagged this one — 2 floating fragments near the base, likely worth regenerating&quot; |
+| &quot;judge.mesh.scores.texture_coherence: null&quot; | &quot;mesh has no texture yet, so the judge only checked geometry&quot; |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines

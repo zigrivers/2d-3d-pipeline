@@ -236,6 +236,7 @@ def main() -> int:
          "--section", "print",
          "--data", json.dumps({"structural": result})],
         check=False,
+        capture_output=True,
     )
 
     if args.json:

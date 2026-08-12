@@ -70,12 +70,16 @@ meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 if not meshes:
     raise RuntimeError(f"No mesh found in {input_path}")
 
+# Blender's glTF importer does not always set the active object itself
+# (confirmed absent on a single-mesh import in Blender 5.2 LTS) — set it
+# explicitly rather than relying on import side effects.
+bpy.context.view_layer.objects.active = meshes[0]
+
 # Join multiple parts into a single mesh — required for a single STL solid
 if len(meshes) > 1:
     bpy.ops.object.select_all(action='DESELECT')
     for m in meshes:
         m.select_set(True)
-    bpy.context.view_layer.objects.active = meshes[0]
     bpy.ops.object.join()
 
 obj = bpy.context.view_layer.objects.active

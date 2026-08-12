@@ -387,6 +387,42 @@ conversation. Example:
 
 If unclear, ask one short question to disambiguate intent.
 
+### Mesh judge (v0.3.6+, item 18)
+
+`generate.sh --judge-mesh` renders a turntable (default 8 views,
+independent of `--preview`) of the cleaned GLB and scores it with the
+same local VLM judge as Flow 1's concept judge: recognizable-as-object,
+back-face plausibility, geometry artifacts (slivers/holes/floaters),
+and texture coherence. It catches "bad but valid" meshes that heuristic
+checks miss — a mesh can pass every structural check and still look
+wrong to a person.
+
+```bash
+generate.sh -i concept/chest.png --judge-mesh
+```
+
+**Warn, don't block.** A below-floor verdict (default <2/10) flags the
+asset as "likely degenerate — regenerate recommended" in meta.json and
+the console output. It never fails the run — the GLB is still produced
+and staged normally.
+
+**Recognition signals.** Suggest `--judge-mesh` when the user is about
+to commit an asset to their project and wants a sanity check, or has
+seen degenerate output from this generator/prompt combination before.
+Skip it for quick iteration passes where they'll eyeball the result
+themselves anyway.
+
+**Relay findings in plain language.** If `judge.mesh.notes` names a
+specific artifact (e.g. "2 floating fragments near the base"), say
+that — not the raw score. If `cleanup.loose_elements_deleted` is
+non-zero, mention that cleanup already removed some loose geometry
+before the judge ran, so a floater note may be describing something
+already partly addressed.
+
+**When NOT to suggest it:** `vlm-env` not installed; the user is mid
+rapid-iteration and doesn't want the extra render+judge latency (a few
+seconds of render plus judge time on top of the normal pipeline).
+
 ### Translation map (v0.3+ user-friendly language)
 
 The wrappers and Claude both speak engine-jargon natively, but the
@@ -414,6 +450,9 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | "judge.verdict 9, three_quarter_view 9" | "judge picked this one — good angle, clean composition (9/10)" |
 | "judge.verdict 5, three_quarter_view 3, visible_faces: front only" | "judge flagged this — shot straight-on, no side visible, may hurt the 3D reconstruction" |
 | "judge.rejected: true" | "judge thinks this one is likely unusable — consider regenerating" |
+| "judge.mesh.verdict 8, geometry_artifacts 9" | "3D check: looks solid — clean geometry, recognizable shape (8/10)" |
+| "judge.mesh.rejected: true, notes: '2 floating fragments...'" | "3D check flagged this one — 2 floating fragments near the base, likely worth regenerating" |
+| "judge.mesh.scores.texture_coherence: null" | "mesh has no texture yet, so the judge only checked geometry" |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines

@@ -2,6 +2,88 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R1.3: mesh judge (item 18)
+
+- `scripts/vlm_judge.py` — new `--mode mesh`. Renders of a mesh's
+  turntable views are judged in a single joint VLM call (all N views in
+  one prompt, `num_images=N`) rather than the item 17 image mode's
+  one-call-per-image isolation — deliberately, since geometry artifacts
+  and back-face plausibility can only be judged by comparing views of
+  the same object. Scores `recognizable`, `back_face_plausibility`,
+  `geometry_artifacts`, `texture_coherence` (nullable — the rubric
+  instructs the model to skip texture judgment and score geometry-only
+  on untextured/vertex-color-only meshes), and `overall`, plus a short
+  `artifacts_note` when `geometry_artifacts` is low. Writes
+  `judge.mesh` (nested under the existing `judge` section) via
+  `meta_helper.py merge`.
+- `scripts/generate.sh` — new `--judge-mesh` flag. Renders 8 turntable
+  views (configurable via `mesh_judge_views` in the pipeline config,
+  default floor 2/10 via `mesh_judge_floor`) independent of the
+  user-facing `--preview` mode/frame count, judges them, and prints a
+  plain-language "3D check: ..." summary. Warn-don't-block per
+  principle 10: a below-floor verdict flags the asset in meta.json and
+  the console but never fails the run. Cross-checks the judge's
+  floater note against `cleanup.loose_elements_deleted` from
+  `clean_asset.py`'s own report before presenting it, per the item 18
+  spec's false-floater-report failure mode. No-op when `vlm-env` or
+  `vlm_judge.py` isn't installed. `--json` output is additive-only:
+  `judge_mesh_verdict` / `judge_mesh_rejected` only appear when
+  `--judge-mesh` actually produced a verdict, so a no-flag run's JSON
+  is byte-identical to before this change.
+- `scripts/meta_schema.json` — `judge.mesh` subsection gains concrete
+  fields (`model`, `views_rendered`, `scores.*`, `notes`, `verdict`,
+  `rejected`, `duration_seconds`), replacing the generic placeholder
+  object reserved in R1.2.
+- `skill/SKILL.md` — new "Mesh judge" subsection under Flow 2; 3 new
+  jargon-translation rows for `judge.mesh.*`.
+- No new venv/model — reuses item 17's `vlm-env` + Qwen3-VL-30B-A3B
+  infra; no setup-guide changes needed.
+- Mesh rubric fix found during the required flattened-vs-good fixture
+  test (AC: 3/3 separation): the first rubric draft scored an obviously
+  degenerate fixture (a real GLB with Z scaled ×0.02 — renders as a
+  hairline sliver in every view) identically to the good fixture (8/10,
+  3/3 runs), even naming "sliver on left edge" in `artifacts_note`
+  while still scoring `geometry_artifacts: 8` — the same rubric-text-
+  vs-score disconnect gate G2 hit in item 17. Fixed the same way: added
+  a `shape_consistency` field the model must answer literally (does the
+  silhouette hold a consistent volume, or collapse to a hairline sliver
+  in any view?) before scoring, with an explicit instruction that a
+  hairline collapse forces `geometry_artifacts`/`recognizable`/`overall`
+  to 0-1 regardless of any other view looking clean. Re-verified 3/3:
+  good fixture 8/10 not rejected, flattened fixture 0/10 rejected, both
+  consistent across runs.
+- **Pre-existing bug, found blocking `generate.sh` entirely and fixed
+  in this PR** (unrelated to item 18's scope, but the literal blocker
+  for testing it): `meta_helper.py`'s `merge` subcommand prints
+  `[meta_helper] merged ... into ...` on stdout. Nine scripts across
+  the pipeline (`input_quality_check.py`, `mesh_quality_check.py`,
+  `texture_quality_check.py`, `game_asset_check.py`,
+  `print_structural_check.py`, `rembg_preprocess.py`, `clip_score.py`
+  ×2 call sites, `dedup_variants.py` — the last two written in R1.1)
+  call it via `subprocess.run` without capturing that output, so it
+  leaks onto the calling script's own stdout ahead of its `--json`
+  payload. Any caller that then parses that stdout as JSON (as
+  `_pipeline_lib.sh`'s `check_and_normalize_input` does with
+  `input_quality_check.py --json`) gets
+  `json.decoder.JSONDecodeError: Expecting value: line 1 column 2` and
+  — since that specific call site redirects the parse error to
+  `/dev/null` — `generate.sh` died silently via `set -e` with no
+  visible error at all. Same root cause and same fix as the
+  `vlm_judge.py` bug fixed in R1.2: added `capture_output=True` to all
+  nine call sites.
+- **Pre-existing Blender bug, also found blocking `generate.sh`
+  end-to-end and fixed in this PR**: `clean_asset.py`,
+  `turntable_render.py`, and `prepare_for_print.py` all read
+  `bpy.context.view_layer.objects.active` right after
+  `bpy.ops.import_scene.gltf(...)` without ever setting it when the
+  import produces exactly one mesh object (the `len(meshes) > 1` join
+  branch was the only place `.active` got set). On this Studio's
+  Blender 5.2.0 LTS, a single-mesh glTF import does not set an active
+  object, so `obj` was `None` and every single-mesh cleanup/render
+  crashed with `AttributeError: 'NoneType' object has no attribute
+  'vertices'`. Fixed by setting `.active = meshes[0]` unconditionally
+  right after the mesh list is validated non-empty, in all three files.
+
 ## 2026-08-12 — R1.2: local VLM judge + best-of-N (item 17)
 
 - `scripts/vlm_judge.py` (new) — local VLM judging of 2D concept images via

@@ -197,6 +197,7 @@ def main() -> int:
          "--section", "quality",
          "--data", json.dumps(payload)],
         check=False,
+        capture_output=True,
     )
 
     if args.json:
