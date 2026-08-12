@@ -44,6 +44,14 @@
       "name": "pip",
       "min_version": "23.1",
       "install_hint": "python3 -m pip install --upgrade pip"
+    },
+    {
+      "id": "gltfpack",
+      "kind": "binary",
+      "name": "gltfpack",
+      "required": false,
+      "version_flag": "",
+      "install_hint": "no Homebrew formula exists -- download gltfpack-macos.zip from https://github.com/zeux/meshoptimizer/releases, unzip, and place the gltfpack binary on your PATH (item 23; generate.sh --lods / --reuv's optimize pass)"
     }
   ],
   "mutable_embed_paths": [],

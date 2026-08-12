@@ -2,6 +2,68 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R3.1: LOD chain + UV re-unwrap (item 23)
+
+- `scripts/generate.sh` — new `--lods "N,N,N"` flag: descending target
+  polycounts emit `clean/<name>_lod{0,1,...}.glb` via `gltfpack`, plus
+  a gltfpack optimize pass (no quantization) on the base clean GLB
+  itself. New `--reuv` flag: re-unwraps UVs from scratch via `xatlas`
+  (new `scripts/reuv_mesh.py`) when the mesh has no baked textures yet.
+- **Real finding: no Homebrew formula exists for `gltfpack`** (spec
+  assumed one) — checked directly at implementation time. Real install
+  is the prebuilt binary from
+  [meshoptimizer's GitHub Releases](https://github.com/zeux/meshoptimizer/releases)
+  (`gltfpack-macos.zip`, arm64). Confirmed live: a `curl`-downloaded
+  zip has no `com.apple.quarantine` xattr, so it runs immediately —
+  no Gatekeeper unquarantine step needed with this install method.
+- **Real finding: gltfpack's default quality cap makes `-si` ratios
+  aspirational, not exact.** A 3000→300-face target (10x reduction)
+  only reached ~1300 faces with default settings (`-se`, 1% max
+  simplification error, takes priority over `-si`'s ratio). Fixed by
+  adding `-sa` (aggressive) to the LOD-generation calls, which got a
+  fresh live run to 3000→964→474 for targets 3000/1000/300 — still
+  not exact, but genuinely descending and much closer. Each
+  `cleanup.lods[]` entry now records both `polycount` (actual) and
+  `polycount_target` (requested) so this gap is visible in meta.json,
+  not silently glossed over.
+- **`--reuv` hard refusal, not just a warning:** checks
+  `quality.textures.textures_present` (already computed earlier in
+  the same run) and refuses with `status=error error=already_textured`
+  if the mesh already has baked textures — re-unwrapping would
+  invalidate them. Confirmed live: refused on a real SF3D output
+  (`albedo, normal` present), exit 2, clear stderr message + structured
+  JSON.
+- **`reuv_mesh.py` known ceiling, documented not silently dropped:**
+  vertex colors on the input are not preserved through the re-unwrap
+  (glTF's vertex-color + baseColorTexture combination round-trips
+  poorly in trimesh, and reuv's use case is "about to be freshly
+  textured" objects). Recorded as `cleanup.reuv.vertex_colors_discarded`
+  in meta.json; a stderr warning fires when it happens.
+- Confirmed live on a real synthetic low-occupancy fixture (UVs
+  deliberately compressed into a 15%×15% corner, no baked texture):
+  reuv raised occupancy from 2.2% to 99.8%.
+- `pipeline_doctor.py` — `check_prereqs` gains `required: false`
+  support (an absent optional prereq like `gltfpack` now reports
+  `missing_optional` and doesn't escalate the overall status to
+  critical for every user who never touches `--lods`) and a
+  `version_flag` override (`gltfpack --version` doesn't exist — it
+  prints its usage banner, with the version on the first line, to any
+  unrecognized/no-args invocation instead; `version_flag: ""` means
+  "invoke with no args"). New `gltfpack` prereq entry in
+  `model_manifest.json`. New regression test for the `required: false`
+  path; 3 existing prereq tests' `_binary_version` mocks updated for
+  the new second parameter.
+- xatlas-python added to the `pipeline-tools-env` install line in
+  both setup guides; new "Optional: gltfpack" install step with the
+  real (non-Homebrew) recipe.
+- `skill/SKILL.md` Flow 2 gains a "LOD chain + UV re-unwrap" section
+  covering both real findings above.
+- `meta_schema.json` — `cleanup.lods[]` and `cleanup.reuv` fields.
+- LOD smoke AC verified live: 3 descending-polycount GLBs
+  (3000/964/474 faces), all watertight-checkable via trimesh (none
+  are watertight=True — consistent with the base SF3D mesh's own
+  small gaps, not a gltfpack regression).
+
 ## 2026-08-12 — R2.4 PR9: multi-view backend slate research (item 22)
 
 - `docs/multiview-backend-research.md` — full rewrite. Replaces the

@@ -43,6 +43,9 @@ JSON_MODE=0
 BG_REMOVAL_MODE=""
 PREVIEW_MODE=""
 JUDGE_MESH=0
+LODS=""
+REUV=0
+LOD_PATHS=()
 
 usage() {
     cat <<EOF
@@ -80,6 +83,16 @@ Generation options:
                            coherence). Warn-don't-block: a below-floor
                            verdict flags the asset but does not fail the
                            run. No-op when vlm-env isn't installed.
+      --lods "N,N,N"       Descending target polycounts (e.g. "3000,1000,300")
+                           -> clean/<name>_lod{0,1,2}.glb via gltfpack.
+                           Also runs a gltfpack optimize pass (no
+                           quantization) on the base clean GLB itself.
+                           Requires gltfpack on PATH (item 23).
+      --reuv               Re-unwrap UVs from scratch via xatlas when this
+                           mesh has no baked textures yet (refuses
+                           otherwise -- re-unwrapping invalidates existing
+                           UV-mapped textures). Warn-suggested by item 13's
+                           UV check; never automatic (item 23).
   -h, --help               This help
 
 Examples:
@@ -115,6 +128,8 @@ while [[ $# -gt 0 ]]; do
         --no-preview)        PREVIEW_MODE="none"; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         --judge-mesh)        JUDGE_MESH=1;      shift ;;
+        --lods)              LODS="$2";         shift 2 ;;
+        --reuv)              REUV=1;            shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -418,6 +433,124 @@ run_pipeline_check mesh_quality_check.py --input "$CLEAN_PATH" --meta "$META_PAT
 run_pipeline_check texture_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH"
 run_pipeline_check game_asset_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --engine "$PROJECT_ENGINE"
 
+# Item 23 — UV re-unwrap via xatlas. Hard rule (not just a warning):
+# refuse on a mesh that already has baked textures, since a fresh UV
+# layout won't match the old pixels. texture_quality_check.py just ran
+# above and wrote quality.textures.textures_present into $META_PATH --
+# read that back rather than re-inspecting the mesh.
+if [[ "$REUV" == "1" ]]; then
+    REUV_SCRIPT="$SCRIPT_DIR/reuv_mesh.py"
+    [[ -f "$REUV_SCRIPT" ]] || REUV_SCRIPT="$PIPELINE_ROOT/workspace/reuv_mesh.py"
+    if [[ ! -f "$REUV_SCRIPT" || ! -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        err "reuv_mesh.py or pipeline-tools-env not available; cannot run --reuv."
+        exit 2
+    fi
+    EXISTING_TEXTURES="$(python3 -c "
+import json
+try:
+    d = json.load(open('$META_PATH'))
+except Exception:
+    d = {}
+present = (d.get('quality') or {}).get('textures', {}).get('textures_present', [])
+print(', '.join(present))
+" 2>/dev/null || echo '')"
+    if [[ -n "$EXISTING_TEXTURES" ]]; then
+        err "--reuv refused: this mesh already has baked textures ($EXISTING_TEXTURES)."
+        err "Re-unwrapping now would invalidate them. --reuv is only for meshes with no"
+        err "textures yet (vertex-color-only output, before any texture.sh --mode paint pass)."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=reuv error=already_textured \
+                existing_textures="$EXISTING_TEXTURES" \
+                clean_path="$CLEAN_PATH" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+    REUV_TMP="${CLEAN_PATH}.reuv_tmp.glb"
+    "$PIPELINE_TOOLS_ENV/bin/python" "$REUV_SCRIPT" \
+        --input "$CLEAN_PATH" --output "$REUV_TMP" --meta "$META_PATH" 2>&1 \
+        | { while IFS= read -r line; do printf "[pipeline] %s\n" "$line" >&"$HUMAN_FD"; done; }
+    mv "$REUV_TMP" "$CLEAN_PATH"
+    # Re-run the UV check so meta.json's quality.uv reflects the new layout.
+    run_pipeline_check game_asset_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --engine "$PROJECT_ENGINE"
+fi
+
+# Item 23 — LOD chain via gltfpack (meshoptimizer). No Homebrew formula
+# exists for gltfpack (checked at implementation time) -- the real
+# install path is the prebuilt binary on the project's GitHub Releases
+# page, same "binary on PATH" convention as real-esrgan-ncnn-vulkan in
+# texture.sh. --lods is opt-in only: gltfpack's optimize pass touches
+# the base clean GLB too (see below), so this never runs unless asked.
+if [[ -n "$LODS" ]]; then
+    if ! command -v gltfpack >/dev/null 2>&1; then
+        err "gltfpack binary not found in PATH."
+        err "  Install: https://github.com/zeux/meshoptimizer/releases (gltfpack-macos.zip)"
+        err "  No Homebrew formula exists for gltfpack -- download the release zip,"
+        err "  unzip, and place the gltfpack binary on your PATH."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=lods error=not_installed tool=gltfpack \
+                clean_path="$CLEAN_PATH" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    CURRENT_FACES="$("$PIPELINE_TOOLS_ENV/bin/python" -c "
+import trimesh
+m = trimesh.load('$CLEAN_PATH', force='mesh')
+print(len(m.faces))
+")"
+
+    LOD_META_ENTRIES="[]"
+    IFS=',' read -ra LOD_TARGETS <<< "$LODS"
+    for idx in "${!LOD_TARGETS[@]}"; do
+        target="${LOD_TARGETS[$idx]}"
+        LOD_PATH="$CLEAN_DIR/${OUTPUT_NAME}_lod${idx}.glb"
+        RATIO="$(python3 -c "print(min(1.0, $target / $CURRENT_FACES))")"
+        # -sa (aggressive): gltfpack's default -se 0.01 (1% max deviation)
+        # caps how far it will simplify regardless of -si's ratio -- real
+        # finding: without -sa, a 3000->300 target (10x) only reached ~1300
+        # faces, nowhere near the requested count. -sa disregards that
+        # quality cap to actually hit the target ratio.
+        gltfpack -i "$CLEAN_PATH" -o "$LOD_PATH" -si "$RATIO" -sa > /dev/null 2>&1 || {
+            err "gltfpack failed producing LOD $idx (target $target faces)"; exit 1;
+        }
+        ACTUAL_FACES="$("$PIPELINE_TOOLS_ENV/bin/python" -c "
+import trimesh
+m = trimesh.load('$LOD_PATH', force='mesh')
+print(len(m.faces))
+")"
+        LOD_PATHS+=("$LOD_PATH")
+        info "LOD $idx: target $target faces -> $ACTUAL_FACES actual faces -> $LOD_PATH"
+        LOD_META_ENTRIES="$(python3 -c "
+import json
+entries = json.loads('''$LOD_META_ENTRIES''')
+entries.append({\"path\": \"$LOD_PATH\", \"polycount\": $ACTUAL_FACES, \"polycount_target\": $target})
+print(json.dumps(entries))
+")"
+    done
+
+    # "Also run gltfpack's optimize pass on the default clean GLB"
+    # (item 23 spec) -- quantization OFF by default, engine compat first.
+    OPT_TMP="${CLEAN_PATH}.gltfpack_tmp.glb"
+    if gltfpack -i "$CLEAN_PATH" -o "$OPT_TMP" -si 1 > /dev/null 2>&1; then
+        mv "$OPT_TMP" "$CLEAN_PATH"
+        info "gltfpack optimize pass applied to base clean GLB (no quantization)"
+    else
+        rm -f "$OPT_TMP"
+        err "gltfpack optimize pass on the base clean GLB failed; LOD files were still produced."
+    fi
+
+    if [[ -f "$META_PATH" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        "$PIPELINE_TOOLS_ENV/bin/python" "$SCRIPT_DIR/meta_helper.py" merge "$META_PATH" \
+            --section cleanup --data "{\"lods\": $LOD_META_ENTRIES}" > /dev/null 2>&1 || true
+    fi
+fi
+
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is
 # missing (older clean_asset.py or meta_helper.py absent).
@@ -483,6 +616,15 @@ if [[ "$PROJECT_MODE" == "project" && $SKIP_ENGINE_STAGE -eq 0 ]]; then
         if [[ -n "$ENGINE_STAGED_PATH" ]]; then
             cp "$CLEAN_PATH" "$ENGINE_STAGED_PATH"
             info "Staged for engine: $ENGINE_STAGED_PATH"
+            # Item 23 — copy the LOD set alongside the base GLB, same
+            # naming suffix convention (_lod0/_lod1/...) so engine-side
+            # LOD group setup can glob for them.
+            for LOD_PATH in "${LOD_PATHS[@]}"; do
+                LOD_SUFFIX="${LOD_PATH##*_lod}"
+                ENGINE_LOD_PATH="${ENGINE_STAGED_PATH%.glb}_lod${LOD_SUFFIX}"
+                cp "$LOD_PATH" "$ENGINE_LOD_PATH"
+                info "Staged LOD for engine: $ENGINE_LOD_PATH"
+            done
         fi
     fi
 fi
@@ -690,6 +832,14 @@ if [[ "$JSON_MODE" == "1" ]]; then
     if [[ -n "$JUDGE_MESH_VERDICT" ]]; then
         JSON_EMIT_ARGS+=( --float judge_mesh_verdict="$JUDGE_MESH_VERDICT" )
         JSON_EMIT_ARGS+=( --bool judge_mesh_rejected="$JUDGE_MESH_REJECTED" )
+    fi
+    # Item 23 — additive-only: only appear when --lods/--reuv ran, so a
+    # no-flag run's --json output is unchanged.
+    if [[ ${#LOD_PATHS[@]} -gt 0 ]]; then
+        JSON_EMIT_ARGS+=( --int lods_generated="${#LOD_PATHS[@]}" )
+    fi
+    if [[ "$REUV" == "1" ]]; then
+        JSON_EMIT_ARGS+=( --bool reuv_applied=true )
     fi
     python3 "$SCRIPT_DIR/json_emit.py" "${JSON_EMIT_ARGS[@]}"
 fi

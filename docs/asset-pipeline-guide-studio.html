@@ -2637,6 +2637,9 @@ JSON_MODE=0
 BG_REMOVAL_MODE=&quot;&quot;
 PREVIEW_MODE=&quot;&quot;
 JUDGE_MESH=0
+LODS=&quot;&quot;
+REUV=0
+LOD_PATHS=()
 
 usage() {
     cat &lt;&lt;EOF
@@ -2674,6 +2677,16 @@ Generation options:
                            coherence). Warn-don&#x27;t-block: a below-floor
                            verdict flags the asset but does not fail the
                            run. No-op when vlm-env isn&#x27;t installed.
+      --lods &quot;N,N,N&quot;       Descending target polycounts (e.g. &quot;3000,1000,300&quot;)
+                           -&gt; clean/&lt;name&gt;_lod{0,1,2}.glb via gltfpack.
+                           Also runs a gltfpack optimize pass (no
+                           quantization) on the base clean GLB itself.
+                           Requires gltfpack on PATH (item 23).
+      --reuv               Re-unwrap UVs from scratch via xatlas when this
+                           mesh has no baked textures yet (refuses
+                           otherwise -- re-unwrapping invalidates existing
+                           UV-mapped textures). Warn-suggested by item 13&#x27;s
+                           UV check; never automatic (item 23).
   -h, --help               This help
 
 Examples:
@@ -2709,6 +2722,8 @@ while [[ $# -gt 0 ]]; do
         --no-preview)        PREVIEW_MODE=&quot;none&quot;; shift ;;
         --json)              JSON_MODE=1;       shift ;;
         --judge-mesh)        JUDGE_MESH=1;      shift ;;
+        --lods)              LODS=&quot;$2&quot;;         shift 2 ;;
+        --reuv)              REUV=1;            shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
     esac
@@ -3012,6 +3027,124 @@ run_pipeline_check mesh_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta 
 run_pipeline_check texture_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot;
 run_pipeline_check game_asset_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --engine &quot;$PROJECT_ENGINE&quot;
 
+# Item 23 — UV re-unwrap via xatlas. Hard rule (not just a warning):
+# refuse on a mesh that already has baked textures, since a fresh UV
+# layout won&#x27;t match the old pixels. texture_quality_check.py just ran
+# above and wrote quality.textures.textures_present into $META_PATH --
+# read that back rather than re-inspecting the mesh.
+if [[ &quot;$REUV&quot; == &quot;1&quot; ]]; then
+    REUV_SCRIPT=&quot;$SCRIPT_DIR/reuv_mesh.py&quot;
+    [[ -f &quot;$REUV_SCRIPT&quot; ]] || REUV_SCRIPT=&quot;$PIPELINE_ROOT/workspace/reuv_mesh.py&quot;
+    if [[ ! -f &quot;$REUV_SCRIPT&quot; || ! -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        err &quot;reuv_mesh.py or pipeline-tools-env not available; cannot run --reuv.&quot;
+        exit 2
+    fi
+    EXISTING_TEXTURES=&quot;$(python3 -c &quot;
+import json
+try:
+    d = json.load(open(&#x27;$META_PATH&#x27;))
+except Exception:
+    d = {}
+present = (d.get(&#x27;quality&#x27;) or {}).get(&#x27;textures&#x27;, {}).get(&#x27;textures_present&#x27;, [])
+print(&#x27;, &#x27;.join(present))
+&quot; 2&gt;/dev/null || echo &#x27;&#x27;)&quot;
+    if [[ -n &quot;$EXISTING_TEXTURES&quot; ]]; then
+        err &quot;--reuv refused: this mesh already has baked textures ($EXISTING_TEXTURES).&quot;
+        err &quot;Re-unwrapping now would invalidate them. --reuv is only for meshes with no&quot;
+        err &quot;textures yet (vertex-color-only output, before any texture.sh --mode paint pass).&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=reuv error=already_textured \
+                existing_textures=&quot;$EXISTING_TEXTURES&quot; \
+                clean_path=&quot;$CLEAN_PATH&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+    REUV_TMP=&quot;${CLEAN_PATH}.reuv_tmp.glb&quot;
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$REUV_SCRIPT&quot; \
+        --input &quot;$CLEAN_PATH&quot; --output &quot;$REUV_TMP&quot; --meta &quot;$META_PATH&quot; 2&gt;&amp;1 \
+        | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;$line&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; }
+    mv &quot;$REUV_TMP&quot; &quot;$CLEAN_PATH&quot;
+    # Re-run the UV check so meta.json&#x27;s quality.uv reflects the new layout.
+    run_pipeline_check game_asset_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --engine &quot;$PROJECT_ENGINE&quot;
+fi
+
+# Item 23 — LOD chain via gltfpack (meshoptimizer). No Homebrew formula
+# exists for gltfpack (checked at implementation time) -- the real
+# install path is the prebuilt binary on the project&#x27;s GitHub Releases
+# page, same &quot;binary on PATH&quot; convention as real-esrgan-ncnn-vulkan in
+# texture.sh. --lods is opt-in only: gltfpack&#x27;s optimize pass touches
+# the base clean GLB too (see below), so this never runs unless asked.
+if [[ -n &quot;$LODS&quot; ]]; then
+    if ! command -v gltfpack &gt;/dev/null 2&gt;&amp;1; then
+        err &quot;gltfpack binary not found in PATH.&quot;
+        err &quot;  Install: https://github.com/zeux/meshoptimizer/releases (gltfpack-macos.zip)&quot;
+        err &quot;  No Homebrew formula exists for gltfpack -- download the release zip,&quot;
+        err &quot;  unzip, and place the gltfpack binary on your PATH.&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=lods error=not_installed tool=gltfpack \
+                clean_path=&quot;$CLEAN_PATH&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    CURRENT_FACES=&quot;$(&quot;$PIPELINE_TOOLS_ENV/bin/python&quot; -c &quot;
+import trimesh
+m = trimesh.load(&#x27;$CLEAN_PATH&#x27;, force=&#x27;mesh&#x27;)
+print(len(m.faces))
+&quot;)&quot;
+
+    LOD_META_ENTRIES=&quot;[]&quot;
+    IFS=&#x27;,&#x27; read -ra LOD_TARGETS &lt;&lt;&lt; &quot;$LODS&quot;
+    for idx in &quot;${!LOD_TARGETS[@]}&quot;; do
+        target=&quot;${LOD_TARGETS[$idx]}&quot;
+        LOD_PATH=&quot;$CLEAN_DIR/${OUTPUT_NAME}_lod${idx}.glb&quot;
+        RATIO=&quot;$(python3 -c &quot;print(min(1.0, $target / $CURRENT_FACES))&quot;)&quot;
+        # -sa (aggressive): gltfpack&#x27;s default -se 0.01 (1% max deviation)
+        # caps how far it will simplify regardless of -si&#x27;s ratio -- real
+        # finding: without -sa, a 3000-&gt;300 target (10x) only reached ~1300
+        # faces, nowhere near the requested count. -sa disregards that
+        # quality cap to actually hit the target ratio.
+        gltfpack -i &quot;$CLEAN_PATH&quot; -o &quot;$LOD_PATH&quot; -si &quot;$RATIO&quot; -sa &gt; /dev/null 2&gt;&amp;1 || {
+            err &quot;gltfpack failed producing LOD $idx (target $target faces)&quot;; exit 1;
+        }
+        ACTUAL_FACES=&quot;$(&quot;$PIPELINE_TOOLS_ENV/bin/python&quot; -c &quot;
+import trimesh
+m = trimesh.load(&#x27;$LOD_PATH&#x27;, force=&#x27;mesh&#x27;)
+print(len(m.faces))
+&quot;)&quot;
+        LOD_PATHS+=(&quot;$LOD_PATH&quot;)
+        info &quot;LOD $idx: target $target faces -&gt; $ACTUAL_FACES actual faces -&gt; $LOD_PATH&quot;
+        LOD_META_ENTRIES=&quot;$(python3 -c &quot;
+import json
+entries = json.loads(&#x27;&#x27;&#x27;$LOD_META_ENTRIES&#x27;&#x27;&#x27;)
+entries.append({\&quot;path\&quot;: \&quot;$LOD_PATH\&quot;, \&quot;polycount\&quot;: $ACTUAL_FACES, \&quot;polycount_target\&quot;: $target})
+print(json.dumps(entries))
+&quot;)&quot;
+    done
+
+    # &quot;Also run gltfpack&#x27;s optimize pass on the default clean GLB&quot;
+    # (item 23 spec) -- quantization OFF by default, engine compat first.
+    OPT_TMP=&quot;${CLEAN_PATH}.gltfpack_tmp.glb&quot;
+    if gltfpack -i &quot;$CLEAN_PATH&quot; -o &quot;$OPT_TMP&quot; -si 1 &gt; /dev/null 2&gt;&amp;1; then
+        mv &quot;$OPT_TMP&quot; &quot;$CLEAN_PATH&quot;
+        info &quot;gltfpack optimize pass applied to base clean GLB (no quantization)&quot;
+    else
+        rm -f &quot;$OPT_TMP&quot;
+        err &quot;gltfpack optimize pass on the base clean GLB failed; LOD files were still produced.&quot;
+    fi
+
+    if [[ -f &quot;$META_PATH&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$SCRIPT_DIR/meta_helper.py&quot; merge &quot;$META_PATH&quot; \
+            --section cleanup --data &quot;{\&quot;lods\&quot;: $LOD_META_ENTRIES}&quot; &gt; /dev/null 2&gt;&amp;1 || true
+    fi
+fi
+
 # v0.3 — surface a user-friendly cleanup summary if clean_asset.py wrote
 # its `cleanup` section into the meta.json. Silent when the section is
 # missing (older clean_asset.py or meta_helper.py absent).
@@ -3077,6 +3210,15 @@ if [[ &quot;$PROJECT_MODE&quot; == &quot;project&quot; &amp;&amp; $SKIP_ENGINE_S
         if [[ -n &quot;$ENGINE_STAGED_PATH&quot; ]]; then
             cp &quot;$CLEAN_PATH&quot; &quot;$ENGINE_STAGED_PATH&quot;
             info &quot;Staged for engine: $ENGINE_STAGED_PATH&quot;
+            # Item 23 — copy the LOD set alongside the base GLB, same
+            # naming suffix convention (_lod0/_lod1/...) so engine-side
+            # LOD group setup can glob for them.
+            for LOD_PATH in &quot;${LOD_PATHS[@]}&quot;; do
+                LOD_SUFFIX=&quot;${LOD_PATH##*_lod}&quot;
+                ENGINE_LOD_PATH=&quot;${ENGINE_STAGED_PATH%.glb}_lod${LOD_SUFFIX}&quot;
+                cp &quot;$LOD_PATH&quot; &quot;$ENGINE_LOD_PATH&quot;
+                info &quot;Staged LOD for engine: $ENGINE_LOD_PATH&quot;
+            done
         fi
     fi
 fi
@@ -3284,6 +3426,14 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     if [[ -n &quot;$JUDGE_MESH_VERDICT&quot; ]]; then
         JSON_EMIT_ARGS+=( --float judge_mesh_verdict=&quot;$JUDGE_MESH_VERDICT&quot; )
         JSON_EMIT_ARGS+=( --bool judge_mesh_rejected=&quot;$JUDGE_MESH_REJECTED&quot; )
+    fi
+    # Item 23 — additive-only: only appear when --lods/--reuv ran, so a
+    # no-flag run&#x27;s --json output is unchanged.
+    if [[ ${#LOD_PATHS[@]} -gt 0 ]]; then
+        JSON_EMIT_ARGS+=( --int lods_generated=&quot;${#LOD_PATHS[@]}&quot; )
+    fi
+    if [[ &quot;$REUV&quot; == &quot;1&quot; ]]; then
+        JSON_EMIT_ARGS+=( --bool reuv_applied=true )
     fi
     python3 &quot;$SCRIPT_DIR/json_emit.py&quot; &quot;${JSON_EMIT_ARGS[@]}&quot;
 fi
@@ -6401,7 +6551,31 @@ PIPELINE_EOF</pre></div>
             &quot;error&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] }
           }
         },
-        &quot;duration_seconds&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] }
+        &quot;duration_seconds&quot;: { &quot;type&quot;: [&quot;number&quot;, &quot;null&quot;] },
+        &quot;lods&quot;: {
+          &quot;type&quot;: &quot;array&quot;,
+          &quot;description&quot;: &quot;Item 23 — generate.sh --lods, one entry per LOD level via gltfpack.&quot;,
+          &quot;items&quot;: {
+            &quot;type&quot;: &quot;object&quot;,
+            &quot;properties&quot;: {
+              &quot;path&quot;: { &quot;type&quot;: &quot;string&quot; },
+              &quot;polycount&quot;: { &quot;type&quot;: &quot;integer&quot;, &quot;description&quot;: &quot;Actual resulting face count -- gltfpack&#x27;s default quality cap (-se, 1% max deviation) means this can land well above polycount_target; -sa (aggressive) is used to get closer.&quot; },
+              &quot;polycount_target&quot;: { &quot;type&quot;: &quot;integer&quot; }
+            }
+          }
+        },
+        &quot;reuv&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;description&quot;: &quot;Item 23 — generate.sh --reuv (xatlas UV re-unwrap).&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;applied&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;occupancy_before&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;occupancy_after&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;vertex_colors_discarded&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+          }
+        }
       }
     },
 
@@ -7017,12 +7191,16 @@ def check_skill(manifest: dict, mutable_paths: list[str]) -&gt; dict:
     return {&quot;status&quot;: overall, &quot;skill&quot;: rows}
 
 
-def _binary_version(name: str) -&gt; str | None:
+def _binary_version(name: str, version_flag: str = &quot;--version&quot;) -&gt; str | None:
     if shutil.which(name) is None:
         return None
+    # Item 23: gltfpack has no --version flag (prints its usage banner, with
+    # the version on the first line, to any unrecognized/no args instead) --
+    # version_flag=&quot;&quot; means &quot;invoke with no args&quot;, not &quot;pass an empty string
+    # as an argument&quot;.
+    cmd = [name] if version_flag == &quot;&quot; else [name, version_flag]
     try:
-        r = subprocess.run([name, &quot;--version&quot;], capture_output=True,
-                            text=True, timeout=5)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
     stdout = r.stdout if isinstance(r.stdout, str) else &quot;&quot;
@@ -7047,12 +7225,17 @@ def check_prereqs(manifest: dict) -&gt; dict:
     overall = &quot;ok&quot;
     for p in (manifest.get(&quot;prereqs&quot;) or []):
         name = p[&quot;name&quot;]
-        version = _binary_version(name)
-        entry: dict = {&quot;id&quot;: p[&quot;id&quot;], &quot;name&quot;: name, &quot;version&quot;: version}
+        version = _binary_version(name, p.get(&quot;version_flag&quot;, &quot;--version&quot;))
+        # Item 23: opt-in binaries (gltfpack) declare required=false so their
+        # absence surfaces as info, not a critical failure for every user who
+        # never runs --lods. Defaults to true (existing prereqs unaffected).
+        required = p.get(&quot;required&quot;, True)
+        entry: dict = {&quot;id&quot;: p[&quot;id&quot;], &quot;name&quot;: name, &quot;version&quot;: version, &quot;required&quot;: required}
         if version is None:
-            entry[&quot;status&quot;] = &quot;missing&quot;
+            entry[&quot;status&quot;] = &quot;missing&quot; if required else &quot;missing_optional&quot;
             entry[&quot;install_hint&quot;] = p.get(&quot;install_hint&quot;, &quot;&quot;)
-            overall = &quot;critical&quot;
+            if required:
+                overall = &quot;critical&quot;
             rows.append(entry)
             continue
         vt = _version_tuple(version)
@@ -8586,6 +8769,14 @@ PIPELINE_EOF</pre></div>
       &quot;name&quot;: &quot;pip&quot;,
       &quot;min_version&quot;: &quot;23.1&quot;,
       &quot;install_hint&quot;: &quot;python3 -m pip install --upgrade pip&quot;
+    },
+    {
+      &quot;id&quot;: &quot;gltfpack&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;gltfpack&quot;,
+      &quot;required&quot;: false,
+      &quot;version_flag&quot;: &quot;&quot;,
+      &quot;install_hint&quot;: &quot;no Homebrew formula exists -- download gltfpack-macos.zip from https://github.com/zeux/meshoptimizer/releases, unzip, and place the gltfpack binary on your PATH (item 23; generate.sh --lods / --reuv&#x27;s optimize pass)&quot;
     }
   ],
   &quot;mutable_embed_paths&quot;: [],
@@ -10378,6 +10569,137 @@ def main() -&gt; int:
                 print(f&quot;[game-check] Engine: ⚠ normal handedness is &quot;
                       f&quot;{engine[&#x27;normal_handedness&#x27;]}; &quot;
                       f&quot;{engine[&#x27;engine_target&#x27;]} expects the opposite&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>reuv_mesh.py</code>
+                <span class="script-summary-desc">v0.4 item 23 &mdash; xatlas UV re-unwrap (generate.sh --reuv)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/reuv_mesh.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.4 — xatlas UV re-unwrap (item 23).
+
+Re-unwraps a mesh&#x27;s UVs from scratch via xatlas when item 13&#x27;s UV
+check (game_asset_check.py) reports low occupancy or a high island
+count. Warn-suggested, never automatic — the caller (generate.sh
+--reuv) decides when to invoke this, and only on meshes with no
+baked image textures yet (re-unwrapping invalidates any existing
+UV-mapped texture, since the new layout won&#x27;t match the old pixels).
+
+Known ceiling: rebuilds the mesh&#x27;s visual from scratch around the new
+UVs (trimesh.visual.TextureVisuals with no image yet — ready for a
+later texture.sh --mode paint pass). Vertex colors, if present on the
+input, are NOT preserved — glTF&#x27;s vertex-color + baseColorTexture
+combination is real but poorly supported round-trip in trimesh export,
+and reuv&#x27;s whole point is &quot;about to be freshly textured&quot; objects, not
+&quot;the vertex colors are the final look&quot; ones. A clear warning is
+printed and recorded when input vertex colors are discarded.
+
+Usage:
+    reuv_mesh.py --input PATH.glb --output PATH.glb --meta PATH [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+
+def _imports():
+    try:
+        import numpy as np
+        import trimesh
+        import xatlas
+        return trimesh, np, xatlas
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); install xatlas in pipeline-tools-env.&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _occupancy(uv, np) -&gt; float:
+    if uv is None or len(uv) == 0:
+        return 0.0
+    u_min, v_min = uv.min(axis=0)
+    u_max, v_max = uv.max(axis=0)
+    return max(0.0, min(1.0, float((u_max - u_min) * (v_max - v_min))))
+
+
+def _merge_meta(meta_path: Path, payload: dict) -&gt; None:
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;cleanup&quot;, &quot;--data&quot;, json.dumps(payload)],
+        check=False, capture_output=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--output&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    trimesh, np, xatlas = _imports()
+
+    mesh = trimesh.load(Path(args.input).expanduser(), force=&quot;mesh&quot;)
+    original_uv = getattr(getattr(mesh, &quot;visual&quot;, None), &quot;uv&quot;, None)
+    occ_before = _occupancy(original_uv, np)
+    had_vertex_colors = (
+        isinstance(mesh.visual, trimesh.visual.color.ColorVisuals)
+        and mesh.visual.vertex_colors is not None
+    )
+
+    positions = np.asarray(mesh.vertices, dtype=np.float32)
+    indices = np.asarray(mesh.faces, dtype=np.uint32)
+    normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
+
+    t0 = time.time()
+    vmapping, new_indices, new_uvs = xatlas.parametrize(positions, indices, normals)
+    duration = round(time.time() - t0, 2)
+
+    new_vertices = positions[vmapping]
+    new_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_indices, process=False)
+    new_mesh.visual = trimesh.visual.TextureVisuals(uv=new_uvs)
+    new_mesh.export(Path(args.output).expanduser())
+
+    occ_after = _occupancy(new_uvs, np)
+
+    if had_vertex_colors:
+        print(
+            &quot;[reuv] WARNING: input had vertex colors; the re-unwrapped output &quot;
+            &quot;does not preserve them (known ceiling — see script docstring).&quot;,
+            file=sys.stderr,
+        )
+
+    payload = {
+        &quot;reuv&quot;: {
+            &quot;applied&quot;: True,
+            &quot;occupancy_before&quot;: round(occ_before, 3),
+            &quot;occupancy_after&quot;: round(occ_after, 3),
+            &quot;vertex_colors_discarded&quot;: had_vertex_colors,
+            &quot;duration_seconds&quot;: duration,
+        }
+    }
+    _merge_meta(Path(args.meta).expanduser(), payload)
+
+    if args.json:
+        print(json.dumps(payload[&quot;reuv&quot;], sort_keys=True))
+    else:
+        print(f&quot;[reuv] occupancy {occ_before:.1%} -&gt; {occ_after:.1%} ({duration}s)&quot;)
     return 0
 
 
@@ -14584,6 +14906,52 @@ Use this as a signal of generator output quality. Heuristics:
 For prints (Flow 4 / 5): higher cleanup counts correlate with
 slicer trouble. Worth surfacing when the destination is a printer.
 
+### LOD chain + UV re-unwrap (v0.4+, item 23)
+
+```bash
+generate.sh -i concept/chest.png --lods &quot;3000,1000,300&quot;
+generate.sh -i concept/chest.png --reuv
+```
+
+**`--lods &quot;N,N,N&quot;`** (descending target polycounts) emits
+`clean/&lt;name&gt;_lod{0,1,2}.glb` via `gltfpack`, plus runs a gltfpack
+optimize pass (no quantization) on the base clean GLB itself. Engine
+staging copies the whole LOD set alongside the main GLB when
+applicable, same `_lod0`/`_lod1`/... suffix.
+
+**Real finding worth relaying to the user:** gltfpack&#x27;s default
+quality cap (`-se`, 1% max deviation) means the *actual* resulting
+polycount can land well above the target, especially for aggressive
+reductions — `generate.sh` uses `-sa` (aggressive) to get closer, but
+still won&#x27;t hit the exact number. Each `cleanup.lods[]` entry in
+meta.json records both `polycount` (actual) and `polycount_target`
+(requested) — check both, don&#x27;t assume they match. Requires
+`gltfpack` on PATH; **no Homebrew formula exists** — it&#x27;s a prebuilt
+binary from
+[meshoptimizer&#x27;s GitHub Releases](https://github.com/zeux/meshoptimizer/releases).
+`--lods` fails clearly (`status=error error=not_installed`) rather
+than silently skipping when missing.
+
+**`--reuv`** re-unwraps UVs from scratch via `xatlas` when item 13&#x27;s
+UV check (`quality.uv.occupancy_ratio`) reports low occupancy
+(&lt; 40%) or a high island count. **Warn-suggested, never automatic**
+— only run it when the user asks or you&#x27;ve flagged low occupancy and
+they agree.
+
+**Hard refusal, not just a warning:** `generate.sh` checks
+`quality.textures.textures_present` (already computed by the quality
+checks that run before this) and refuses with
+`status=error error=already_textured` if the mesh already has baked
+textures — re-unwrapping would invalidate them. `--reuv` is only for
+untextured meshes (vertex-color-only output, or before a
+`texture.sh --mode paint` pass — same &quot;before paint&quot; rule as item
+19&#x27;s paint-mode refusal). Relay the refusal message; don&#x27;t retry.
+
+**Known ceiling:** the re-unwrapped mesh does not preserve vertex
+colors if the input had them (`cleanup.reuv.vertex_colors_discarded`
+in meta.json) — reuv&#x27;s own worldview is &quot;about to be freshly
+textured,&quot; not &quot;the vertex colors are the final look.&quot;
+
 ### Input quality check (v0.3+)
 
 When `pipeline-tools-env` is installed, the wrapper runs an input
@@ -15709,7 +16077,7 @@ chmod +x ~/.claude/skills/asset-pipeline/scripts/update_manifest.py</pre></div>
 <span class="tk-prompt">$ </span>python3.12 -m venv pipeline-tools-env    <span class="tk-cmt"># match SF3D / mflux Python version</span>
 <span class="tk-prompt">$ </span>source pipeline-tools-env/bin/activate
 <span class="tk-prompt">$ </span>pip install --upgrade pip
-<span class="tk-prompt">$ </span>pip install trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests <span class="tk-str">"transformers==4.57.6"</span> dreamsim
+<span class="tk-prompt">$ </span>pip install trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests <span class="tk-str">"transformers==4.57.6"</span> dreamsim xatlas
 <span class="tk-prompt">$ </span>pip install setuptools
 <span class="tk-prompt">$ </span>pip install image-reward --no-build-isolation
 <span class="tk-prompt">$ </span>pip install git+https://github.com/openai/CLIP.git
@@ -15740,7 +16108,7 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
         <div class="step-body">
           <h3>Verify</h3>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/pipeline-tools-env/bin/activate
-<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests, transformers, clip, dreamsim; print('ok')"</span>
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests, transformers, clip, dreamsim, xatlas; print('ok')"</span>
 <span class="tk-prompt">$ </span>cd ~/3d-pipeline/workspace
 <span class="tk-prompt">$ </span>python -c <span class="tk-str">"import sys; sys.path.insert(0, '.'); from preference_score import _apply_transformers_compat_shim; _apply_transformers_compat_shim(); import ImageReward; print('ok')"</span>
 <span class="tk-prompt">$ </span>deactivate</pre></div>
@@ -15749,6 +16117,28 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
             <div class="verify-header">Verify</div>
             <div class="verify-body">Each import succeeds. If <code>rembg</code> or <code>open_clip_torch</code> fail to install on your machine, see the troubleshooting notes in <a href="UPGRADES-studio.md">UPGRADES-studio.md</a>.</div>
           </div>
+        </div>
+      </div>
+
+      <div class="step" data-step="gltfpack-install">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Optional: gltfpack (item 23 &mdash; LOD chain)</h3>
+          <p>Powers <code>generate.sh --lods</code>'s LOD chain generation and its optimize pass on the base clean GLB. MIT, no model weights. <strong>No Homebrew formula exists</strong> (checked at implementation time) &mdash; the real install is the prebuilt binary from meshoptimizer's own GitHub Releases.</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>mkdir -p ~/3d-pipeline/bin
+<span class="tk-prompt">$ </span>curl -sL -o /tmp/gltfpack-macos.zip <span class="tk-str">"https://github.com/zeux/meshoptimizer/releases/download/v1.2/gltfpack-macos.zip"</span>
+<span class="tk-prompt">$ </span>unzip -o /tmp/gltfpack-macos.zip -d /tmp/gltfpack-macos
+<span class="tk-prompt">$ </span>cp /tmp/gltfpack-macos/gltfpack ~/3d-pipeline/bin/gltfpack
+<span class="tk-prompt">$ </span>chmod +x ~/3d-pipeline/bin/gltfpack</pre></div>
+          <p>Add <code>~/3d-pipeline/bin</code> to your PATH (add to <code>~/.zshrc</code> or <code>~/.bashrc</code>, whichever your shell reads):</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre>export PATH=<span class="tk-str">"$HOME/3d-pipeline/bin:$PATH"</span></pre></div>
+          <div class="callout callout-info">
+            <div class="callout-label">Downloaded via curl, not a browser &mdash; no Gatekeeper quarantine step needed</div>
+            <p>Confirmed live: a browser-downloaded zip gets a <code>com.apple.quarantine</code> extended attribute that blocks execution until cleared (<code>xattr -d com.apple.quarantine</code>). <code>curl</code> doesn't set that attribute, so the install above just works.</p>
+          </div>
+          <p>Verify:</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>gltfpack
+<span class="tk-cmt"># -&gt; "gltfpack 1.2" + usage (exit 0) -- no --version flag, this is the real check</span></pre></div>
         </div>
       </div>
 
