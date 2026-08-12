@@ -606,6 +606,53 @@ colors if the input had them (`cleanup.reuv.vertex_colors_discarded`
 in meta.json) — reuv's own worldview is "about to be freshly
 textured," not "the vertex colors are the final look."
 
+### Quad retopo — QuadWild bi-MDF (v0.4+, item 25)
+
+```bash
+generate.sh -i concept/chest.png --retopo quad
+generate.sh -i concept/chest.png --retopo quad --retopo-timeout 300
+```
+
+Opt-in, replaces the mesh's decimated tri-soup topology with a
+quad-dominant retopology via [QuadWild bi-MDF](https://github.com/cgg-bern/quadwild-bimdf)
+(`quadwild` + `quad_from_patches`, both required on PATH — GPL-3 CLI,
+`commercial_safe` bucket: tool-side copyleft only, no shipped weights,
+generated GLB outputs unaffected). Suggest it for assets headed to
+sculpt, animation, or close-up — not for background props, where the
+default decimated mesh is fine.
+
+**Same "before paint, never after" ordering rule as item 23.** Hard
+refusal (not a warning) on an already-textured mesh — retopo discards
+topology and any UV layout unconditionally. Same
+`quality.textures.textures_present`-based refusal mechanism as
+`--reuv` and paint mode. **In practice this means SF3D's own output
+already has baked textures at generation time**, so `--retopo` refuses
+immediately after a default SF3D run — it needs an untextured
+mesh, same constraint `--reuv` already has. Relay the refusal
+message; don't retry.
+
+QuadWild's own output OBJ carries no UV data at all (verified by
+inspection — zero `vt` lines), so run `--reuv` right after a
+successful `--retopo quad` to give the new topology a UV layout before
+any texture pass.
+
+**Real finding worth relaying to the user:** `quad_from_patches`'s
+exit code is not a reliable success/failure signal on its own —
+`retopo_quad.py` checks for the actual expected output file instead.
+Records `cleanup.retopo: {method, faces_before, faces_after,
+quad_fraction, watertight}` in meta.json.
+
+**Timeout:** pathological input meshes can hang the solver — each of
+QuadWild's two steps (prep/remesh, then quadrangulation) is killed
+after `--retopo-timeout` seconds (default 600) and reported as
+`status=error stage=retopo error=timeout`. Requires both `quadwild`
+and `quad_from_patches` on PATH; **no Homebrew formula exists** — both
+binaries ship together in the prebuilt
+[macOS release zip](https://github.com/cgg-bern/quadwild-bimdf/releases)
+(arm64+x86_64 universal). `--retopo` fails clearly
+(`status=error error=not_installed`) rather than silently skipping
+when missing.
+
 ### Input quality check (v0.3+)
 
 When `pipeline-tools-env` is installed, the wrapper runs an input

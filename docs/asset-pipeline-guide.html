@@ -1813,6 +1813,11 @@ license_bucket_for_model() {
         # recommended, same convention as commercial_threshold&#x27;s MAU
         # footnote.
         marigold-iid)                           echo commercial_safe ;;
+        # Item 25 retopo (2026-08): QuadWild bi-MDF is GPL-3 (verified via
+        # GitHub API license metadata on cgg-bern/quadwild-bimdf) but a
+        # CLI tool with no shipped weights — tool-side copyleft only,
+        # generated GLB outputs are unaffected by GPL-3&#x27;s terms.
+        quadwild-bimdf)                         echo commercial_safe ;;
         &quot;&quot;)                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
@@ -2626,6 +2631,8 @@ JUDGE_MESH=0
 LODS=&quot;&quot;
 REUV=0
 LOD_PATHS=()
+RETOPO=&quot;&quot;
+RETOPO_TIMEOUT=&quot;600&quot;
 
 usage() {
     cat &lt;&lt;EOF
@@ -2673,6 +2680,16 @@ Generation options:
                            otherwise -- re-unwrapping invalidates existing
                            UV-mapped textures). Warn-suggested by item 13&#x27;s
                            UV check; never automatic (item 23).
+      --retopo quad        Opt-in quad-dominant retopology via QuadWild
+                           bi-MDF (refuses on an already-textured mesh --
+                           discards topology and UVs entirely). Run before
+                           --reuv and before any texture.sh --mode paint /
+                           pbr pass, never after (item 25). Requires
+                           quadwild + quad_from_patches on PATH.
+      --retopo-timeout N   Per-step timeout in seconds for --retopo
+                           (default: 600). A pathological input mesh can
+                           hang the solver; each of QuadWild&#x27;s two steps
+                           is killed and reported as an error past N.
   -h, --help               This help
 
 Examples:
@@ -2710,6 +2727,8 @@ while [[ $# -gt 0 ]]; do
         --judge-mesh)        JUDGE_MESH=1;      shift ;;
         --lods)              LODS=&quot;$2&quot;;         shift 2 ;;
         --reuv)              REUV=1;            shift ;;
+        --retopo)             RETOPO=&quot;$2&quot;;       shift 2 ;;
+        --retopo-timeout)     RETOPO_TIMEOUT=&quot;$2&quot;; shift 2 ;;
         -h|--help)           usage; exit 0 ;;
         *) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
     esac
@@ -2749,6 +2768,7 @@ case &quot;$GENERATOR&quot; in
     *) echo &quot;ERROR: -g must be sf3d, spar3d, trellis, or trellis2 (got: $GENERATOR)&quot; &gt;&amp;2; exit 1 ;;
 esac
 case &quot;$UP_AXIS&quot; in y|z) ;; *) echo &quot;ERROR: -u must be y or z&quot; &gt;&amp;2; exit 1 ;; esac
+case &quot;$RETOPO&quot; in &quot;&quot;|quad) ;; *) echo &quot;ERROR: --retopo must be &#x27;quad&#x27; (got: $RETOPO)&quot; &gt;&amp;2; exit 1 ;; esac
 
 if [[ -z &quot;$OUTPUT_NAME&quot; ]]; then
     OUTPUT_NAME=&quot;$(basename &quot;$INPUT&quot; | sed &#x27;s/\.[^.]*$//&#x27;)&quot;
@@ -3012,6 +3032,87 @@ run_pipeline_check() {
 run_pipeline_check mesh_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized
 run_pipeline_check texture_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot;
 run_pipeline_check game_asset_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --engine &quot;$PROJECT_ENGINE&quot;
+
+# Item 25 — opt-in quad retopo via QuadWild bi-MDF (GPL-3 CLI; tool-side
+# copyleft only, outputs unaffected). Two binaries required on PATH,
+# `quadwild` and `quad_from_patches` -- same &quot;binary on PATH&quot; convention
+# as gltfpack. Runs before --reuv: QuadWild&#x27;s own OBJ output carries no
+# UV data at all (confirmed by inspection -- zero `vt` lines), so a
+# retopo&#x27;d mesh needs a fresh xatlas unwrap before it can be textured.
+# Hard refusal (not a warning) on an already-textured mesh, same pattern
+# as --reuv: retopo discards topology and any UVs unconditionally, which
+# would invalidate baked pixels.
+if [[ -n &quot;$RETOPO&quot; ]]; then
+    if ! command -v quadwild &gt;/dev/null 2&gt;&amp;1 || ! command -v quad_from_patches &gt;/dev/null 2&gt;&amp;1; then
+        err &quot;quadwild and/or quad_from_patches binaries not found in PATH.&quot;
+        err &quot;  Install: https://github.com/cgg-bern/quadwild-bimdf/releases (macos-binaries.zip)&quot;
+        err &quot;  Unzip and place both &#x27;quadwild&#x27; and &#x27;quad_from_patches&#x27; on your PATH.&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=retopo error=not_installed tool=quadwild-bimdf \
+                clean_path=&quot;$CLEAN_PATH&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    EXISTING_TEXTURES_RETOPO=&quot;$(python3 -c &quot;
+import json
+try:
+    d = json.load(open(&#x27;$META_PATH&#x27;))
+except Exception:
+    d = {}
+present = (d.get(&#x27;quality&#x27;) or {}).get(&#x27;textures&#x27;, {}).get(&#x27;textures_present&#x27;, [])
+print(&#x27;, &#x27;.join(present))
+&quot; 2&gt;/dev/null || echo &#x27;&#x27;)&quot;
+    if [[ -n &quot;$EXISTING_TEXTURES_RETOPO&quot; ]]; then
+        err &quot;--retopo refused: this mesh already has baked textures ($EXISTING_TEXTURES_RETOPO).&quot;
+        err &quot;Retopo discards the mesh&#x27;s UV layout entirely -- only run it before any&quot;
+        err &quot;texture.sh --mode paint / pbr pass.&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=retopo error=already_textured \
+                existing_textures=&quot;$EXISTING_TEXTURES_RETOPO&quot; \
+                clean_path=&quot;$CLEAN_PATH&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    RETOPO_SCRIPT=&quot;$SCRIPT_DIR/retopo_quad.py&quot;
+    [[ -f &quot;$RETOPO_SCRIPT&quot; ]] || RETOPO_SCRIPT=&quot;$PIPELINE_ROOT/workspace/retopo_quad.py&quot;
+    if [[ ! -f &quot;$RETOPO_SCRIPT&quot; || ! -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        err &quot;retopo_quad.py or pipeline-tools-env not available; cannot run --retopo.&quot;
+        exit 2
+    fi
+
+    RETOPO_TMP=&quot;${CLEAN_PATH}.retopo_tmp.glb&quot;
+    if ! &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$RETOPO_SCRIPT&quot; \
+        --input &quot;$CLEAN_PATH&quot; --output &quot;$RETOPO_TMP&quot; --meta &quot;$META_PATH&quot; \
+        --timeout &quot;$RETOPO_TIMEOUT&quot; 2&gt;&amp;1 \
+        | { while IFS= read -r line; do printf &quot;[pipeline] %s\n&quot; &quot;$line&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; }; then
+        rm -f &quot;$RETOPO_TMP&quot;
+        err &quot;--retopo failed; see the retopo_quad.py output above.&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=retopo error=quadwild_failed tool=quadwild-bimdf \
+                clean_path=&quot;$CLEAN_PATH&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+    if [[ ! -f &quot;$RETOPO_TMP&quot; ]]; then
+        err &quot;--retopo reported success but produced no output GLB.&quot;
+        exit 2
+    fi
+    mv &quot;$RETOPO_TMP&quot; &quot;$CLEAN_PATH&quot;
+    # Re-run checks so meta.json&#x27;s quality section reflects the new mesh.
+    run_pipeline_check mesh_quality_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --mode normalized
+    run_pipeline_check game_asset_check.py --input &quot;$CLEAN_PATH&quot; --meta &quot;$META_PATH&quot; --engine &quot;$PROJECT_ENGINE&quot;
+fi
 
 # Item 23 — UV re-unwrap via xatlas. Hard rule (not just a warning):
 # refuse on a mesh that already has baked textures, since a fresh UV
@@ -3420,6 +3521,10 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     fi
     if [[ &quot;$REUV&quot; == &quot;1&quot; ]]; then
         JSON_EMIT_ARGS+=( --bool reuv_applied=true )
+    fi
+    # Item 25 — additive-only: only appears when --retopo ran.
+    if [[ -n &quot;$RETOPO&quot; ]]; then
+        JSON_EMIT_ARGS+=( retopo_method=&quot;quadwild-bimdf&quot; )
     fi
     python3 &quot;$SCRIPT_DIR/json_emit.py&quot; &quot;${JSON_EMIT_ARGS[@]}&quot;
 fi
@@ -6774,6 +6879,19 @@ PIPELINE_EOF</pre></div>
             &quot;vertex_colors_discarded&quot;: { &quot;type&quot;: &quot;boolean&quot; },
             &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
           }
+        },
+        &quot;retopo&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;description&quot;: &quot;Item 25 — generate.sh --retopo quad (retopo_quad.py: QuadWild bi-MDF).&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;method&quot;: { &quot;type&quot;: &quot;string&quot; },
+            &quot;faces_before&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;faces_after&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;quad_fraction&quot;: { &quot;type&quot;: &quot;number&quot; },
+            &quot;watertight&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+            &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+          }
         }
       }
     },
@@ -7422,7 +7540,15 @@ def _binary_version(name: str, version_flag: str = &quot;--version&quot;) -&gt; 
     stderr = r.stderr if isinstance(r.stderr, str) else &quot;&quot;
     out = stdout + stderr
     m = re.search(r&quot;\b(\d+\.\d+(?:\.\d+)?)\b&quot;, out)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    # Item 25: quadwild / quad_from_patches print no version number at all
+    # in their usage text (unlike gltfpack, whose banner has one) -- the
+    # binary is genuinely on PATH and ran, just with nothing to parse.
+    # &quot;unknown&quot; (not None) so check_prereqs doesn&#x27;t report a present
+    # binary as missing; entries relying on this must not set
+    # min_version/max_version since &quot;unknown&quot; can&#x27;t be compared.
+    return &quot;unknown&quot;
 
 
 def _version_tuple(v: str) -&gt; tuple[int, ...]:
@@ -8992,6 +9118,22 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: false,
       &quot;version_flag&quot;: &quot;&quot;,
       &quot;install_hint&quot;: &quot;no Homebrew formula exists -- download gltfpack-macos.zip from https://github.com/zeux/meshoptimizer/releases, unzip, and place the gltfpack binary on your PATH (item 23; generate.sh --lods / --reuv&#x27;s optimize pass)&quot;
+    },
+    {
+      &quot;id&quot;: &quot;quadwild&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;quadwild&quot;,
+      &quot;required&quot;: false,
+      &quot;version_flag&quot;: &quot;&quot;,
+      &quot;install_hint&quot;: &quot;no Homebrew formula exists -- download macos-binaries.zip from https://github.com/cgg-bern/quadwild-bimdf/releases, unzip, and place both &#x27;quadwild&#x27; and &#x27;quad_from_patches&#x27; on your PATH (item 25; generate.sh --retopo quad). Real finding: &#x27;quadwild --version&#x27; segfaults -- doctor probes with a bare invocation (version_flag: \&quot;\&quot;) instead, same convention as gltfpack.&quot;
+    },
+    {
+      &quot;id&quot;: &quot;quad-from-patches&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;quad_from_patches&quot;,
+      &quot;required&quot;: false,
+      &quot;version_flag&quot;: &quot;&quot;,
+      &quot;install_hint&quot;: &quot;ships alongside &#x27;quadwild&#x27; in the same macos-binaries.zip -- see the quadwild prereq&#x27;s install_hint (item 25).&quot;
     }
   ],
   &quot;mutable_embed_paths&quot;: [],
@@ -11162,6 +11304,262 @@ def main() -&gt; int:
         print(json.dumps(payload[&quot;pbr_pass&quot;], sort_keys=True))
     else:
         print(f&quot;[pbr] albedo + roughness + metallic written in {duration}s&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>retopo_quad.py</code>
+                <span class="script-summary-desc">v0.4 item 25 &mdash; quad-dominant retopo via QuadWild bi-MDF (generate.sh --retopo quad)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/retopo_quad.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.4 item 25 -- opt-in quad retopo via QuadWild bi-MDF.
+
+Two-step external CLI pipeline (`quadwild` -&gt; `quad_from_patches`, both
+must be on PATH -- prebuilt macOS arm64+x86_64 binaries from
+https://github.com/cgg-bern/quadwild-bimdf/releases, GPL-3 tool, no
+weights, outputs unaffected) converts a clean GLB&#x27;s mesh into a
+quad-dominant retopology. Output has no UV layout at all (confirmed by
+inspecting QuadWild&#x27;s own OBJ output -- zero `vt` lines), so callers
+should follow this with `generate.sh --reuv` before any texture pass.
+
+Caller (generate.sh --retopo quad) is responsible for refusing to run
+this on a mesh that already has baked textures -- retopo discards
+topology and any UVs unconditionally.
+
+Usage:
+    retopo_quad.py --input PATH.glb --output PATH.glb --meta PATH
+                    [--timeout SECONDS] [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+# Bundled QuadWild config, trimmed to exactly what the prep + quadrangulation
+# steps below reference (verified live on this Studio, R3.3 spike -- a real
+# icosphere fixture came out 100% quad faces and watertight after merge).
+PREP_CONFIG = &quot;&quot;&quot;do_remesh 1
+sharp_feature_thr 35
+alpha 0.01
+scaleFact 1
+&quot;&quot;&quot;
+
+MAIN_CONFIG = &quot;&quot;&quot;alpha 0.005
+ilpMethod 1
+timeLimit 200
+gapLimit 0.0
+callbackTimeLimit 8 3.00 5.000 10.0 20.0 30.0 60.0 90.0 120.0
+callbackGapLimit 8 0.005 0.02 0.05 0.10 0.15 0.20 0.25 0.3
+minimumGap 0.4
+isometry 1
+regularityQuadrilaterals 1
+regularityNonQuadrilaterals 1
+regularityNonQuadrilateralsWeight 0.9
+alignSingularities 0
+alignSingularitiesWeight 0.1
+repeatLosingConstraintsIterations 1
+repeatLosingConstraintsQuads 0
+repeatLosingConstraintsNonQuads 0
+repeatLosingConstraintsAlign 0
+hardParityConstraint 1
+scaleFact 1
+fixedChartClusters 0
+useFlowSolver 1
+flow_config_filename &quot;config/main_config/flow_virtual_simple.json&quot;
+satsuma_config_filename &quot;config/satsuma/lemon.json&quot;
+&quot;&quot;&quot;
+
+FLOW_VIRTUAL_SIMPLE_JSON = &quot;&quot;&quot;{
+    &quot;paired_half_target&quot;: &quot;simple&quot;,
+    &quot;paired_resolve_new_targets&quot;: true,
+    &quot;paired_initial&quot;: {
+        &quot;iso_weight&quot;: 1,
+        &quot;iso_objective&quot;: &quot;quad&quot;,
+        &quot;unalign_weight&quot;: 2.0
+    },
+    &quot;paired_resolve&quot;: {
+        &quot;iso_weight&quot;: 1,
+        &quot;iso_objective&quot;: &quot;abs&quot;,
+        &quot;unalign_weight&quot;: 4.0
+    }
+}
+&quot;&quot;&quot;
+
+SATSUMA_LEMON_JSON = &quot;&quot;&quot;{
+    &quot;double_cover&quot;: {
+        &quot;max_deviation&quot;: 5,
+        &quot;matching_solver&quot;: &quot;Lemon&quot;,
+        &quot;evening_mode&quot;: &quot;MST&quot;,
+        &quot;method&quot;: &quot;HalfAsymmetric&quot;,
+        &quot;verbosity&quot;: 1
+    },
+    &quot;refine_with_matching&quot;: true,
+    &quot;matching_solver&quot;: &quot;Lemon&quot;,
+    &quot;refinement_maxdev_min&quot;: 2,
+    &quot;refinement_maxdev_max&quot;: 2,
+    &quot;deviation_limit&quot;: &quot;NodeThroughflow&quot;,
+    &quot;verbosity&quot;: 2
+}
+&quot;&quot;&quot;
+
+
+def _write_configs(workdir: Path) -&gt; None:
+    (workdir / &quot;config&quot; / &quot;prep_config&quot;).mkdir(parents=True)
+    (workdir / &quot;config&quot; / &quot;main_config&quot;).mkdir(parents=True)
+    (workdir / &quot;config&quot; / &quot;satsuma&quot;).mkdir(parents=True)
+    (workdir / &quot;config&quot; / &quot;prep_config&quot; / &quot;basic_setup.txt&quot;).write_text(PREP_CONFIG)
+    (workdir / &quot;config&quot; / &quot;main_config&quot; / &quot;flow_noalign_lemon.txt&quot;).write_text(MAIN_CONFIG)
+    (workdir / &quot;config&quot; / &quot;main_config&quot; / &quot;flow_virtual_simple.json&quot;).write_text(FLOW_VIRTUAL_SIMPLE_JSON)
+    (workdir / &quot;config&quot; / &quot;satsuma&quot; / &quot;lemon.json&quot;).write_text(SATSUMA_LEMON_JSON)
+
+
+def _read_obj_faces(path: Path):
+    &quot;&quot;&quot;Return (vertices, triangulated_faces, quad_count, tri_count).
+
+    QuadWild&#x27;s OBJ output is a Meshlab-style export split across several
+    `usemtl` material groups that all share one vertex list.
+    trimesh.load() triangulates AND splits it into a per-material Scene,
+    which loses both the quad-face arity and the shared-vertex topology a
+    real watertightness check needs -- parsed directly here instead.
+    &quot;&quot;&quot;
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    quad_count = 0
+    tri_count = 0
+    for line in path.read_text().splitlines():
+        if line.startswith(&quot;v &quot;):
+            x, y, z = line.split()[1:4]
+            verts.append([float(x), float(y), float(z)])
+        elif line.startswith(&quot;f &quot;):
+            idxs = [int(tok.split(&quot;/&quot;)[0]) - 1 for tok in line.split()[1:]]
+            if len(idxs) == 4:
+                quad_count += 1
+                faces.append([idxs[0], idxs[1], idxs[2]])
+                faces.append([idxs[0], idxs[2], idxs[3]])
+            elif len(idxs) == 3:
+                tri_count += 1
+                faces.append(idxs)
+    return verts, faces, quad_count, tri_count
+
+
+def _merge_meta(meta_path: Path, payload: dict) -&gt; None:
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;cleanup&quot;, &quot;--data&quot;, json.dumps(payload)],
+        check=False, capture_output=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--output&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--timeout&quot;, type=int, default=600)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    quadwild_bin = shutil.which(&quot;quadwild&quot;)
+    qfp_bin = shutil.which(&quot;quad_from_patches&quot;)
+    if not quadwild_bin or not qfp_bin:
+        print(&quot;ERROR: quadwild and/or quad_from_patches not found on PATH.&quot;, file=sys.stderr)
+        print(&quot;  Install: https://github.com/cgg-bern/quadwild-bimdf/releases (macos-binaries.zip)&quot;, file=sys.stderr)
+        return 2
+
+    import numpy as np
+    import trimesh
+
+    t0 = time.time()
+    mesh = trimesh.load(Path(args.input).expanduser(), force=&quot;mesh&quot;)
+    faces_before = len(mesh.faces)
+
+    with tempfile.TemporaryDirectory(prefix=&quot;quadwild_retopo_&quot;) as tmp:
+        workdir = Path(tmp)
+        _write_configs(workdir)
+        obj_in = workdir / &quot;mesh_in.obj&quot;
+        mesh.export(obj_in)
+
+        # Real finding (R3.3 spike): quad_from_patches&#x27;s exit code is not a
+        # reliable success signal -- a genuinely successful run (full log
+        # through SMOOTHING/save) has been observed to exit 1, and a
+        # genuine failure (missing sidecar patch files) has been observed
+        # to exit 0. Whether the expected output file exists is the only
+        # signal actually checked here for both binaries.
+        try:
+            r1 = subprocess.run(
+                [quadwild_bin, str(obj_in), &quot;2&quot;, &quot;config/prep_config/basic_setup.txt&quot;],
+                cwd=workdir, capture_output=True, text=True, timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(f&quot;ERROR: quadwild timed out after {args.timeout}s (step 1: prep/remesh).&quot;, file=sys.stderr)
+            return 3
+
+        rem_p0 = workdir / &quot;mesh_in_rem_p0.obj&quot;
+        if not rem_p0.exists():
+            print(f&quot;ERROR: quadwild did not produce mesh_in_rem_p0.obj (exit {r1.returncode}):\n&quot;
+                  f&quot;{r1.stdout}\n{r1.stderr}&quot;, file=sys.stderr)
+            return 1
+
+        try:
+            r2 = subprocess.run(
+                [qfp_bin, str(rem_p0), &quot;1&quot;, &quot;config/main_config/flow_noalign_lemon.txt&quot;],
+                cwd=workdir, capture_output=True, text=True, timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(f&quot;ERROR: quad_from_patches timed out after {args.timeout}s (step 2: quadrangulation).&quot;, file=sys.stderr)
+            return 3
+
+        result_candidates = sorted(workdir.glob(&quot;mesh_in_rem_p0_*_quadrangulation_smooth.obj&quot;))
+        if not result_candidates:
+            result_candidates = sorted(workdir.glob(&quot;mesh_in_rem_p0_*_quadrangulation.obj&quot;))
+        if not result_candidates:
+            print(f&quot;ERROR: quad_from_patches produced no *_quadrangulation(_smooth).obj output &quot;
+                  f&quot;(exit {r2.returncode}):\n{r2.stdout}\n{r2.stderr}&quot;, file=sys.stderr)
+            return 1
+        result_obj = result_candidates[-1]
+
+        verts, faces, quad_count, tri_count = _read_obj_faces(result_obj)
+        out_mesh = trimesh.Trimesh(vertices=np.array(verts), faces=np.array(faces), process=True)
+        out_mesh.export(Path(args.output).expanduser())
+
+    faces_after = len(out_mesh.faces)
+    quad_fraction = round(quad_count / max(1, quad_count + tri_count), 4)
+    watertight = bool(out_mesh.is_watertight)
+    duration = round(time.time() - t0, 2)
+
+    payload = {
+        &quot;retopo&quot;: {
+            &quot;method&quot;: &quot;quadwild-bimdf&quot;,
+            &quot;faces_before&quot;: faces_before,
+            &quot;faces_after&quot;: faces_after,
+            &quot;quad_fraction&quot;: quad_fraction,
+            &quot;watertight&quot;: watertight,
+            &quot;duration_seconds&quot;: duration,
+        }
+    }
+    _merge_meta(Path(args.meta).expanduser(), payload)
+
+    if args.json:
+        print(json.dumps(payload[&quot;retopo&quot;], sort_keys=True))
+    else:
+        print(f&quot;[retopo] {faces_before} -&gt; {faces_after} faces, {quad_fraction * 100:.1f}% quad-sourced, &quot;
+              f&quot;watertight={watertight}, {duration}s&quot;)
     return 0
 
 
@@ -15414,6 +15812,53 @@ colors if the input had them (`cleanup.reuv.vertex_colors_discarded`
 in meta.json) — reuv&#x27;s own worldview is &quot;about to be freshly
 textured,&quot; not &quot;the vertex colors are the final look.&quot;
 
+### Quad retopo — QuadWild bi-MDF (v0.4+, item 25)
+
+```bash
+generate.sh -i concept/chest.png --retopo quad
+generate.sh -i concept/chest.png --retopo quad --retopo-timeout 300
+```
+
+Opt-in, replaces the mesh&#x27;s decimated tri-soup topology with a
+quad-dominant retopology via [QuadWild bi-MDF](https://github.com/cgg-bern/quadwild-bimdf)
+(`quadwild` + `quad_from_patches`, both required on PATH — GPL-3 CLI,
+`commercial_safe` bucket: tool-side copyleft only, no shipped weights,
+generated GLB outputs unaffected). Suggest it for assets headed to
+sculpt, animation, or close-up — not for background props, where the
+default decimated mesh is fine.
+
+**Same &quot;before paint, never after&quot; ordering rule as item 23.** Hard
+refusal (not a warning) on an already-textured mesh — retopo discards
+topology and any UV layout unconditionally. Same
+`quality.textures.textures_present`-based refusal mechanism as
+`--reuv` and paint mode. **In practice this means SF3D&#x27;s own output
+already has baked textures at generation time**, so `--retopo` refuses
+immediately after a default SF3D run — it needs an untextured
+mesh, same constraint `--reuv` already has. Relay the refusal
+message; don&#x27;t retry.
+
+QuadWild&#x27;s own output OBJ carries no UV data at all (verified by
+inspection — zero `vt` lines), so run `--reuv` right after a
+successful `--retopo quad` to give the new topology a UV layout before
+any texture pass.
+
+**Real finding worth relaying to the user:** `quad_from_patches`&#x27;s
+exit code is not a reliable success/failure signal on its own —
+`retopo_quad.py` checks for the actual expected output file instead.
+Records `cleanup.retopo: {method, faces_before, faces_after,
+quad_fraction, watertight}` in meta.json.
+
+**Timeout:** pathological input meshes can hang the solver — each of
+QuadWild&#x27;s two steps (prep/remesh, then quadrangulation) is killed
+after `--retopo-timeout` seconds (default 600) and reported as
+`status=error stage=retopo error=timeout`. Requires both `quadwild`
+and `quad_from_patches` on PATH; **no Homebrew formula exists** — both
+binaries ship together in the prebuilt
+[macOS release zip](https://github.com/cgg-bern/quadwild-bimdf/releases)
+(arm64+x86_64 universal). `--retopo` fails clearly
+(`status=error error=not_installed`) rather than silently skipping
+when missing.
+
 ### Input quality check (v0.3+)
 
 When `pipeline-tools-env` is installed, the wrapper runs an input
@@ -16664,6 +17109,29 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
             <div class="callout-label">Two real upstream bugs, both worked around in scripts/pbr_pass.py &mdash; nothing to do here</div>
             <p>StableDelight's dynamically-downloaded pipeline module imports from a diffusers path (<code>diffusers.models.controlnet</code>) that was reorganized into a subpackage in current diffusers &mdash; worked around with a <code>sys.modules</code> alias (same technique as R0.4's MV-Adapter fix), not a version pin, since patching the downloaded cache file doesn't stick (diffusers re-syncs it against the remote hash on every load). Its <code>torch.hub.load</code> entry point also defaults to <code>device="cuda:0"</code> &mdash; the driver passes <code>device="mps"</code> explicitly.</p>
           </div>
+        </div>
+      </div>
+
+      <div class="step" data-step="quadwild-bimdf-install">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Optional: QuadWild bi-MDF (item 25 &mdash; quad retopo)</h3>
+          <p>Powers <code>generate.sh --retopo quad</code>'s quad-dominant retopology pass. GPL-3 CLI tool, no model weights &mdash; tool-side copyleft only, generated GLB outputs unaffected, <code>commercial_safe</code> bucket. <strong>No Homebrew formula exists</strong> (checked at implementation time) &mdash; the real install is the prebuilt macOS arm64+x86_64 universal binaries from the project's own GitHub Releases. Two binaries ship together in one zip: <code>quadwild</code> and <code>quad_from_patches</code>.</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>mkdir -p ~/3d-pipeline/bin
+<span class="tk-prompt">$ </span>curl -sL -o /tmp/quadwild-macos.zip <span class="tk-str">"https://github.com/cgg-bern/quadwild-bimdf/releases/download/v0.0.2/macos-binaries.zip"</span>
+<span class="tk-prompt">$ </span>unzip -o /tmp/quadwild-macos.zip -d /tmp/quadwild-macos
+<span class="tk-prompt">$ </span>cp /tmp/quadwild-macos/quadwild /tmp/quadwild-macos/quad_from_patches ~/3d-pipeline/bin/
+<span class="tk-prompt">$ </span>chmod +x ~/3d-pipeline/bin/quadwild ~/3d-pipeline/bin/quad_from_patches</pre></div>
+          <p>Add <code>~/3d-pipeline/bin</code> to your PATH if you haven't already (same directory gltfpack uses &mdash; add to <code>~/.zshrc</code> or <code>~/.bashrc</code>, whichever your shell reads):</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre>export PATH=<span class="tk-str">"$HOME/3d-pipeline/bin:$PATH"</span></pre></div>
+          <p>Verify:</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>quadwild
+<span class="tk-cmt"># -&gt; usage text (exit 0) -- no --version flag, and "quadwild --version" segfaults, so this bare-invocation check is the real one</span></pre></div>
+          <div class="callout callout-gotcha">
+            <div class="callout-label">Two real findings, both worked around in scripts/retopo_quad.py &mdash; nothing to do here</div>
+            <p><code>quadwild --version</code> segfaults (confirmed live) &mdash; the driver and doctor's prereq probe both use a bare invocation instead. <code>quad_from_patches</code>'s exit code is not a reliable success signal on its own: a genuinely successful run has been observed to exit 1, and a genuine failure (missing sidecar patch files from step one) has been observed to exit 0 &mdash; <code>retopo_quad.py</code> checks for the actual expected output file instead of trusting either binary's exit code.</p>
+          </div>
+          <p>QuadWild's own output carries no UV data at all &mdash; run <code>generate.sh --reuv</code> right after a successful <code>--retopo quad</code> to give the new topology a UV layout before any texture pass.</p>
         </div>
       </div>
 

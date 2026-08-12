@@ -46,6 +46,8 @@ JUDGE_MESH=0
 LODS=""
 REUV=0
 LOD_PATHS=()
+RETOPO=""
+RETOPO_TIMEOUT="600"
 
 usage() {
     cat <<EOF
@@ -93,6 +95,16 @@ Generation options:
                            otherwise -- re-unwrapping invalidates existing
                            UV-mapped textures). Warn-suggested by item 13's
                            UV check; never automatic (item 23).
+      --retopo quad        Opt-in quad-dominant retopology via QuadWild
+                           bi-MDF (refuses on an already-textured mesh --
+                           discards topology and UVs entirely). Run before
+                           --reuv and before any texture.sh --mode paint /
+                           pbr pass, never after (item 25). Requires
+                           quadwild + quad_from_patches on PATH.
+      --retopo-timeout N   Per-step timeout in seconds for --retopo
+                           (default: 600). A pathological input mesh can
+                           hang the solver; each of QuadWild's two steps
+                           is killed and reported as an error past N.
   -h, --help               This help
 
 Examples:
@@ -130,6 +142,8 @@ while [[ $# -gt 0 ]]; do
         --judge-mesh)        JUDGE_MESH=1;      shift ;;
         --lods)              LODS="$2";         shift 2 ;;
         --reuv)              REUV=1;            shift ;;
+        --retopo)             RETOPO="$2";       shift 2 ;;
+        --retopo-timeout)     RETOPO_TIMEOUT="$2"; shift 2 ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -169,6 +183,7 @@ case "$GENERATOR" in
     *) echo "ERROR: -g must be sf3d, spar3d, trellis, or trellis2 (got: $GENERATOR)" >&2; exit 1 ;;
 esac
 case "$UP_AXIS" in y|z) ;; *) echo "ERROR: -u must be y or z" >&2; exit 1 ;; esac
+case "$RETOPO" in ""|quad) ;; *) echo "ERROR: --retopo must be 'quad' (got: $RETOPO)" >&2; exit 1 ;; esac
 
 if [[ -z "$OUTPUT_NAME" ]]; then
     OUTPUT_NAME="$(basename "$INPUT" | sed 's/\.[^.]*$//')"
@@ -432,6 +447,87 @@ run_pipeline_check() {
 run_pipeline_check mesh_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --mode normalized
 run_pipeline_check texture_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH"
 run_pipeline_check game_asset_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --engine "$PROJECT_ENGINE"
+
+# Item 25 — opt-in quad retopo via QuadWild bi-MDF (GPL-3 CLI; tool-side
+# copyleft only, outputs unaffected). Two binaries required on PATH,
+# `quadwild` and `quad_from_patches` -- same "binary on PATH" convention
+# as gltfpack. Runs before --reuv: QuadWild's own OBJ output carries no
+# UV data at all (confirmed by inspection -- zero `vt` lines), so a
+# retopo'd mesh needs a fresh xatlas unwrap before it can be textured.
+# Hard refusal (not a warning) on an already-textured mesh, same pattern
+# as --reuv: retopo discards topology and any UVs unconditionally, which
+# would invalidate baked pixels.
+if [[ -n "$RETOPO" ]]; then
+    if ! command -v quadwild >/dev/null 2>&1 || ! command -v quad_from_patches >/dev/null 2>&1; then
+        err "quadwild and/or quad_from_patches binaries not found in PATH."
+        err "  Install: https://github.com/cgg-bern/quadwild-bimdf/releases (macos-binaries.zip)"
+        err "  Unzip and place both 'quadwild' and 'quad_from_patches' on your PATH."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=retopo error=not_installed tool=quadwild-bimdf \
+                clean_path="$CLEAN_PATH" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    EXISTING_TEXTURES_RETOPO="$(python3 -c "
+import json
+try:
+    d = json.load(open('$META_PATH'))
+except Exception:
+    d = {}
+present = (d.get('quality') or {}).get('textures', {}).get('textures_present', [])
+print(', '.join(present))
+" 2>/dev/null || echo '')"
+    if [[ -n "$EXISTING_TEXTURES_RETOPO" ]]; then
+        err "--retopo refused: this mesh already has baked textures ($EXISTING_TEXTURES_RETOPO)."
+        err "Retopo discards the mesh's UV layout entirely -- only run it before any"
+        err "texture.sh --mode paint / pbr pass."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=retopo error=already_textured \
+                existing_textures="$EXISTING_TEXTURES_RETOPO" \
+                clean_path="$CLEAN_PATH" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+
+    RETOPO_SCRIPT="$SCRIPT_DIR/retopo_quad.py"
+    [[ -f "$RETOPO_SCRIPT" ]] || RETOPO_SCRIPT="$PIPELINE_ROOT/workspace/retopo_quad.py"
+    if [[ ! -f "$RETOPO_SCRIPT" || ! -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        err "retopo_quad.py or pipeline-tools-env not available; cannot run --retopo."
+        exit 2
+    fi
+
+    RETOPO_TMP="${CLEAN_PATH}.retopo_tmp.glb"
+    if ! "$PIPELINE_TOOLS_ENV/bin/python" "$RETOPO_SCRIPT" \
+        --input "$CLEAN_PATH" --output "$RETOPO_TMP" --meta "$META_PATH" \
+        --timeout "$RETOPO_TIMEOUT" 2>&1 \
+        | { while IFS= read -r line; do printf "[pipeline] %s\n" "$line" >&"$HUMAN_FD"; done; }; then
+        rm -f "$RETOPO_TMP"
+        err "--retopo failed; see the retopo_quad.py output above."
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=retopo error=quadwild_failed tool=quadwild-bimdf \
+                clean_path="$CLEAN_PATH" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+    if [[ ! -f "$RETOPO_TMP" ]]; then
+        err "--retopo reported success but produced no output GLB."
+        exit 2
+    fi
+    mv "$RETOPO_TMP" "$CLEAN_PATH"
+    # Re-run checks so meta.json's quality section reflects the new mesh.
+    run_pipeline_check mesh_quality_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --mode normalized
+    run_pipeline_check game_asset_check.py --input "$CLEAN_PATH" --meta "$META_PATH" --engine "$PROJECT_ENGINE"
+fi
 
 # Item 23 — UV re-unwrap via xatlas. Hard rule (not just a warning):
 # refuse on a mesh that already has baked textures, since a fresh UV
@@ -840,6 +936,10 @@ if [[ "$JSON_MODE" == "1" ]]; then
     fi
     if [[ "$REUV" == "1" ]]; then
         JSON_EMIT_ARGS+=( --bool reuv_applied=true )
+    fi
+    # Item 25 — additive-only: only appears when --retopo ran.
+    if [[ -n "$RETOPO" ]]; then
+        JSON_EMIT_ARGS+=( retopo_method="quadwild-bimdf" )
     fi
     python3 "$SCRIPT_DIR/json_emit.py" "${JSON_EMIT_ARGS[@]}"
 fi

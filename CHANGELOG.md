@@ -2,6 +2,65 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R3.3: opt-in quad retopo — QuadWild bi-MDF (item 25)
+
+- `generate.sh` — new `--retopo quad` (+ `--retopo-timeout SECONDS`,
+  default 600): replaces the clean mesh's decimated tri-soup topology
+  with a quad-dominant retopology via
+  [QuadWild bi-MDF](https://github.com/cgg-bern/quadwild-bimdf)
+  (`quadwild` + `quad_from_patches` on PATH). New `scripts/retopo_quad.py`
+  driver — two-step external CLI pipeline (prep/remesh, then
+  quadrangulation), bundled config inline (no separate config files to
+  install). Runs before `--reuv` and before any texture pass, same
+  ordering rule as item 23: hard refusal (not a warning) on an
+  already-textured mesh, identical `textures_present`-based mechanism
+  as `--reuv` and paint mode — retopo discards topology and UVs
+  unconditionally.
+- **License bucket:** `commercial_safe`. QuadWild bi-MDF is GPL-3
+  (verified via GitHub API license metadata on
+  `cgg-bern/quadwild-bimdf`) but a CLI tool with no shipped weights —
+  tool-side copyleft only, generated GLB outputs are unaffected.
+- **Real finding: `quad_from_patches`'s exit code is not a reliable
+  success signal.** A genuinely successful run (full log through
+  smoothing and save) has been observed to exit 1; a genuine failure
+  (missing sidecar patch files from step one) has been observed to
+  exit 0. `retopo_quad.py` checks for the actual expected output file
+  instead of trusting either binary's exit code for this step.
+- **Real finding: `quadwild --version` segfaults.** The driver and the
+  doctor's prereq probe both use a bare invocation instead (same
+  `version_flag: ""` convention item 23 established for gltfpack).
+  Bare invocation prints no version number at all for either
+  `quadwild` or `quad_from_patches` (unlike gltfpack's banner) —
+  `pipeline_doctor.py`'s `_binary_version` gained an "unknown" sentinel
+  distinct from "not installed" so a present-but-unparseable-version
+  binary reports `status=ok` rather than a false `missing`.
+- **Real finding: QuadWild's output OBJ carries no UV data at all**
+  (confirmed by inspection — zero `vt` lines). A `--retopo quad` pass
+  should be followed by `--reuv` before any texture pass.
+- **Real finding: SF3D's own generation output is already textured**
+  (albedo + normal baked at generation time), so `--retopo` refuses
+  immediately after a default SF3D run in practice — confirmed live on
+  a real SF3D output through the full `generate.sh` wrapper (clean
+  refusal, structured JSON, `error=already_textured`). Same constraint
+  `--reuv` already has; not new to this PR.
+- Confirmed live: a real icosphere GLB fixture (1280 tris in) came out
+  100% quad-sourced and watertight after triangulating + merging
+  (7688 tris out, 2.95s) — both through the standalone
+  `retopo_quad.py` driver and manually via the raw `quadwild` /
+  `quad_from_patches` binaries. Timeout path confirmed with a 1s
+  timeout value: killed at ~1.5s (not the full run), clean
+  `error=timeout` exit.
+- `meta_schema.json` gains `cleanup.retopo: {method, faces_before,
+  faces_after, quad_fraction, watertight, duration_seconds}`.
+  `model_manifest.json` gains `quadwild` + `quad-from-patches` prereqs
+  (both `required: false`, opt-in, same pattern as gltfpack) — no
+  feature_set/venv/model entries needed, pure "binary on PATH" tool
+  like gltfpack.
+  New setup-guide install step in both guides (prebuilt macOS
+  arm64+x86_64 universal binaries — no Homebrew formula exists).
+- `skill/SKILL.md` Flow 2 gains a "Quad retopo" section covering all
+  the real findings above.
+
 ## 2026-08-12 — R3.2: texture post — PBR pass + SeedVR2 upscale (item 24)
 
 - `scripts/texture.sh` — new `--mode pbr`: extracts a GLB's existing

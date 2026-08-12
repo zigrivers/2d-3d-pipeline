@@ -52,6 +52,22 @@
       "required": false,
       "version_flag": "",
       "install_hint": "no Homebrew formula exists -- download gltfpack-macos.zip from https://github.com/zeux/meshoptimizer/releases, unzip, and place the gltfpack binary on your PATH (item 23; generate.sh --lods / --reuv's optimize pass)"
+    },
+    {
+      "id": "quadwild",
+      "kind": "binary",
+      "name": "quadwild",
+      "required": false,
+      "version_flag": "",
+      "install_hint": "no Homebrew formula exists -- download macos-binaries.zip from https://github.com/cgg-bern/quadwild-bimdf/releases, unzip, and place both 'quadwild' and 'quad_from_patches' on your PATH (item 25; generate.sh --retopo quad). Real finding: 'quadwild --version' segfaults -- doctor probes with a bare invocation (version_flag: \"\") instead, same convention as gltfpack."
+    },
+    {
+      "id": "quad-from-patches",
+      "kind": "binary",
+      "name": "quad_from_patches",
+      "required": false,
+      "version_flag": "",
+      "install_hint": "ships alongside 'quadwild' in the same macos-binaries.zip -- see the quadwild prereq's install_hint (item 25)."
     }
   ],
   "mutable_embed_paths": [],

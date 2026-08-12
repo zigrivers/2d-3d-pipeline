@@ -68,6 +68,34 @@ def test_check_prereqs_optional_missing_does_not_escalate():
         assert result["status"] == "ok"
 
 
+def test_binary_version_returns_unknown_when_present_but_no_version_string():
+    """Item 25: quadwild/quad_from_patches print no version number at all
+    even on a bare (version_flag="") invocation, unlike gltfpack. The
+    binary is genuinely on PATH and ran -- _binary_version must not
+    conflate "no parseable version" with "not installed"."""
+    with patch("shutil.which", return_value="/usr/local/bin/quadwild"), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.stdout = "usage: ./quadwild <mesh.{obj,ply}> [1|2|3] ..."
+        mock_run.return_value.stderr = ""
+        version = pipeline_doctor._binary_version("quadwild", version_flag="")
+        assert version == "unknown"
+
+
+def test_check_prereqs_unknown_version_reports_ok_not_missing():
+    """Item 25: a prereq whose _binary_version resolves to "unknown"
+    (present, no parseable version) must report status ok, not missing --
+    it has no min_version/max_version to compare against."""
+    with patch("scripts.pipeline_doctor._binary_version", return_value="unknown"):
+        prereqs = [
+            {"id": "quadwild", "kind": "binary", "name": "quadwild",
+             "required": False, "version_flag": ""},
+        ]
+        result = pipeline_doctor.check_prereqs(manifest={"prereqs": prereqs})
+        entry = next(p for p in result["prereqs"] if p["id"] == "quadwild")
+        assert entry["status"] == "ok"
+        assert entry["version"] == "unknown"
+
+
 def test_check_prereqs_max_version_fail_severity_escalates():
     """When max_version_severity is 'fail', exceeding max produces critical."""
     with patch("scripts.pipeline_doctor._binary_version",
