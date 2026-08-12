@@ -2,26 +2,58 @@
   "schema_version": 2,
   "description": "Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.",
   "tier_defaults": {
-    "laptop": { "include": [] },
-    "studio": { "include": ["hunyuan3d-paint"] }
+    "laptop": {
+      "include": []
+    },
+    "studio": {
+      "include": [
+        "hunyuan3d-paint"
+      ]
+    }
   },
   "prereqs": [
-    { "id": "python", "kind": "binary", "name": "python3",
-      "min_version": "3.10", "max_version": "3.12",
+    {
+      "id": "python",
+      "kind": "binary",
+      "name": "python3",
+      "min_version": "3.10",
+      "max_version": "3.12",
       "max_version_severity": "warn",
-      "install_hint": "brew install python@3.12" },
-    { "id": "brew", "kind": "binary", "name": "brew",
-      "install_hint": "see https://brew.sh" },
-    { "id": "git", "kind": "binary", "name": "git" },
-    { "id": "huggingface-cli", "kind": "binary", "name": "huggingface-cli",
-      "install_hint": "pip install huggingface_hub[cli]" },
-    { "id": "pip", "kind": "python_package", "name": "pip",
+      "install_hint": "brew install python@3.12"
+    },
+    {
+      "id": "brew",
+      "kind": "binary",
+      "name": "brew",
+      "install_hint": "see https://brew.sh"
+    },
+    {
+      "id": "git",
+      "kind": "binary",
+      "name": "git"
+    },
+    {
+      "id": "huggingface-cli",
+      "kind": "binary",
+      "name": "huggingface-cli",
+      "install_hint": "pip install huggingface_hub[cli]"
+    },
+    {
+      "id": "pip",
+      "kind": "python_package",
+      "name": "pip",
       "min_version": "23.1",
-      "install_hint": "python3 -m pip install --upgrade pip" }
+      "install_hint": "python3 -m pip install --upgrade pip"
+    }
   ],
   "mutable_embed_paths": [],
   "studio_extras": {
-    "queue_dirs": ["queue/pending", "queue/running", "queue/done", "queue/failed"],
+    "queue_dirs": [
+      "queue/pending",
+      "queue/running",
+      "queue/done",
+      "queue/failed"
+    ],
     "launchd_plist": {
       "label": "com.kenallred.3dpipeline.queue-worker",
       "template": "scripts/launchd/queue-worker.plist.tmpl",
@@ -35,19 +67,35 @@
   "feature_sets": {
     "tier1": {
       "description": "Default v0.3 quality features (always recommended)",
-      "components": ["u2net", "clip-vit-l-14"]
+      "components": [
+        "u2net",
+        "clip-vit-l-14"
+      ]
     },
     "hunyuan3d-paint": {
-      "description": "Item 7 — Hunyuan3D-Paint texture painting (commercial_threshold)",
-      "components": ["hunyuan3d-paint"]
+      "description": "Item 7 \u2014 Hunyuan3D-Paint texture painting (commercial_threshold)",
+      "components": [
+        "hunyuan3d-paint"
+      ]
     },
     "comfyui": {
-      "description": "Item 11 — ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)",
-      "components": ["sdxl-base", "ip-adapter-faceid-sdxl", "controlnet-openpose", "controlnet-canny"]
+      "description": "Item 11 \u2014 ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)",
+      "components": [
+        "sdxl-base",
+        "ip-adapter-faceid-sdxl",
+        "controlnet-openpose",
+        "controlnet-canny"
+      ]
     },
     "multiview": {
-      "description": "Item 12 — multi-view reconstruction backend (specific model TBD post-research)",
+      "description": "Item 12 \u2014 multi-view reconstruction backend (specific model TBD post-research)",
       "components": []
+    },
+    "vlm-judge": {
+      "description": "Item 17 \u2014 local VLM judge for 2D concepts (opt-in; concept.sh --judge / --best-of)",
+      "components": [
+        "qwen3-vl-judge"
+      ]
     }
   },
   "venvs": [
@@ -101,6 +149,16 @@
       "purpose": "Multi-view reconstruction (Item 12)",
       "python_version": "3.12",
       "lockfile": "scripts/lockfiles/multiview-env.txt"
+    },
+    {
+      "name": "vlm-env",
+      "path": "~/3d-pipeline/vlm-env",
+      "required": false,
+      "feature_set": "vlm-judge",
+      "size_gb": 2,
+      "purpose": "Local VLM judge (mlx-vlm) for concept.sh --judge / --best-of",
+      "python_version": "3.12",
+      "lockfile": "scripts/lockfiles/vlm-env.txt"
     }
   ],
   "models": [
@@ -265,6 +323,24 @@
       "storage_layout": "hf_snapshot",
       "warm_target": "controlnet-canny-sdxl",
       "comfyui_kind": "controlnet"
+    },
+    {
+      "id": "qwen3-vl-judge",
+      "filename": "",
+      "feature_set": "vlm-judge",
+      "license_bucket": "commercial_safe",
+      "size_mb": 17000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "mlx_vlm",
+      "notes": "Apache 2.0. Default judge tier per gate G2 (R0.3 spike): the 8B tier does not reliably discriminate 3/4-view compliance even with an explicit chain-of-thought rubric (see docs/spike-report-generation-refresh.md); 30B-A3B MoE does. mlx_vlm downloads automatically on first use via huggingface_hub, into the standard HF cache (no dedicated env var).",
+      "requires_hf_auth": false,
+      "hf_repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "qwen3-vl-judge",
+      "comfyui_kind": null
     }
   ],
   "wrappers": [

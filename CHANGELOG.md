@@ -2,6 +2,55 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R1.2: local VLM judge + best-of-N (item 17)
+
+- `scripts/vlm_judge.py` (new) — local VLM judging of 2D concept images via
+  `mlx-vlm` (MIT) on Apple Silicon. Rubric asks the model to first name,
+  literally, which faces of the object's outer shell are visible
+  (`visible_faces`) before scoring `three_quarter_view` — a bare numeric
+  rubric could not reliably tell a genuine 3/4 view from a flat front-on
+  shot even at the 30B-A3B tier (see gate G2, `docs/spike-report-generation-refresh.md`
+  R0.3); forcing the literal fact first produces a real, auditable score
+  gap between the two cases. `--rank` mode scores N images and picks a
+  winner; the winner's judge data merges into its `meta.json` `judge`
+  section via `meta_helper.py merge`.
+- Default judge model is `mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit`
+  (Apache 2.0; commercial_safe), not the smaller 8B tier — R0.3 found the
+  8B tier scores a flat front-view fixture and true 3/4-view fixtures
+  identically regardless of rubric wording, so it can't be trusted for
+  this judgment. Documented in code comments, `skill/SKILL.md`, and the
+  setup guide callout.
+- `scripts/concept.sh` — new `--judge` flag (score the concept, no
+  filtering) and `--best-of N` flag (generate N variants, judge them,
+  keep only the winner in `concept/`, move the rest to
+  `concept/rejected/`). No-op when `vlm-env` or `vlm_judge.py` isn't
+  installed. Fixes a real bug found during integration testing: the
+  `--rank --json` subprocess that merges the winner's judge data into
+  `meta.json` via `meta_helper.py merge` let that helper's own
+  `[meta_helper] merged ...` stdout line leak ahead of the JSON payload,
+  so `concept.sh`'s `json.load()` of `vlm_judge.py`'s stdout failed on
+  every `--best-of` run (`json.decoder.JSONDecodeError: Expecting value:
+  line 1 column 2`). Fixed by capturing that subprocess's output
+  (`capture_output=True`) instead of letting it inherit the parent's
+  stdout. Verified end-to-end on the Studio: `--best-of 3` correctly
+  ranked 3 real generations, moved the 2 non-winners to `rejected/`, and
+  wrote a correct `judge` section to the winner's `meta.json`; `--judge`
+  alone (no `--best-of`) verified the same way.
+- `scripts/meta_schema.json` — new `judge` top-level section (`model`,
+  `mode`, `scores.*`, `verdict`, `picked`, `rank`, `rejected`,
+  `duration_seconds`; `mesh` reserved for item 18).
+- `scripts/meta_helper.py` — `KNOWN_SECTIONS` gains `judge`.
+- `scripts/model_manifest.json` — new `vlm-judge` feature set, `vlm-env`
+  venv entry, `qwen3-vl-judge` model entry (managed by `mlx_vlm`, HF repo
+  `mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit`).
+- `scripts/lockfiles/vlm-env.txt` (new, placeholder, matches existing
+  0-byte lockfile convention).
+- `skill/SKILL.md` — new "VLM judge + best-of-N" subsection under Flow 1;
+  3 new jargon-translation rows (`judge.verdict`, `three_quarter_view` +
+  `visible_faces`, `judge.rejected`).
+- `docs/asset-pipeline-guide.html` + `-studio.html` — new `vlm-env` setup
+  step with a callout explaining the 30B-A3B default (gate G2).
+
 ## 2026-08-11 — R1.1: scorer stack refresh (item 16)
 
 - `scripts/clip_score.py` — new `--scorer {clip,siglip2}` flag, default

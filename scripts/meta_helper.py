@@ -24,7 +24,7 @@ Top-level sections (per the spec, cross-cutting principle 2):
 
     input            preprocessing    generation
     cleanup          quality          print
-    preview          clip
+    preview          clip             judge
 
 Any pass writing to a section not on this list is rejected unless
 `--allow-unknown-section` is passed (escape hatch for future passes
@@ -50,6 +50,7 @@ KNOWN_SECTIONS = {
     "print",
     "preview",
     "clip",
+    "judge",
 }
 
 # --- v0.3+ — schema migration framework -------------------------------

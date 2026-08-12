@@ -260,6 +260,45 @@ The wrapper prints the absolute path as its last line — capture it for
 chaining. If you're scripting, pass `--json` and parse the last stdout
 line as JSON; `outputs[0]` is the first image.
 
+### VLM judge + best-of-N (v0.3.5+, item 17)
+
+`concept.sh` can score concepts against a rubric using a local VLM
+(mlx-vlm + Qwen3-VL) instead of relying only on SigLIP/CLIP similarity.
+The judge catches things prompt-adherence scoring misses — wrong camera
+angle, cluttered background, harsh shadows — the exact failures that
+later ruin image-to-3D reconstruction.
+
+- `--judge` — score all generated variants (or the single image), write
+  the ranking/verdict into meta.json's `judge` section, print it. Does
+  not delete or move anything.
+- `--best-of N` — generate N variants, judge them, keep the winner in
+  `concept/`, move the rest to `concept/rejected/`. Implies `--judge`.
+
+```bash
+concept.sh "a treasure chest" --best-of 4
+```
+
+**Recognition signals.** Suggest `--best-of N` when the user wants "the
+best one" from several tries, or has been regenerating the same concept
+repeatedly hoping for a better angle/composition. Suggest plain
+`--judge` when they want to see the scores but decide themselves.
+
+**Relay the verdict in plain language**, not raw scores — see the
+translation table below. If a variant's `visible_faces` shows only one
+face (e.g. `"front only"`), that's why `three_quarter_view` scored low;
+mention it if the user asks why a variant lost.
+
+**Cost.** The default judge model is the 30B-A3B MoE tier (~17 GB,
+first-use download), not the smaller 8B tier — R0.3's spike found the
+8B tier does not reliably catch camera-angle violations, even with an
+explicit reasoning-first rubric; the 30B tier does. Mention this before
+suggesting `--best-of` on a laptop with limited disk. Judge latency is
+a few seconds per image after the model is loaded once.
+
+**When NOT to suggest it:** a single one-off generation the user is
+already happy with; `vlm-env` not installed and the user wants to
+generate right now (offer it as a follow-up instead).
+
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
 When the user needs **identity-locked** generations across multiple
@@ -372,6 +411,9 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | "image_reward -0.3" | "people-preference score: weak — the image is technically on-prompt but doesn't look great" |
 | "dreamsim_dupes: [[1, 3]]" | "variants 2 and 4 look like near-duplicates" |
 | "dreamsim_dupes: []" | "all variants are visually distinct" |
+| "judge.verdict 9, three_quarter_view 9" | "judge picked this one — good angle, clean composition (9/10)" |
+| "judge.verdict 5, three_quarter_view 3, visible_faces: front only" | "judge flagged this — shot straight-on, no side visible, may hurt the 3D reconstruction" |
+| "judge.rejected: true" | "judge thinks this one is likely unusable — consider regenerating" |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines
