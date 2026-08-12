@@ -57,11 +57,15 @@ This is the **laptop-tier** AI context. The pipeline now also targets two Apple 
 
 Tier detection: every wrapper and the Claude Code skill read `~/3d-pipeline/.config` for `hardware_tier = laptop | studio`. The default is `laptop` when the file is absent. The wrappers never sniff hostname — explicit config is the contract.
 
-License-bucket vocabulary (used in code, `--json`, manifest, docs — exact names):
+License-bucket vocabulary (used in code, `--json`, manifest, docs — exact names).
+Full table with rationale in [§08 · Licensing landscape](#08-licensing-landscape):
 
-- `commercial_safe`: z-image-turbo, flux-schnell, qwen-image
-- `commercial_threshold`: sf3d, spar3d
-- `non_commercial`: flux-dev, trellis
+- `commercial_safe`: z-image-turbo, flux-schnell, qwen-image, flux2-klein,
+  ernie-image (item 20), qwen-image-edit (item 21), trellis2 (item 15),
+  siglip2, imagereward, dreamsim (item 16, judge-only), seedvr2,
+  stabledelight, marigold-iid (item 24), quadwild-bimdf (item 25)
+- `commercial_threshold`: sf3d, spar3d, hunyuan3d-paint (item 19)
+- `non_commercial`: flux-dev, trellis (v1)
 - `source_available_restricted`: reserved
 - `unclear_risky` / `unknown`: LoRAs, anything untagged
 
@@ -198,8 +202,10 @@ Three 2D models supported, in order of preference:
 | Model | License | Steps | Speed | When to use |
 |---|---|---|---|---|
 | **Z-Image Turbo** (default) | Apache 2.0 | 8 (typically 9) | 10–30s | Default for everything. Commercial-safe. High quality. Fast. No LoRA support. |
-| **FLUX schnell** | Apache 2.0 | 4 | 5–15s | When a LoRA is needed (and the LoRA is FLUX-compatible). Stylization, character consistency. |
+| **FLUX.2 klein** (item 20) | Apache 2.0 | varies | fast | The FLUX.2 family's permissive exception (9B/dev variants are BFL non-commercial — never substitute those). Same checkpoint does generation *and* built-in instruction-based editing. Preferred over FLUX schnell for new LoRA work. |
+| **FLUX schnell** | Apache 2.0 | 4 | 5–15s | Legacy FLUX.1-era LoRA ecosystem specifically. Still works, no longer the recommended LoRA path — prefer FLUX.2 klein for new work. |
 | **FLUX dev** | FLUX.1 Non-Commercial | 20–50 | 30–90s | Reserved for non-commercial work or evaluation. **Never** used for assets shipping in Ken's commercial games. |
+| **ERNIE-Image 8B** (item 20) | Apache 2.0 | — | — | Would be the strongest-at-release open text-to-image model for prompt adherence — **currently wired but non-functional** (verified live, pending an upstream fix). Don't suggest it to the user until that's resolved. |
 
 ### Why these three, not others
 
@@ -224,7 +230,17 @@ FLUX dev produces the highest-quality output of the three but its license forbid
 
 ### Runtime: mflux
 
-The runtime for all three models is **mflux**, an MLX-native port. See [section 18](#18-why-mflux-not-diffusers) for why mflux and not diffusers.
+The runtime for all these models is **mflux**, an MLX-native port. See [section 18](#18-why-mflux-not-diffusers) for why mflux and not diffusers.
+
+### Editing an existing concept image (item 21)
+
+`edit.sh` is a separate lane from generation: it takes an *existing* concept
+image and an instruction ("make the wood darker") and edits it in place,
+rather than generating from scratch. Runs on Qwen-Image-Edit-2511 (Apache
+2.0, `commercial_safe` — gate G3, HF card frontmatter). Also supports the
+official Multiple-Angles LoRA (`--angle`) for rotating a subject before 3D
+generation. This is distinct from FLUX.2 klein's own built-in instruction
+editing above — `edit.sh` is the dedicated, always-available edit path.
 
 ---
 
@@ -384,6 +400,17 @@ This is the part most easily gotten wrong. The pipeline is engineered around a s
 | SF3D | Stability Community License | **Yes**, up to $1M ARR |
 | TRELLIS (v1) | CC BY-NC 4.0 | **No** — non-commercial only |
 | TRELLIS.2 (v2, item 15) | MIT — port + weights (gate G1) | **Yes**, unrestricted |
+| FLUX.2 klein (item 20) | Apache 2.0 | **Yes**, unrestricted |
+| ERNIE-Image 8B (item 20) | Apache 2.0 | **Yes** — but currently non-functional, see §04 |
+| Qwen-Image-Edit-2511 + Multiple-Angles LoRA (item 21) | Apache 2.0 (gate G3) | **Yes**, unrestricted |
+| SigLIP 2 / ImageReward (item 16, judge/scoring only) | Apache 2.0 | **Yes** — never shipped in output assets, bucketed for auditability |
+| DreamSim (item 16, judge/scoring only) | MIT | **Yes** |
+| Hunyuan3D-Paint (item 19, dgrauet MLX port) | Tencent Hunyuan 3D 2.1 Community License | **Yes**, up to the same threshold as SF3D — see `docs/license-review-hunyuan3d-paint.md` |
+| gltfpack (item 23) | MIT | **Yes** — tool only, no weights |
+| xatlas (item 23) | MIT | **Yes** — tool only, no weights |
+| SeedVR2 / StableDelight (item 24) | Apache 2.0 (gate G5) | **Yes**, unrestricted |
+| Marigold-IID Appearance (item 24) | CreativeML OpenRAIL++-M (gate G4) | **Yes** — narrow behavioral-use restrictions, not a commercial-use gate; see `docs/decision-marigold-bucket.md` |
+| QuadWild bi-MDF (item 25) | GPL-3 | **Yes** — tool-side copyleft only, no weights; generated GLB outputs unaffected |
 | mflux runtime | MIT | Yes, unrestricted |
 | Blender | GPL | Yes — outputs are not infected (free use of files Blender produced) |
 | 3D Print Toolbox | GPL (Blender add-on) | Yes — same as Blender; outputs aren't GPL'd |
@@ -1083,6 +1110,29 @@ Places the pipeline is designed to be extended cleanly. If Ken wants to add func
 3. Add a `turntable/` subdirectory in `resolve_project_context`'s mkdir call
 4. Add a flow to SKILL.md ("Flow 6: Clean GLB → turntable video")
 5. Update `update_manifest.py` if turntable_path should be tracked
+
+### Watchlist (from the 2026-08 generation-quality refresh, re-survey trigger: next quality round or 2027-01)
+
+Models/tools explored during items 15–25 that didn't make the cut yet —
+worth re-checking before the next survey rather than re-researching from
+scratch:
+
+- **Pixal3D** (TencentARC, MIT, May 2026, TRELLIS.2 backbone,
+  near-reconstruction fidelity) — blocked only by NATTEN CUDA glue; a Mac
+  fork would leapfrog item 15 / TRELLIS.2.
+- **Qwen-Image-2.0** (Apache, 7B diffusion) — successor default-2D
+  candidate once mflux/Draw Things support lands.
+- **HiDream-O1-Image** (MIT, May 2026) — best-license frontier
+  text-to-image, no Mac runtime yet.
+- **Z-Image-Edit** — unreleased; would simplify the edit lane (item 21).
+- **PartSAM / MagicArticulate / Hunyuan3D-Omni** — auxiliary lanes
+  (segmentation/rigging), not evaluated for Mac viability yet.
+- **mflux Qwen-Image-Edit-2511 + FLUX.2 klein 9B KV-cache editing**
+  release notes — track for edit-lane backend upgrades.
+- **Auto-rigging (UniRig)** — MIT but spconv/flash-attn CUDA-walled on
+  Mac; explicit non-goal this round.
+- **Part segmentation lane** (Hunyuan3D-Part) — promising, Mac-unverified,
+  extra license territory terms; explicit non-goal this round.
 
 ### What not to extend without thinking carefully
 
