@@ -41,6 +41,7 @@ OVERWRITE_ENGINE=0
 JSON_MODE=0
 BG_REMOVAL_MODE=""
 PREVIEW_MODE=""
+JUDGE_MESH=0
 
 usage() {
     cat <<EOF
@@ -69,6 +70,12 @@ Generation options:
       --json               Emit a final JSON result line on stdout.
                            Human-readable logs are routed to stderr so
                            stdout contains only the JSON object.
+      --judge-mesh         Render turntable views and score the mesh with
+                           a local VLM judge (recognizable, back-face
+                           plausibility, geometry artifacts, texture
+                           coherence). Warn-don't-block: a below-floor
+                           verdict flags the asset but does not fail the
+                           run. No-op when vlm-env isn't installed.
   -h, --help               This help
 
 Examples:
@@ -103,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --preview)           PREVIEW_MODE="$2"; shift 2 ;;
         --no-preview)        PREVIEW_MODE="none"; shift ;;
         --json)              JSON_MODE=1;       shift ;;
+        --judge-mesh)        JUDGE_MESH=1;      shift ;;
         -h|--help)           usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -487,6 +495,97 @@ PY
     fi
 fi
 
+# v0.3.6 (item 18) — opt-in mesh judge: render N turntable views
+# (independent of the user-facing $PREVIEW_MODE/frame count) and score
+# geometry/texture with the local VLM judge. Warn-don't-block: a
+# below-floor verdict flags the asset but never fails the run. No-op when
+# vlm-env or vlm_judge.py isn't installed.
+JUDGE_MESH_VERDICT=""
+JUDGE_MESH_REJECTED=""
+if [[ "$JUDGE_MESH" == "1" ]]; then
+    VLM_ENV="${VLM_ENV:-$PIPELINE_ROOT/vlm-env}"
+    JUDGE_SCRIPT="$SCRIPT_DIR/vlm_judge.py"
+    [[ -f "$JUDGE_SCRIPT" ]] || JUDGE_SCRIPT="$PIPELINE_ROOT/workspace/vlm_judge.py"
+    if [[ -f "$JUDGE_SCRIPT" && -x "$VLM_ENV/bin/python" && -f "$TURNTABLE_SCRIPT" && -x "$BLENDER" ]]; then
+        MESH_JUDGE_VIEWS="$(read_pipeline_config mesh_judge_views 8)"
+        MESH_JUDGE_FLOOR="$(read_pipeline_config mesh_judge_floor 2.0)"
+        MESH_JUDGE_DIR="$ASSETS_ROOT/preview/mesh_judge"
+        info "Rendering $MESH_JUDGE_VIEWS view(s) for mesh judge..."
+        # meta_path="" here (last arg) — this render's own manifest is a
+        # scratch artifact; the judge writes its own meta.json section below.
+        "$BLENDER" --background --python "$TURNTABLE_SCRIPT" -- \
+            "$CLEAN_PATH" "$MESH_JUDGE_DIR" "${OUTPUT_NAME}_judge" gif \
+            "$MESH_JUDGE_VIEWS" 640 16 "" 2>&1 \
+            | grep '^\[turntable\]' | { while IFS= read -r line; do printf "[pipeline] %s\n" "${line#\[turntable\] }" >&"$HUMAN_FD"; done; } || true
+        JUDGE_VIEW_MANIFEST="$MESH_JUDGE_DIR/${OUTPUT_NAME}_judge_preview_manifest.json"
+        JUDGE_VIEW_PATHS=()
+        if [[ -f "$JUDGE_VIEW_MANIFEST" ]]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && JUDGE_VIEW_PATHS+=( "$line" )
+            done < <(python3 -c "
+import json, sys
+m = json.load(open(sys.argv[1]))
+for p in (m.get('frame_paths') or []):
+    print(p)
+" "$JUDGE_VIEW_MANIFEST" 2>/dev/null)
+        fi
+        if [[ "${#JUDGE_VIEW_PATHS[@]}" -gt 0 ]]; then
+            JUDGE_STDERR_FILE="$(mktemp)"
+            JUDGE_JSON_FILE="$(mktemp)"
+            "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+                --mode mesh --images "${JUDGE_VIEW_PATHS[@]}" \
+                --meta "$META_PATH" --floor "$MESH_JUDGE_FLOOR" --json \
+                > "$JUDGE_JSON_FILE" 2> "$JUDGE_STDERR_FILE" || true
+            grep '^\[judge\]' "$JUDGE_STDERR_FILE" | { while IFS= read -r line; do printf "[pipeline] %s\n" "${line#\[judge\] }" >&"$HUMAN_FD"; done; } || true
+            rm -f "$JUDGE_STDERR_FILE"
+            MESH_JUDGE_SUMMARY="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+verdict = d.get('verdict', 0)
+rejected = bool(d.get('rejected', False))
+notes = d.get('notes', '')
+flag = ' — likely degenerate, regenerate recommended' if rejected else ''
+line = f\"3D check: {verdict:.0f}/10{flag}\"
+if notes:
+    line += f\" ({notes})\"
+print(line)
+print(verdict)
+print('1' if rejected else '0')
+" "$JUDGE_JSON_FILE" 2>/dev/null || true)"
+            if [[ -n "$MESH_JUDGE_SUMMARY" ]]; then
+                info "$(printf '%s' "$MESH_JUDGE_SUMMARY" | sed -n '1p')"
+                JUDGE_MESH_VERDICT="$(printf '%s' "$MESH_JUDGE_SUMMARY" | sed -n '2p')"
+                JUDGE_MESH_REJECTED_RAW="$(printf '%s' "$MESH_JUDGE_SUMMARY" | sed -n '3p')"
+                if [[ "$JUDGE_MESH_REJECTED_RAW" == "1" ]]; then
+                    JUDGE_MESH_REJECTED=true
+                else
+                    JUDGE_MESH_REJECTED=false
+                fi
+                # Cross-check against clean_asset.py's loose-elements count
+                # before the judge's floater note reads as a hard fact (item
+                # 18 failure-mode note): cleanup may have already removed
+                # what the judge is now flagging as floaters.
+                LOOSE_DELETED="$(python3 -c "
+import json
+try:
+    d = json.load(open('$META_PATH'))
+    v = d.get('cleanup', {}).get('loose_elements_deleted')
+    print(v if v is not None else '')
+except Exception:
+    pass
+" 2>/dev/null || true)"
+                if [[ -n "$LOOSE_DELETED" && "$LOOSE_DELETED" != "0" ]]; then
+                    info "  (cleanup already removed $LOOSE_DELETED loose element(s) before this judge ran)"
+                fi
+            fi
+            rm -f "$JUDGE_JSON_FILE"
+        fi
+    fi
+fi
+
 # v0.3 — also stage the hero preview PNG alongside the GLB in the engine
 # folder when applicable. Useful for in-editor thumbnails / quick visual
 # previews without opening the asset. Same naming as the GLB (just .png).
@@ -511,28 +610,36 @@ if [[ "$JSON_MODE" == "1" ]]; then
     ENGINE_STAGED_BOOL=false
     [[ -n "$ENGINE_STAGED_PATH" ]] && ENGINE_STAGED_BOOL=true
     json_mode_end
-    python3 "$SCRIPT_DIR/json_emit.py" \
-        status=ok \
-        stage=image_to_3d \
-        generator="$GENERATOR" \
-        license_bucket="$LICENSE_BUCKET" \
-        input="$INPUT" \
-        raw_path="$RAW_PATH" \
-        clean_path="$CLEAN_PATH" \
-        engine_path="$ENGINE_STAGED_PATH" \
-        --int polycount_target="$POLYCOUNT" \
-        --int texture_resolution="$TEXTURE_RES" \
-        remesh="$REMESH" \
-        up_axis="$UP_AXIS" \
-        --bool skip_clean=false \
-        --bool engine_staged="$ENGINE_STAGED_BOOL" \
-        assets_root="$ASSETS_ROOT" \
-        manifest_path="$MANIFEST_PATH" \
-        project_mode="$PROJECT_MODE" \
-        project_root="$PROJECT_ROOT" \
-        project_engine="$PROJECT_ENGINE" \
-        --int duration_seconds="$DURATION" \
-        machine="$MACHINE" \
-        hardware_tier="$HW_TIER" \
+    JSON_EMIT_ARGS=(
+        status=ok
+        stage=image_to_3d
+        generator="$GENERATOR"
+        license_bucket="$LICENSE_BUCKET"
+        input="$INPUT"
+        raw_path="$RAW_PATH"
+        clean_path="$CLEAN_PATH"
+        engine_path="$ENGINE_STAGED_PATH"
+        --int polycount_target="$POLYCOUNT"
+        --int texture_resolution="$TEXTURE_RES"
+        remesh="$REMESH"
+        up_axis="$UP_AXIS"
+        --bool skip_clean=false
+        --bool engine_staged="$ENGINE_STAGED_BOOL"
+        assets_root="$ASSETS_ROOT"
+        manifest_path="$MANIFEST_PATH"
+        project_mode="$PROJECT_MODE"
+        project_root="$PROJECT_ROOT"
+        project_engine="$PROJECT_ENGINE"
+        --int duration_seconds="$DURATION"
+        machine="$MACHINE"
+        hardware_tier="$HW_TIER"
         created="$CREATED_AT"
+    )
+    # Item 18 — additive-only: these keys only appear when --judge-mesh ran
+    # and produced a verdict, so a no-flag run's --json output is unchanged.
+    if [[ -n "$JUDGE_MESH_VERDICT" ]]; then
+        JSON_EMIT_ARGS+=( --float judge_mesh_verdict="$JUDGE_MESH_VERDICT" )
+        JSON_EMIT_ARGS+=( --bool judge_mesh_rejected="$JUDGE_MESH_REJECTED" )
+    fi
+    python3 "$SCRIPT_DIR/json_emit.py" "${JSON_EMIT_ARGS[@]}"
 fi

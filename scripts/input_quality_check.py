@@ -172,6 +172,7 @@ def _merge_into_meta(meta_path: Path, payload: dict) -> None:
          "--section", "input",
          "--data", json.dumps(payload)],
         check=True,
+        capture_output=True,
     )
 
 

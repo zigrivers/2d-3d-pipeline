@@ -109,6 +109,7 @@ def main() -> int:
          "--section", "clip",
          "--data", json.dumps(payload)],
         check=False,
+        capture_output=True,
     )
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))

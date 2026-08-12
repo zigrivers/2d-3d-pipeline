@@ -156,6 +156,7 @@ def _merge(meta_path: Path, payload: dict) -> None:
          "--section", "quality",
          "--data", json.dumps({"textures": payload})],
         check=True,
+        capture_output=True,
     )
 
 

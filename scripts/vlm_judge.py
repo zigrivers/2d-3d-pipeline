@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
-"""v0.3.5 — local VLM judge for 2D concepts, best-of-N auto-select
-(item 17 of the 2026-08 generation-quality refresh).
+"""v0.3.6 — local VLM judge: 2D concepts (best-of-N) + 3D mesh turntables
+(items 17-18 of the 2026-08 generation-quality refresh).
 
 Uses mlx-vlm (MIT; commercial_safe) with a Qwen3-VL model (Apache 2.0;
-commercial_safe) to score concept images against a fixed rubric:
-subject match, 3/4-view compliance, background cleanliness, lighting
-flatness, single-subject, silhouette readability. Catches failures
-CLIP/SigLIP-family scoring misses — composition and framing, not just
-prompt/subject match.
+commercial_safe).
 
-De-biasing protocol (arXiv:2606.20364): fixed image order, one image
-per judge call (no cross-image context that could bias relative
+--mode image scores concept images against a fixed rubric: subject
+match, 3/4-view compliance, background cleanliness, lighting flatness,
+single-subject, silhouette readability. Catches failures CLIP/SigLIP-
+family scoring misses — composition and framing, not just prompt/subject
+match. De-biasing protocol (arXiv:2606.20364): fixed image order, one
+image per judge call (no cross-image context that could bias relative
 scoring).
 
---mode mesh (item 18) is not yet implemented — this PR ships image
-concept judging only.
+--mode mesh scores a set of turntable render views of ONE 3D mesh
+(rendered by turntable_render.py) in a single joint call — unlike
+--mode image, cross-view context is exactly what's wanted here, since
+all views show the same object and back-face plausibility / geometry
+artifacts can only be judged by comparing views. Catches degenerate
+meshes (arXiv:2606.18451 shows heuristic checks are bimodal: they catch
+catastrophic failure but miss "bad but valid" geometry).
 
 Usage:
     vlm_judge.py --mode image --image PATH --meta PATH [--model MODEL] [--json]
     vlm_judge.py --mode image --images PATH1 PATH2 ... --meta PATH --rank [--json]
+    vlm_judge.py --mode mesh --images VIEW1 VIEW2 ... --meta PATH [--json]
 """
 from __future__ import annotations
 
@@ -80,6 +86,62 @@ SCORE_KEYS = [
 ]
 STRING_KEYS = ["visible_faces"]
 
+# Item 18. One call sees ALL views at once (num_images=N) so the model can
+# compare views against each other — the opposite of the image rubric's
+# one-call-per-image isolation, and deliberately so.
+MESH_RUBRIC = """You are grading a 3D mesh from a sequence of turntable render views (the
+same object photographed from N evenly-spaced angles around a full rotation), intended for
+use as a game asset. Judge the OBJECT across ALL views together — you are looking at one
+mesh, not independent images.
+
+FIRST, before scoring, answer this literally: across the view sequence, does the object's
+silhouette maintain a consistent, believable volume (real width AND depth, not just a flat
+outline), or does it collapse into a hairline- or paper-thin sliver in ANY view (apparent
+width near-zero relative to height, like looking at a blade edge-on)? Name what you see
+plainly, e.g. "consistent solid volume in all views" or "collapses to a hairline sliver in
+several views".
+
+If ANY view shows a hairline/paper-thin collapse, this is a catastrophically degenerate
+mesh (typically a flattened/scale-collapsed export bug) — "geometry_artifacts", "recognizable",
+and "overall" MUST all score 0-1, regardless of how clean or recognizable any single
+non-degenerate view looks. A mesh that is a sliver from even one angle is not a usable
+asset — do not let a good-looking view elsewhere talk you out of this.
+
+If the object appears untextured (flat grey / vertex-color-only, no photographic surface
+detail), set "texture_coherence" to null and judge geometry only — do not penalize a
+correctly-formed but untextured mesh for lacking texture.
+
+Return strict JSON, no other prose, matching exactly this schema:
+
+{"shape_consistency": "<your literal answer from above>", "recognizable": int,
+"back_face_plausibility": int, "geometry_artifacts": int, "texture_coherence": int_or_null,
+"artifacts_note": "<short phrase or empty string>", "overall": int}
+
+Score each numeric dimension 0-10 (integers), where 10 is ideal.
+
+Dimension meanings:
+- recognizable: across all views, does this read as one coherent, identifiable object
+  (not a formless blob, not a sliver — see the hairline-collapse rule above)?
+- back_face_plausibility: do the views away from the "front" look like a plausible
+  continuation of the object (not flat/blank, not missing geometry, not warped)?
+- geometry_artifacts: 10 = clean mesh, no visible slivers, holes, or floating fragments
+  in ANY view. Deduct heavily for each artifact type you see across the sequence — a
+  hairline collapse (see above) is not a minor deduction, it scores 0-1.
+- texture_coherence: is the texture consistent and seam-free across views (not smeared,
+  not duplicated/mirrored oddly)? null if the mesh has no texture to judge.
+- artifacts_note: if geometry_artifacts < 8, briefly name what you saw (e.g. "2 floating
+  fragments near the base", "collapses to a hairline sliver from the side"). Empty string
+  if nothing notable.
+- overall: holistic 0-10 score for suitability as a finished game asset.
+
+Return ONLY the JSON object, nothing before or after it."""
+
+MESH_SCORE_KEYS = [
+    "recognizable", "back_face_plausibility", "geometry_artifacts",
+    "texture_coherence", "overall",
+]
+MESH_STRING_KEYS = ["shape_consistency"]
+
 
 def _imports():
     try:
@@ -110,12 +172,37 @@ def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_pat
     return parsed
 
 
+def _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config, image_paths: list[str]) -> dict:
+    """One joint call over all turntable views of a single mesh."""
+    formatted = apply_chat_template(processor, config, MESH_RUBRIC, num_images=len(image_paths))
+    result = mlx_vlm.generate(
+        model, processor, formatted, image=image_paths,
+        max_tokens=400, temperature=0.0, verbose=False,
+    )
+    text = result.text.strip()
+    start = text.index("{")
+    end = text.rindex("}") + 1
+    data = json.loads(text[start:end])
+    parsed = {}
+    for k in MESH_SCORE_KEYS:
+        if k not in data:
+            continue
+        v = data[k]
+        parsed[k] = int(v) if v is not None else None
+    for k in MESH_STRING_KEYS:
+        if k in data:
+            parsed[k] = str(data[k])
+    parsed["artifacts_note"] = str(data.get("artifacts_note", ""))
+    return parsed
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--mode", choices=["image"], default="image",
-                   help="Judge mode. Only 'image' is implemented (item 18 adds 'mesh').")
+    p.add_argument("--mode", choices=["image", "mesh"], default="image",
+                   help="'image' judges a 2D concept; 'mesh' judges turntable views of a GLB.")
     p.add_argument("--image", help="Single image path (or use --images for --rank)")
-    p.add_argument("--images", nargs="+", help="Multiple image paths for --rank")
+    p.add_argument("--images", nargs="+",
+                   help="Multiple image paths — variants for --rank, or turntable views for --mode mesh")
     p.add_argument("--meta", required=True)
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"mlx-vlm model repo (default: {DEFAULT_MODEL})")
@@ -129,7 +216,12 @@ def main() -> int:
     if mlx_vlm is None:
         return 0  # graceful no-op
 
-    if args.rank:
+    if args.mode == "mesh":
+        if not args.images:
+            print("ERROR: --mode mesh requires --images VIEW1 VIEW2 ...", file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(p)) for p in args.images]
+    elif args.rank:
         if not args.images:
             print("ERROR: --rank requires --images PATH1 PATH2 ...", file=sys.stderr)
             return 2
@@ -144,6 +236,41 @@ def main() -> int:
     model, processor = mlx_vlm.load(args.model)
     config = model.config
     t_load = time.time()
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    if args.mode == "mesh":
+        t_img0 = time.time()
+        scores = _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config,
+                              [str(p) for p in image_paths])
+        verdict = float(scores.get("overall", 0))
+        rejected = verdict < args.floor
+        payload = {
+            "model": args.model,
+            "views_rendered": len(image_paths),
+            "scores": {k: v for k, v in scores.items() if k != "artifacts_note"},
+            "notes": scores.get("artifacts_note", ""),
+            "verdict": verdict,
+            "rejected": rejected,
+            "duration_seconds": round(time.time() - t_img0, 2),
+        }
+        subprocess.run(
+            [sys.executable, str(META_HELPER), "merge", str(meta_path),
+             "--section", "judge",
+             "--data", json.dumps({"mesh": payload})],
+            check=False,
+            capture_output=True,
+        )
+        if args.json:
+            print(json.dumps({
+                **payload,
+                "pipeline_load_seconds": round(t_load - t0, 2),
+            }, indent=2, sort_keys=True))
+        else:
+            flag = " (below floor — likely degenerate)" if rejected else ""
+            print(f"[judge] mesh {verdict:.0f}/10{flag} ({len(image_paths)} views)")
+            if payload["notes"]:
+                print(f"[judge] notes: {payload['notes']}")
+        return 0
 
     results = []
     for img in image_paths:
@@ -154,8 +281,6 @@ def main() -> int:
             "scores": scores,
             "duration_seconds": round(time.time() - t_img0, 2),
         })
-
-    meta_path = Path(os.path.expanduser(args.meta))
 
     if args.rank:
         ranked = sorted(enumerate(results), key=lambda kv: -kv[1]["scores"].get("overall", 0))

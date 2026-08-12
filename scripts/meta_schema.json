@@ -230,7 +230,28 @@
         "duration_seconds": { "type": "number" },
         "mesh": {
           "type": "object",
-          "additionalProperties": true
+          "description": "Item 18 — turntable-view mesh judging (--mode mesh).",
+          "additionalProperties": true,
+          "properties": {
+            "model": { "type": "string" },
+            "views_rendered": { "type": "integer" },
+            "scores": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "shape_consistency": { "type": "string" },
+                "recognizable": { "type": "integer" },
+                "back_face_plausibility": { "type": "integer" },
+                "geometry_artifacts": { "type": "integer" },
+                "texture_coherence": { "type": ["integer", "null"] },
+                "overall": { "type": "integer" }
+              }
+            },
+            "notes": { "type": "string" },
+            "verdict": { "type": "number" },
+            "rejected": { "type": "boolean" },
+            "duration_seconds": { "type": "number" }
+          }
         }
       }
     }

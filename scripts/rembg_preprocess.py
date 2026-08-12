@@ -193,6 +193,7 @@ def main() -> int:
          "--section", "preprocessing",
          "--data", json.dumps({"bg_removal": payload})],
         check=False,
+        capture_output=True,
     )
 
     result = {**payload, "output_path": output_path}
