@@ -117,9 +117,15 @@ available, none of the supported models come close:
 
 The bucket names are exact (used in code, JSON, manifest, docs):
 
-- `commercial_safe`: z-image-turbo, flux-schnell, qwen-image
-- `commercial_threshold`: sf3d, spar3d
-- `non_commercial`: flux-dev, trellis
+- `commercial_safe`: z-image-turbo, flux-schnell, qwen-image, flux2-klein,
+  ernie-image (item 20), qwen-image-edit (item 21), trellis2 (item 15),
+  siglip2, imagereward, dreamsim (item 16, judge-only), seedvr2,
+  stabledelight (item 24, gate G5), marigold-iid (item 24, gate G4 — real
+  but narrow use restrictions, not a commercial-use gate; see
+  `docs/decision-marigold-bucket.md`), quadwild-bimdf (item 25 — GPL-3
+  tool, no weights)
+- `commercial_threshold`: sf3d, spar3d, hunyuan3d-paint (item 19)
+- `non_commercial`: flux-dev, trellis (v1 — distinct from trellis2/v2 above)
 - `source_available_restricted`: reserved
 - `unclear_risky` / `unknown`: LoRAs, anything untagged
 

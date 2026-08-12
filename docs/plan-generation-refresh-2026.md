@@ -1,6 +1,6 @@
 # Generation-refresh implementation plan (2026-08)
 
-**Status:** ready for execution · **Companion spec:**
+**Status:** shipped in v0.6.0 (2026-08-12) · **Companion spec:**
 [`spec-generation-refresh-2026.md`](spec-generation-refresh-2026.md) ·
 **Executor:** an AI coding agent (written for Claude Sonnet 5, no prior
 conversation context assumed)

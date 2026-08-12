@@ -2,6 +2,36 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — v0.6.0: 2026-08 generation-quality refresh (items 15–25)
+
+Full round of `docs/spec-generation-refresh-2026.md`, shipped as one
+continuous run (no intermediate v0.5.x tags — see individual dated
+entries below for full detail, real findings, and live-test evidence
+per item):
+
+- **Item 15** — TRELLIS.2-4B 3D generator backend (R1.4; bake-off vs
+  SF3D/SPAR3D at R1.5, default unchanged pending gate G6).
+- **Item 16** — Scorer stack refresh: SigLIP 2 + ImageReward + DreamSim
+  (R1.1).
+- **Item 17** — Local VLM judge + best-of-N generation (R1.2).
+- **Item 18** — Mesh judge (R1.3).
+- **Item 19** — Paint-mode retarget to the Hunyuan3D-Paint MLX port
+  (R2.3).
+- **Item 20** — 2D model refresh: FLUX.2 klein + ERNIE-Image (R2.1).
+- **Item 21** — Instruction-based edit lane, `edit.sh` (R2.2).
+- **Item 22** — Multi-view backend research + wiring (R2.4).
+- **Item 23** — LOD chain + UV re-unwrap via gltfpack/xatlas (R3.1).
+- **Item 24** — Texture post: PBR pass (StableDelight + Marigold-IID)
+  + SeedVR2 upscale engine (R3.2).
+- **Item 25** — Opt-in quad retopo via QuadWild bi-MDF (R3.3).
+
+License gates G1–G5 all resolved with direct evidence (LICENSE files,
+HF card frontmatter, or GitHub API metadata read at implementation
+time, never assumed from the spec) — see each item's dated entry and
+`docs/model-review-trellis2.md` / `docs/decision-marigold-bucket.md`
+for the two gates with dedicated decision docs. Gate G6 (any default
+generator change) is explicitly deferred, per the spec's non-goals.
+
 ## 2026-08-12 — R3.3: opt-in quad retopo — QuadWild bi-MDF (item 25)
 
 - `generate.sh` — new `--retopo quad` (+ `--retopo-timeout SECONDS`,
@@ -134,6 +164,8 @@ Dated entries for significant changes to the docs, scripts, or skill.
   New setup-guide install step in both guides.
 - `skill/SKILL.md` — Upscale section rewritten to cover both engines;
   new PBR pass section added.
+
+## 2026-08-12 — R3.1: LOD chain + UV re-unwrap (item 23)
 
 - `scripts/generate.sh` — new `--lods "N,N,N"` flag: descending target
   polycounts emit `clean/<name>_lod{0,1,...}.glb` via `gltfpack`, plus

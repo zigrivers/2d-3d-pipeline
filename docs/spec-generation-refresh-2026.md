@@ -1,7 +1,8 @@
 # Generation-quality refresh spec (2026-08) — v1
 
-**Status:** ready for implementation · **Author:** asset-pipeline
-maintainers · **Target release:** v0.5.x (Tier 1) · v0.6 (Tiers 2–3) ·
+**Status:** shipped in v0.6.0 (2026-08-12) · **Author:** asset-pipeline
+maintainers · **Shipped release:** v0.6.0 (all items 15–25, one
+continuous round — see `CHANGELOG.md`) ·
 **Companion plan:** [`plan-generation-refresh-2026.md`](plan-generation-refresh-2026.md)
 
 This spec captures eleven improvements (items 15–25, continuing the
