@@ -53,7 +53,9 @@ with the env var unset, nothing changes anywhere.
   set (the remote path needs no mlx-vlm). `concept.sh` and `generate.sh`
   gate on it instead of hard-requiring vlm-env.
 - `benchmark.sh`/`model_bakeoff.py` need no changes: the env var reaches
-  vlm_judge.py through normal subprocess inheritance (verified live).
+  vlm_judge.py through normal subprocess inheritance (verified by
+  inspection — nothing in that chain overrides the environment; the
+  concept.sh path was verified live end-to-end).
 - Tests: `tests/python/test_vlm_judge_endpoint.py` — 5 subprocess tests
   against a stdlib mock server (request shape, data-URL round-trip,
   one-call-per-image de-biasing preserved under --rank, env-var pickup,
