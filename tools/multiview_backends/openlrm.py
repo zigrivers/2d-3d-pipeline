@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Multi-view backend adapter — OpenLRM.
+"""Multi-view backend adapter — OpenLRM. DISQUALIFIED (item 22, 2026-08).
 
-Dispatched by scripts/multiview_benchmark.py during P3.1b.
+Dispatched by scripts/multiview_benchmark.py during P3.1b. Kept for
+benchmark-comparison history (see docs/multiview-backend-research.md)
+rather than deleted, per the "mark disqualified, cheaper than
+deleting" convention — do not wire this as a shipped `multiview.sh`
+backend.
 
-License: OpenLRM is Apache 2.0 — `commercial_safe`. The only fully
-commercial-safe path in the benchmark; even if it doesn't win on
-quality, "no license tax" is its competitive advantage.
+License CORRECTION (this file previously claimed the opposite): the
+comment below used to read "OpenLRM is Apache 2.0 — `commercial_safe`.
+The only fully commercial-safe path in the benchmark" — that was
+wrong. Only the OpenLRM *code* is Apache 2.0; the *weights* are
+CC-BY-NC 4.0, research-only, per the repo's own
+[model_card.md](https://github.com/3DTopia/OpenLRM/blob/main/model_card.md),
+quoted verbatim: "The model weights are released under the Creative
+Commons Attribution-NonCommercial 4.0 International License. They are
+provided for research purposes only, and CANNOT be used commercially."
+Corrected bucket: `non_commercial`.
 
 Install layout assumed (override via env):
 
@@ -33,8 +44,13 @@ import sys
 import time
 from pathlib import Path
 
-LICENSE_BUCKET = "commercial_safe"
+LICENSE_BUCKET = "non_commercial"
 DEFAULT_DIR = "~/3d-pipeline/openlrm"
+DISQUALIFIED = True
+DISQUALIFIED_REASON = (
+    "Weights CC-BY-NC 4.0, research-only (see docstring) — auto-DQ by "
+    "the benchmark rubric's license-clarity score, same as InstantMesh."
+)
 
 
 def _emit(payload: dict) -> int:

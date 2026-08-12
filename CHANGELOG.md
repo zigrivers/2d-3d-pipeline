@@ -2,6 +2,60 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R2.4 PR9: multi-view backend slate research (item 22)
+
+- `docs/multiview-backend-research.md` — full rewrite. Replaces the
+  dead P3.1 candidate slate (TRELLIS multi-view, InstantMesh,
+  OpenLRM) with item 22's: MV-Adapter (view gen), Hunyuan3D-2mv
+  (multi-view → shape), TRELLIS.2 single-image (item 15, the "is
+  multi-view even worth it" baseline), `edit.sh --angle` (item 21),
+  Zero123++ (research-comparison only, never wired).
+- **Two real, pre-existing license-bucket bugs found and fixed** while
+  researching citations for this doc:
+  - `tools/multiview_backends/openlrm.py` claimed "OpenLRM is Apache
+    2.0 — `commercial_safe`. The only fully commercial-safe path" —
+    wrong. Only the code is Apache 2.0; the weights are CC-BY-NC 4.0,
+    research-only, confirmed by reading OpenLRM's own `model_card.md`
+    directly. Corrected to `non_commercial`, adapter marked
+    `DISQUALIFIED` (kept for benchmark-comparison history, not
+    deleted, per the spec's own "mark, don't delete" convention).
+  - `tools/multiview_2d_adapters/zero123_plus_plus.py` carried an
+    unverified placeholder bucket (`commercial_threshold`; its own
+    comment admitted "verify the current text upstream" — never
+    done). Verified directly against SUDO-AI-3D/zero123plus: code is
+    Apache 2.0, weights are CC-BY-NC 4.0 per the README. Corrected to
+    `non_commercial`.
+  - `tools/multiview_backends/instantmesh.py` — docstring updated to
+    lead with the real, unfixable-by-license-review DQ reason (hard
+    CUDA≥12.1 + `nvdiffrast` requirement, no MPS path exists at all)
+    ahead of the pre-existing license-uncertainty note; also marked
+    `DISQUALIFIED`.
+- **Real reduced-scope comparison run fresh on the Studio** (not the
+  full formal 3-subject benchmark — see below): MV-Adapter (113.4s, 6
+  consistent 360° views, visually verified) → Hunyuan3D-2mv (87.7s,
+  190,742v/381,424 faces, confirmed watertight) versus
+  `generate.sh -g trellis2` on the identical source image (180s,
+  cleaned to 14,020 faces, **not** watertight — 5,083 small gaps,
+  texture-quality check flagged `uniform-roughness`/
+  `uniform-metallic`). Reproduces R0.4/R0.5's spike PASSes on a fresh
+  run. Real, honestly-documented gap: the MV-Adapter→Hunyuan3D-2mv
+  chain produces shape only, no texture pass — R0.5's scope was
+  deliberately shape-only, and a real production chain's total
+  cost/quality (likely needing R2.3's Hunyuan3D-Paint MLX port
+  chained after) is untested.
+- **No PR 10 (wiring `multiview.sh`) this round** — item 22's own AC
+  gates wiring on a backend clearing the formal 6.5/10 rubric, which
+  requires the 3-subject synthetic/mvgen benchmark methodology
+  (item 12 Phase 1) that has real, unbuilt prerequisite data
+  (`tests/multiview-bench/sources/` is still empty). Fabricating
+  formal scores from the reduced-scope n=1 comparison above would be
+  worse than documenting the honest gap — deferred, with the doc's
+  §7 listing exactly what would unblock it.
+- No embed/skill changes this round (nothing touched lives in the
+  canonical-vs-embedded set — `tools/` is explicitly exempt per its
+  own file headers). `make verify` (43/43 blocks) and `make test`
+  (132/132) both green, unaffected by this PR's scope.
+
 ## 2026-08-12 — R2.3: paint retarget (item 19)
 
 - `scripts/texture.sh --mode paint` retargeted from item 7's original

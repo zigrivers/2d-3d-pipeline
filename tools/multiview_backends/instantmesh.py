@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Multi-view backend adapter — InstantMesh.
+"""Multi-view backend adapter — InstantMesh. DISQUALIFIED (item 22, 2026-08).
 
-Dispatched by scripts/multiview_benchmark.py during P3.1b.
+Dispatched by scripts/multiview_benchmark.py during P3.1b. Kept for
+benchmark-comparison history (see docs/multiview-backend-research.md)
+rather than deleted, per the "mark disqualified, cheaper than
+deleting" convention — do not wire this as a shipped `multiview.sh`
+backend.
 
-** License warning. ** InstantMesh is released under a Tencent
-research license that hasn't been reviewed in this repo. The bucket
-is recorded as `unclear_risky` so the benchmark rubric auto-DQs
-runs by license-clarity score alone unless a separate review
-(mirror of Hunyuan3D-Paint's P2.3) ships first.
+Primary DQ reason (item 22, hardware — cannot be resolved by license
+review): InstantMesh hard-requires CUDA >= 12.1 + `nvdiffrast`, per
+its own [README](https://github.com/TencentARC/InstantMesh) — no
+Apple Silicon / MPS path exists at all. Unlike R0.4's MV-Adapter
+finding (a *packaging* mistake coupling unrelated CUDA-only code to
+an otherwise-portable path), InstantMesh's CUDA dependency is load-
+bearing for its actual reconstruction algorithm.
 
-If you DO want to benchmark it anyway (the data is still useful
-even if you can't ship outputs commercially), the adapter runs;
-just don't pick a winner on the bare numbers without resolving the
-license question first.
+Secondary DQ reason (unchanged from the original review): released
+under a Tencent research license that hasn't been separately
+reviewed in this repo. The bucket is recorded as `unclear_risky` so
+the benchmark rubric auto-DQs runs by license-clarity score alone
+even if the hardware issue were somehow resolved.
 
 Install layout assumed (override via env):
 
