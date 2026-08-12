@@ -650,10 +650,38 @@ def _venv_pip_freeze(venv_path: Path) -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
+def _check_pinned_commit(repo_path: Path, expected_commit: str) -> dict:
+    """Item 15 / principle P-B: community-fork risk is named with a pinned
+    commit + this smoke check, so an upstream force-push or an accidental
+    local `git pull` doesn't silently swap in unreviewed code."""
+    if not repo_path.exists():
+        return {"status": "drift", "reason": "repo-missing", "path": str(repo_path)}
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+    except Exception as e:
+        return {"status": "drift", "reason": f"git-rev-parse-failed: {e}"}
+    actual = result.stdout.strip()
+    if actual != expected_commit:
+        return {"status": "drift", "reason": "commit-mismatch",
+                "expected_commit": expected_commit, "actual_commit": actual}
+    return {"status": "ok"}
+
+
 def check_venv(venv: dict) -> dict:
     name = venv["name"]
     path = _expand(venv["path"])
     lockfile = REPO_ROOT / venv["lockfile"]
+
+    pinned_commit = venv.get("pinned_commit")
+    if pinned_commit:
+        repo_path = _expand(venv.get("repo_path") or venv["path"])
+        commit_check = _check_pinned_commit(repo_path, pinned_commit)
+        if commit_check["status"] != "ok":
+            return {"status": "drift", "name": name, **commit_check,
+                    "fix_command": f"cd {repo_path} && git checkout {pinned_commit}"}
 
     if not lockfile.exists() or not lockfile.read_text().strip():
         return {"status": "skipped", "name": name,

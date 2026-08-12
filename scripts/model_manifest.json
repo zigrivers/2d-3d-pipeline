@@ -96,6 +96,13 @@
       "components": [
         "qwen3-vl-judge"
       ]
+    },
+    "trellis2": {
+      "description": "Item 15 \u2014 TRELLIS.2 2D-to-3D backend (opt-in; generate.sh -g trellis2). Bakes real PBR maps, unlike SF3D's scalar factors.",
+      "components": [
+        "trellis2-weights",
+        "dinov3-encoder"
+      ]
     }
   },
   "venvs": [
@@ -159,6 +166,18 @@
       "purpose": "Local VLM judge (mlx-vlm) for concept.sh --judge / --best-of",
       "python_version": "3.12",
       "lockfile": "scripts/lockfiles/vlm-env.txt"
+    },
+    {
+      "name": "trellis2-env",
+      "path": "~/3d-pipeline/trellis2-mac",
+      "required": false,
+      "feature_set": "trellis2",
+      "size_gb": 2,
+      "purpose": "TRELLIS.2 2D-to-3D backend (generate.sh -g trellis2). Community fork pinned per principle P-B.",
+      "python_version": "3.11",
+      "lockfile": "scripts/lockfiles/trellis2-env.txt",
+      "pinned_commit": "d58628f4f5b9c3de8274cb110074154f4b31cef2",
+      "repo_path": "~/3d-pipeline/trellis2-mac"
     }
   ],
   "models": [
@@ -340,6 +359,42 @@
       "hf_repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit",
       "storage_layout": "hf_snapshot",
       "warm_target": "qwen3-vl-judge",
+      "comfyui_kind": null
+    },
+    {
+      "id": "trellis2-weights",
+      "filename": "",
+      "feature_set": "trellis2",
+      "license_bucket": "commercial_safe",
+      "size_mb": 14000,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "trellis2",
+      "notes": "MIT (gate G1, R0.1 spike; see docs/model-review-trellis2.md). Downloaded automatically by generate.py on first use via huggingface_hub, into the standard HF cache (no dedicated env var).",
+      "requires_hf_auth": false,
+      "hf_repo": "microsoft/TRELLIS.2-4B",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "trellis2-weights",
+      "comfyui_kind": null
+    },
+    {
+      "id": "dinov3-encoder",
+      "filename": "",
+      "feature_set": "trellis2",
+      "license_bucket": "commercial_safe",
+      "size_mb": 1100,
+      "cache_dir": "~/.cache/huggingface/hub",
+      "env_var": "",
+      "download_url": "",
+      "sha256": "",
+      "managed_by": "trellis2",
+      "notes": "Meta DINOv3 custom license (gate G1, R0.1 spike): no commercial-use restriction, no revenue cap, no field-of-use limit; used only as an internal feature extractor, never shipped in output GLBs. Gated on HF — requires prior access grant on the authenticated account. Downloaded automatically by generate.py on first use.",
+      "requires_hf_auth": true,
+      "hf_repo": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+      "storage_layout": "hf_snapshot",
+      "warm_target": "dinov3-encoder",
       "comfyui_kind": null
     }
   ],

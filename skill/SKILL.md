@@ -89,7 +89,7 @@ change behaviour. The wrappers do the same detection in `_pipeline_lib.sh`
 The three core halves are unchanged:
 
 - **2D** — text → image via mflux
-- **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS.2, then Blender cleanup
+- **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS (v1) / TRELLIS.2 (v2), then Blender cleanup
 - **Print** — clean GLB → printable STL via Blender mesh repair + scaling
 
 v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
@@ -116,7 +116,7 @@ Use these exact names in conversation, manifest entries, and JSON output:
 
 | Bucket                          | Models                                              |
 | ------------------------------- | --------------------------------------------------- |
-| `commercial_safe`               | z-image-turbo, flux-schnell, qwen-image             |
+| `commercial_safe`               | z-image-turbo, flux-schnell, qwen-image, trellis2   |
 | `commercial_threshold`          | sf3d, spar3d                                        |
 | `non_commercial`                | flux-dev, trellis                                   |
 | `source_available_restricted`   | (reserved; nothing default-mapped here yet)         |
@@ -188,7 +188,7 @@ don't have to pre-check.
 - `engine`: `"unity" | "unreal" | "none"` — overrides auto-detection
 - `engine_path`: relative-to-project or absolute path for final GLB staging
 - `defaults.generator_2d`: `"z-image-turbo" | "flux-schnell" | "flux-dev" | "qwen-image"`
-- `defaults.generator_3d`: `"sf3d" | "spar3d" | "trellis"`
+- `defaults.generator_3d`: `"sf3d" | "spar3d" | "trellis" | "trellis2"`
 - `defaults.polycount`: integer
 - `defaults.texture_resolution`: integer
 - `defaults.lora`: absolute path to .safetensors
@@ -357,10 +357,14 @@ only needs one variant, mflux + LoRA is faster and uses less disk.
 ## Flow 2: 2D image → 3D asset
 
 Use `generate.sh` with `-i <image_path>`. Default to SF3D unless asked
-for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
-license bucket if you pick anything other than SF3D.
+for SPAR3D, TRELLIS (v1), or TRELLIS.2 (v2, item 15) — or the asset
+needs unusual topology or real PBR at higher geometry density than
+SF3D gives. Mention the license bucket if you pick anything other than
+SF3D. **TRELLIS and TRELLIS.2 are two different models — v1 is
+`non_commercial` and vertex-colors-only; v2 is `commercial_safe` with
+real PBR but the slowest generator in the pipeline (~5–6 min/asset).**
 
-### Generator recommendation matrix (v0.3+)
+### Generator recommendation matrix (v0.3+, item 15 adds TRELLIS.2)
 
 Before invoking `generate.sh`, classify the asset by reading the user's
 request. Match the closest row and recommend that generator (stating
@@ -368,22 +372,32 @@ the license bucket inline, as already required for non-default choices).
 
 | Intent signals (in prompt or context) | Recommend | Why |
 |---|---|---|
-| "character", "figure", "creature", "person" with detail | TRELLIS | Better topology for organic forms; user must accept `non_commercial` |
+| "character", "figure", "creature", "person" with detail, commercial OK | TRELLIS.2 | Same organic-topology advantage as v1, real PBR, `commercial_safe` — but ~5–6 min/asset, slowest option |
+| "character", "figure", "creature", "person" with detail, non-commercial OK | TRELLIS (v1) | Faster than TRELLIS.2 (~30–60s); user must accept `non_commercial` and vertex-colors-only texture |
 | "mech", "robot", "weapon", "gun", "tool", "hard surface" | SPAR3D | Sharper edges; ~2× faster |
 | "quick", "draft", "iterate", "prototype", "test" | SPAR3D | ~2× speed at acceptable quality for iteration |
 | "prop", "chest", "barrel", "rock", "crate", default | SF3D | Default; `commercial_safe` ‡; reliable |
-| Asset needs visible back face (e.g. character figurine) | TRELLIS, or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
-| Final asset for **commercial** release | SF3D **or** SPAR3D only | Both `commercial_threshold`; **never** TRELLIS here |
+| Asset needs visible back face (e.g. character figurine) | TRELLIS.2 or TRELLIS (v1), or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
+| Final asset for **commercial** release, best geometry+texture, time not critical | TRELLIS.2 | `commercial_safe`; real PBR; slow |
+| Final asset for **commercial** release, speed matters | SF3D **or** SPAR3D | Both `commercial_threshold`; fast; **never TRELLIS (v1)** here |
 
 ‡ Note SF3D is technically `commercial_threshold`, the same as SPAR3D — but it's the documented default so the threshold disclosure is implicit. Be explicit when picking ANYTHING else.
 
 When you deviate from SF3D, state the bucket and the reason in
-conversation. Example:
+conversation. Examples:
 
-> "This is a character with fine detail — I'd recommend TRELLIS for
-> better topology. License bucket `non_commercial`, which means this
-> asset can't ship in Grithkin or GripCraft commercially. Want me to
-> proceed with TRELLIS, or use SF3D (commercial-safe but noisier topology)?"
+> "This is a character with fine detail and needs to ship commercially —
+> I'd recommend TRELLIS.2 for better topology and real PBR textures.
+> License bucket `commercial_safe`, so no restriction there, but it's
+> the slowest generator (~5–6 minutes vs SF3D's ~15 seconds). Want me
+> to proceed with TRELLIS.2, or use SF3D (faster, noisier topology)?"
+
+> "This is a character with fine detail, for a personal project — I'd
+> recommend TRELLIS (v1) for better topology. License bucket
+> `non_commercial`, which means this asset can't ship in Grithkin or
+> GripCraft commercially. Want me to proceed with TRELLIS (v1), use the
+> slower but commercial-safe TRELLIS.2 instead, or use SF3D
+> (commercial-safe but noisier topology)?"
 
 If unclear, ask one short question to disambiguate intent.
 

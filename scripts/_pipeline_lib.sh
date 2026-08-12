@@ -275,6 +275,10 @@ license_bucket_for_model() {
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
+        # TRELLIS.2 (item 15, 2026-08): distinct from the legacy `trellis`
+        # (v1) entry above — MIT port + MIT weights (gate G1, R0.1 spike;
+        # see docs/model-review-trellis2.md). Do not conflate v1 and v2.
+        trellis2)                               echo commercial_safe ;;
         # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
