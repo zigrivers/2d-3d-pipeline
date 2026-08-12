@@ -1995,6 +1995,8 @@ JSON_MODE=0
 BACKEND=&quot;mflux&quot;
 CONSISTENCY_PACK=&quot;&quot;
 NEGATIVE=&quot;&quot;
+JUDGE=0
+BEST_OF=&quot;&quot;
 
 GAME_SUFFIX=&quot;, 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed&quot;
 
@@ -2060,6 +2062,8 @@ while [[ $# -gt 0 ]]; do
         --backend)         BACKEND=&quot;$2&quot;;      shift 2 ;;
         --consistency-pack) CONSISTENCY_PACK=&quot;$2&quot;; shift 2 ;;
         --negative)        NEGATIVE=&quot;$2&quot;;     shift 2 ;;
+        --judge)           JUDGE=1;           shift   ;;
+        --best-of)         BEST_OF=&quot;$2&quot;; JUDGE=1; COUNT=&quot;$2&quot;; shift 2 ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
@@ -2311,6 +2315,62 @@ if [[ -f &quot;$CLIP_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/py
                 --meta &quot;$META_FOR_CONCEPT&quot; 2&gt;&amp;1 \
                 | grep &#x27;^\[dreamsim\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[dreamsim\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
         fi
+    fi
+fi
+
+# v0.3.5 (item 17) — local VLM judge + best-of-N auto-select. No-op when
+# vlm-env or vlm_judge.py isn&#x27;t installed.
+VLM_ENV=&quot;${VLM_ENV:-$PIPELINE_ROOT/vlm-env}&quot;
+JUDGE_SCRIPT=&quot;$SCRIPT_DIR/vlm_judge.py&quot;
+[[ -f &quot;$JUDGE_SCRIPT&quot; ]] || JUDGE_SCRIPT=&quot;$PIPELINE_ROOT/workspace/vlm_judge.py&quot;
+if [[ &quot;$JUDGE&quot; == &quot;1&quot; &amp;&amp; -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -x &quot;$VLM_ENV/bin/python&quot; ]]; then
+    META_FOR_CONCEPT=&quot;${FIRST_OUTPUT}.meta.json&quot;
+    if [[ &quot;$COUNT&quot; -gt 1 ]]; then
+        JUDGE_RESULT_FILE=&quot;$(mktemp)&quot;
+        JUDGE_STDERR_FILE=&quot;$(mktemp)&quot;
+        &quot;$VLM_ENV/bin/python&quot; &quot;$JUDGE_SCRIPT&quot; \
+            --mode image --images &quot;${OUTPUT_PATHS[@]}&quot; \
+            --meta &quot;$META_FOR_CONCEPT&quot; --rank --json \
+            &gt; &quot;$JUDGE_RESULT_FILE&quot; 2&gt; &quot;$JUDGE_STDERR_FILE&quot; || true
+        grep &#x27;^\[judge\]&#x27; &quot;$JUDGE_STDERR_FILE&quot; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[judge\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+        rm -f &quot;$JUDGE_STDERR_FILE&quot;
+        python3 -c &quot;
+import json
+d = json.load(open(&#x27;$JUDGE_RESULT_FILE&#x27;))
+for r in d[&#x27;results&#x27;]:
+    flag = &#x27; (below floor)&#x27; if r[&#x27;rejected&#x27;] else &#x27;&#x27;
+    print(f\&quot;[concept] Judge #{r[&#x27;rank&#x27;]} {r[&#x27;verdict&#x27;]:.0f}/10 {r[&#x27;image&#x27;]}{flag}\&quot;)
+&quot; &gt;&amp;&quot;$HUMAN_FD&quot; 2&gt;/dev/null || true
+        if [[ -n &quot;$BEST_OF&quot; ]]; then
+            # Move every variant except the winner to concept/rejected/,
+            # then collapse OUTPUT_PATHS to just the winner for downstream
+            # (--json outputs, chaining into generate.sh).
+            mkdir -p &quot;$CONCEPT_DIR/rejected&quot;
+            WINNER_PATH=&quot;$(python3 -c &quot;
+import json, sys
+d = json.load(open(sys.argv[1]))
+picked = [r[&#x27;image&#x27;] for r in d[&#x27;results&#x27;] if r[&#x27;rank&#x27;] == 1][0]
+print(picked)
+&quot; &quot;$JUDGE_RESULT_FILE&quot;)&quot;
+            NEW_OUTPUT_PATHS=()
+            for path in &quot;${OUTPUT_PATHS[@]}&quot;; do
+                if [[ &quot;$path&quot; == &quot;$WINNER_PATH&quot; ]]; then
+                    NEW_OUTPUT_PATHS+=( &quot;$path&quot; )
+                else
+                    mv &quot;$path&quot; &quot;$CONCEPT_DIR/rejected/$(basename &quot;$path&quot;)&quot;
+                    [[ -f &quot;${path}.meta.json&quot; ]] &amp;&amp; mv &quot;${path}.meta.json&quot; &quot;$CONCEPT_DIR/rejected/$(basename &quot;$path&quot;).meta.json&quot;
+                fi
+            done
+            OUTPUT_PATHS=( &quot;${NEW_OUTPUT_PATHS[@]}&quot; )
+            FIRST_OUTPUT=&quot;$WINNER_PATH&quot;
+            info &quot;Judge picked $(basename &quot;$WINNER_PATH&quot;); $((COUNT - 1)) variant(s) moved to concept/rejected/&quot;
+        fi
+        rm -f &quot;$JUDGE_RESULT_FILE&quot;
+    else
+        &quot;$VLM_ENV/bin/python&quot; &quot;$JUDGE_SCRIPT&quot; \
+            --mode image --image &quot;$FIRST_OUTPUT&quot; \
+            --meta &quot;$META_FOR_CONCEPT&quot; 2&gt;&amp;1 \
+            | grep &#x27;^\[judge\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[judge\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
     fi
 fi
 
@@ -5432,7 +5492,7 @@ Top-level sections (per the spec, cross-cutting principle 2):
 
     input            preprocessing    generation
     cleanup          quality          print
-    preview          clip
+    preview          clip             judge
 
 Any pass writing to a section not on this list is rejected unless
 `--allow-unknown-section` is passed (escape hatch for future passes
@@ -5458,6 +5518,7 @@ KNOWN_SECTIONS = {
     &quot;print&quot;,
     &quot;preview&quot;,
     &quot;clip&quot;,
+    &quot;judge&quot;,
 }
 
 # --- v0.3+ — schema migration framework -------------------------------
@@ -5969,6 +6030,38 @@ PIPELINE_EOF</pre></div>
           &quot;items&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;integer&quot; } }
         },
         &quot;dreamsim_threshold&quot;: { &quot;type&quot;: &quot;number&quot; }
+      }
+    },
+
+    &quot;judge&quot;: {
+      &quot;type&quot;: &quot;object&quot;,
+      &quot;description&quot;: &quot;Item 17 — local VLM judge (mlx-vlm) rubric scoring for 2D concepts. Item 18 adds the judge.mesh subsection for 3D turntable judging.&quot;,
+      &quot;additionalProperties&quot;: true,
+      &quot;properties&quot;: {
+        &quot;model&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;mode&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;image&quot;, &quot;mesh&quot;] },
+        &quot;scores&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true,
+          &quot;properties&quot;: {
+            &quot;visible_faces&quot;: { &quot;type&quot;: &quot;string&quot; },
+            &quot;subject_match&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;three_quarter_view&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;background_cleanliness&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;lighting_flatness&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;single_subject&quot;: { &quot;type&quot;: &quot;integer&quot; },
+            &quot;silhouette_readability&quot;: { &quot;type&quot;: &quot;integer&quot; }
+          }
+        },
+        &quot;verdict&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;picked&quot;: { &quot;type&quot;: [&quot;string&quot;, &quot;null&quot;] },
+        &quot;rank&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;rejected&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+        &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;mesh&quot;: {
+          &quot;type&quot;: &quot;object&quot;,
+          &quot;additionalProperties&quot;: true
+        }
       }
     }
   },
@@ -7880,26 +7973,58 @@ PIPELINE_EOF</pre></div>
   &quot;schema_version&quot;: 2,
   &quot;description&quot;: &quot;Catalog of models the pipeline expects + per-feature install set scoping. pipeline_doctor.py reads this for disk preflight and warm-cache scoping. Structurally validated in CI on PRs touching scripts/ or tools/_embed_lib.py.&quot;,
   &quot;tier_defaults&quot;: {
-    &quot;laptop&quot;: { &quot;include&quot;: [] },
-    &quot;studio&quot;: { &quot;include&quot;: [&quot;hunyuan3d-paint&quot;] }
+    &quot;laptop&quot;: {
+      &quot;include&quot;: []
+    },
+    &quot;studio&quot;: {
+      &quot;include&quot;: [
+        &quot;hunyuan3d-paint&quot;
+      ]
+    }
   },
   &quot;prereqs&quot;: [
-    { &quot;id&quot;: &quot;python&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;python3&quot;,
-      &quot;min_version&quot;: &quot;3.10&quot;, &quot;max_version&quot;: &quot;3.12&quot;,
+    {
+      &quot;id&quot;: &quot;python&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;python3&quot;,
+      &quot;min_version&quot;: &quot;3.10&quot;,
+      &quot;max_version&quot;: &quot;3.12&quot;,
       &quot;max_version_severity&quot;: &quot;warn&quot;,
-      &quot;install_hint&quot;: &quot;brew install python@3.12&quot; },
-    { &quot;id&quot;: &quot;brew&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;brew&quot;,
-      &quot;install_hint&quot;: &quot;see https://brew.sh&quot; },
-    { &quot;id&quot;: &quot;git&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;git&quot; },
-    { &quot;id&quot;: &quot;huggingface-cli&quot;, &quot;kind&quot;: &quot;binary&quot;, &quot;name&quot;: &quot;huggingface-cli&quot;,
-      &quot;install_hint&quot;: &quot;pip install huggingface_hub[cli]&quot; },
-    { &quot;id&quot;: &quot;pip&quot;, &quot;kind&quot;: &quot;python_package&quot;, &quot;name&quot;: &quot;pip&quot;,
+      &quot;install_hint&quot;: &quot;brew install python@3.12&quot;
+    },
+    {
+      &quot;id&quot;: &quot;brew&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;brew&quot;,
+      &quot;install_hint&quot;: &quot;see https://brew.sh&quot;
+    },
+    {
+      &quot;id&quot;: &quot;git&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;git&quot;
+    },
+    {
+      &quot;id&quot;: &quot;huggingface-cli&quot;,
+      &quot;kind&quot;: &quot;binary&quot;,
+      &quot;name&quot;: &quot;huggingface-cli&quot;,
+      &quot;install_hint&quot;: &quot;pip install huggingface_hub[cli]&quot;
+    },
+    {
+      &quot;id&quot;: &quot;pip&quot;,
+      &quot;kind&quot;: &quot;python_package&quot;,
+      &quot;name&quot;: &quot;pip&quot;,
       &quot;min_version&quot;: &quot;23.1&quot;,
-      &quot;install_hint&quot;: &quot;python3 -m pip install --upgrade pip&quot; }
+      &quot;install_hint&quot;: &quot;python3 -m pip install --upgrade pip&quot;
+    }
   ],
   &quot;mutable_embed_paths&quot;: [],
   &quot;studio_extras&quot;: {
-    &quot;queue_dirs&quot;: [&quot;queue/pending&quot;, &quot;queue/running&quot;, &quot;queue/done&quot;, &quot;queue/failed&quot;],
+    &quot;queue_dirs&quot;: [
+      &quot;queue/pending&quot;,
+      &quot;queue/running&quot;,
+      &quot;queue/done&quot;,
+      &quot;queue/failed&quot;
+    ],
     &quot;launchd_plist&quot;: {
       &quot;label&quot;: &quot;com.kenallred.3dpipeline.queue-worker&quot;,
       &quot;template&quot;: &quot;scripts/launchd/queue-worker.plist.tmpl&quot;,
@@ -7913,19 +8038,35 @@ PIPELINE_EOF</pre></div>
   &quot;feature_sets&quot;: {
     &quot;tier1&quot;: {
       &quot;description&quot;: &quot;Default v0.3 quality features (always recommended)&quot;,
-      &quot;components&quot;: [&quot;u2net&quot;, &quot;clip-vit-l-14&quot;]
+      &quot;components&quot;: [
+        &quot;u2net&quot;,
+        &quot;clip-vit-l-14&quot;
+      ]
     },
     &quot;hunyuan3d-paint&quot;: {
-      &quot;description&quot;: &quot;Item 7 — Hunyuan3D-Paint texture painting (commercial_threshold)&quot;,
-      &quot;components&quot;: [&quot;hunyuan3d-paint&quot;]
+      &quot;description&quot;: &quot;Item 7 \u2014 Hunyuan3D-Paint texture painting (commercial_threshold)&quot;,
+      &quot;components&quot;: [
+        &quot;hunyuan3d-paint&quot;
+      ]
     },
     &quot;comfyui&quot;: {
-      &quot;description&quot;: &quot;Item 11 — ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)&quot;,
-      &quot;components&quot;: [&quot;sdxl-base&quot;, &quot;ip-adapter-faceid-sdxl&quot;, &quot;controlnet-openpose&quot;, &quot;controlnet-canny&quot;]
+      &quot;description&quot;: &quot;Item 11 \u2014 ComfyUI consistency mode (LoRA + IP-Adapter + ControlNet)&quot;,
+      &quot;components&quot;: [
+        &quot;sdxl-base&quot;,
+        &quot;ip-adapter-faceid-sdxl&quot;,
+        &quot;controlnet-openpose&quot;,
+        &quot;controlnet-canny&quot;
+      ]
     },
     &quot;multiview&quot;: {
-      &quot;description&quot;: &quot;Item 12 — multi-view reconstruction backend (specific model TBD post-research)&quot;,
+      &quot;description&quot;: &quot;Item 12 \u2014 multi-view reconstruction backend (specific model TBD post-research)&quot;,
       &quot;components&quot;: []
+    },
+    &quot;vlm-judge&quot;: {
+      &quot;description&quot;: &quot;Item 17 \u2014 local VLM judge for 2D concepts (opt-in; concept.sh --judge / --best-of)&quot;,
+      &quot;components&quot;: [
+        &quot;qwen3-vl-judge&quot;
+      ]
     }
   },
   &quot;venvs&quot;: [
@@ -7979,6 +8120,16 @@ PIPELINE_EOF</pre></div>
       &quot;purpose&quot;: &quot;Multi-view reconstruction (Item 12)&quot;,
       &quot;python_version&quot;: &quot;3.12&quot;,
       &quot;lockfile&quot;: &quot;scripts/lockfiles/multiview-env.txt&quot;
+    },
+    {
+      &quot;name&quot;: &quot;vlm-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/vlm-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;vlm-judge&quot;,
+      &quot;size_gb&quot;: 2,
+      &quot;purpose&quot;: &quot;Local VLM judge (mlx-vlm) for concept.sh --judge / --best-of&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/vlm-env.txt&quot;
     }
   ],
   &quot;models&quot;: [
@@ -8143,6 +8294,24 @@ PIPELINE_EOF</pre></div>
       &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
       &quot;warm_target&quot;: &quot;controlnet-canny-sdxl&quot;,
       &quot;comfyui_kind&quot;: &quot;controlnet&quot;
+    },
+    {
+      &quot;id&quot;: &quot;qwen3-vl-judge&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;vlm-judge&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 17000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;mlx_vlm&quot;,
+      &quot;notes&quot;: &quot;Apache 2.0. Default judge tier per gate G2 (R0.3 spike): the 8B tier does not reliably discriminate 3/4-view compliance even with an explicit chain-of-thought rubric (see docs/spike-report-generation-refresh.md); 30B-A3B MoE does. mlx_vlm downloads automatically on first use via huggingface_hub, into the standard HF cache (no dedicated env var).&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;qwen3-vl-judge&quot;,
+      &quot;comfyui_kind&quot;: null
     }
   ],
   &quot;wrappers&quot;: [
@@ -10891,6 +11060,247 @@ PIPELINE_EOF</pre></div>
 
             <details class="script-detail">
               <summary class="script-summary">
+                <code>vlm_judge.py</code>
+                <span class="script-summary-desc">v0.3.5 local VLM judge + best-of-N auto-select (item 17)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/vlm_judge.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3.5 — local VLM judge for 2D concepts, best-of-N auto-select
+(item 17 of the 2026-08 generation-quality refresh).
+
+Uses mlx-vlm (MIT; commercial_safe) with a Qwen3-VL model (Apache 2.0;
+commercial_safe) to score concept images against a fixed rubric:
+subject match, 3/4-view compliance, background cleanliness, lighting
+flatness, single-subject, silhouette readability. Catches failures
+CLIP/SigLIP-family scoring misses — composition and framing, not just
+prompt/subject match.
+
+De-biasing protocol (arXiv:2606.20364): fixed image order, one image
+per judge call (no cross-image context that could bias relative
+scoring).
+
+--mode mesh (item 18) is not yet implemented — this PR ships image
+concept judging only.
+
+Usage:
+    vlm_judge.py --mode image --image PATH --meta PATH [--model MODEL] [--json]
+    vlm_judge.py --mode image --images PATH1 PATH2 ... --meta PATH --rank [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+# Gate G2 (R0.3 spike): the 8B tier&#x27;s raw rubric score does NOT reliably
+# discriminate 3/4-view compliance (a flat front-view fixture scored
+# identically to genuine 3/4-view fixtures, even with explicit few-shot-
+# style anchoring in the prompt). The 30B-A3B MoE tier does discriminate
+# correctly on the same fixtures — see docs/spike-report-generation-refresh.md
+# R0.3 for both experiments. Default is the tier that&#x27;s actually reliable.
+DEFAULT_MODEL = &quot;mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit&quot;
+
+RUBRIC = &quot;&quot;&quot;You are grading a single concept-art image intended as the source photo for an
+image-to-3D game-asset pipeline. Judge ONLY the image shown.
+
+FIRST, before scoring, answer this literally: how many distinct flat faces/surfaces of
+the object&#x27;s outer shell can you see in this image, and name them (e.g. &quot;front only&quot;,
+&quot;front + right side&quot;, &quot;top + front + left side&quot;)? Objects photographed dead-on show
+exactly ONE face. Objects photographed at an angle show TWO OR MORE faces meeting at a
+visible corner or edge.
+
+THEN return strict JSON, no other prose, matching exactly this schema:
+
+{&quot;visible_faces&quot;: &quot;&lt;your literal answer from above&gt;&quot;, &quot;subject_match&quot;: int,
+&quot;three_quarter_view&quot;: int, &quot;background_cleanliness&quot;: int, &quot;lighting_flatness&quot;: int,
+&quot;single_subject&quot;: int, &quot;silhouette_readability&quot;: int, &quot;overall&quot;: int}
+
+Score each numeric dimension 0-10 (integers), where 10 is ideal for this purpose.
+
+Dimension meanings:
+- subject_match: does the image show one clear identifiable object (not abstract/unclear)?
+- three_quarter_view: MUST be consistent with your visible_faces answer above. If you
+  counted only ONE visible face, this MUST be 2-4 (front-on or side-on, not usable for
+  3/4-view reconstruction). If you counted TWO OR MORE visible faces meeting at a
+  corner, this MUST be 7-10. A front+top view (camera above but still centered, no
+  side face) is a borderline case — score 5-7, since it gives some depth cue but not
+  a true side profile.
+- background_cleanliness: is the background plain/clean/white (not busy or cluttered)?
+- lighting_flatness: is lighting even/diffuse (not harsh directional shadows)?
+- single_subject: is there exactly one subject in frame (not multiple competing objects)?
+- silhouette_readability: would this object&#x27;s outline be easy to extract for 3D reconstruction?
+- overall: holistic 0-10 score for suitability as image-to-3D input.
+
+Return ONLY the JSON object, nothing before or after it.&quot;&quot;&quot;
+
+SCORE_KEYS = [
+    &quot;subject_match&quot;, &quot;three_quarter_view&quot;, &quot;background_cleanliness&quot;,
+    &quot;lighting_flatness&quot;, &quot;single_subject&quot;, &quot;silhouette_readability&quot;, &quot;overall&quot;,
+]
+STRING_KEYS = [&quot;visible_faces&quot;]
+
+
+def _imports():
+    try:
+        import mlx_vlm  # type: ignore
+        from mlx_vlm.prompt_utils import apply_chat_template  # type: ignore
+        return mlx_vlm, apply_chat_template
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping. Activate vlm-env.&quot;, file=sys.stderr)
+        return None, None
+
+
+def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_path: str) -&gt; dict:
+    &quot;&quot;&quot;One judge call per image — fixed rubric, fresh conversation (no
+    history from prior images), per the de-biasing protocol.&quot;&quot;&quot;
+    formatted = apply_chat_template(processor, config, RUBRIC, num_images=1)
+    result = mlx_vlm.generate(
+        model, processor, formatted, image=[image_path],
+        max_tokens=350, temperature=0.0, verbose=False,
+    )
+    text = result.text.strip()
+    start = text.index(&quot;{&quot;)
+    end = text.rindex(&quot;}&quot;) + 1
+    data = json.loads(text[start:end])
+    parsed = {k: int(data[k]) for k in SCORE_KEYS if k in data}
+    for k in STRING_KEYS:
+        if k in data:
+            parsed[k] = str(data[k])
+    return parsed
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--mode&quot;, choices=[&quot;image&quot;], default=&quot;image&quot;,
+                   help=&quot;Judge mode. Only &#x27;image&#x27; is implemented (item 18 adds &#x27;mesh&#x27;).&quot;)
+    p.add_argument(&quot;--image&quot;, help=&quot;Single image path (or use --images for --rank)&quot;)
+    p.add_argument(&quot;--images&quot;, nargs=&quot;+&quot;, help=&quot;Multiple image paths for --rank&quot;)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--model&quot;, default=DEFAULT_MODEL,
+                   help=f&quot;mlx-vlm model repo (default: {DEFAULT_MODEL})&quot;)
+    p.add_argument(&quot;--rank&quot;, action=&quot;store_true&quot;, help=&quot;Judge and rank multiple images&quot;)
+    p.add_argument(&quot;--floor&quot;, type=float, default=2.0,
+                   help=&quot;Overall score below this (default 2.0) flags &#x27;rejected&#x27; (warn-don&#x27;t-block)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    mlx_vlm, apply_chat_template = _imports()
+    if mlx_vlm is None:
+        return 0  # graceful no-op
+
+    if args.rank:
+        if not args.images:
+            print(&quot;ERROR: --rank requires --images PATH1 PATH2 ...&quot;, file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(p)) for p in args.images]
+    else:
+        if not args.image:
+            print(&quot;ERROR: --image is required (or use --rank --images ...)&quot;, file=sys.stderr)
+            return 2
+        image_paths = [Path(os.path.expanduser(args.image))]
+
+    t0 = time.time()
+    model, processor = mlx_vlm.load(args.model)
+    config = model.config
+    t_load = time.time()
+
+    results = []
+    for img in image_paths:
+        t_img0 = time.time()
+        scores = _judge_one(mlx_vlm, apply_chat_template, model, processor, config, str(img))
+        results.append({
+            &quot;image&quot;: str(img),
+            &quot;scores&quot;: scores,
+            &quot;duration_seconds&quot;: round(time.time() - t_img0, 2),
+        })
+
+    meta_path = Path(os.path.expanduser(args.meta))
+
+    if args.rank:
+        ranked = sorted(enumerate(results), key=lambda kv: -kv[1][&quot;scores&quot;].get(&quot;overall&quot;, 0))
+        output = []
+        for rank, (idx, r) in enumerate(ranked, start=1):
+            verdict = float(r[&quot;scores&quot;].get(&quot;overall&quot;, 0))
+            output.append({
+                &quot;rank&quot;: rank,
+                &quot;image&quot;: r[&quot;image&quot;],
+                &quot;scores&quot;: r[&quot;scores&quot;],
+                &quot;verdict&quot;: verdict,
+                &quot;rejected&quot;: verdict &lt; args.floor,
+                &quot;duration_seconds&quot;: r[&quot;duration_seconds&quot;],
+            })
+        winner = output[0]
+        subprocess.run(
+            [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+             &quot;--section&quot;, &quot;judge&quot;,
+             &quot;--data&quot;, json.dumps({
+                 &quot;model&quot;: args.model,
+                 &quot;mode&quot;: &quot;image&quot;,
+                 &quot;scores&quot;: winner[&quot;scores&quot;],
+                 &quot;verdict&quot;: winner[&quot;verdict&quot;],
+                 &quot;picked&quot;: winner[&quot;image&quot;],
+                 &quot;rank&quot;: winner[&quot;rank&quot;],
+                 &quot;rejected&quot;: winner[&quot;rejected&quot;],
+                 &quot;duration_seconds&quot;: winner[&quot;duration_seconds&quot;],
+             })],
+            check=False,
+            capture_output=True,
+        )
+        if args.json:
+            print(json.dumps({
+                &quot;results&quot;: output,
+                &quot;pipeline_load_seconds&quot;: round(t_load - t0, 2),
+            }, indent=2, sort_keys=True))
+        else:
+            print(f&quot;[judge] pipeline load: {t_load - t0:.1f}s&quot;)
+            for r in output:
+                flag = &quot; (below floor — likely degenerate)&quot; if r[&quot;rejected&quot;] else &quot;&quot;
+                print(f&quot;[judge] #{r[&#x27;rank&#x27;]} {r[&#x27;verdict&#x27;]:.0f}/10 {r[&#x27;image&#x27;]}{flag}&quot;)
+    else:
+        r = results[0]
+        verdict = float(r[&quot;scores&quot;].get(&quot;overall&quot;, 0))
+        rejected = verdict &lt; args.floor
+        payload = {
+            &quot;model&quot;: args.model,
+            &quot;mode&quot;: &quot;image&quot;,
+            &quot;scores&quot;: r[&quot;scores&quot;],
+            &quot;verdict&quot;: verdict,
+            &quot;picked&quot;: r[&quot;image&quot;],
+            &quot;rejected&quot;: rejected,
+            &quot;duration_seconds&quot;: r[&quot;duration_seconds&quot;],
+        }
+        subprocess.run(
+            [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+             &quot;--section&quot;, &quot;judge&quot;,
+             &quot;--data&quot;, json.dumps(payload)],
+            check=False,
+            capture_output=True,
+        )
+        if args.json:
+            print(json.dumps({
+                **payload,
+                &quot;pipeline_load_seconds&quot;: round(t_load - t0, 2),
+            }, indent=2, sort_keys=True))
+        else:
+            flag = &quot; (below floor — likely degenerate)&quot; if rejected else &quot;&quot;
+            print(f&quot;[judge] {verdict:.0f}/10{flag}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
                 <code>multiview.sh</code>
                 <span class="script-summary-desc">v0.3.2 multi-view 3D reconstruction wrapper (Flow 9)</span>
               </summary>
@@ -12531,6 +12941,45 @@ The wrapper prints the absolute path as its last line — capture it for
 chaining. If you&#x27;re scripting, pass `--json` and parse the last stdout
 line as JSON; `outputs[0]` is the first image.
 
+### VLM judge + best-of-N (v0.3.5+, item 17)
+
+`concept.sh` can score concepts against a rubric using a local VLM
+(mlx-vlm + Qwen3-VL) instead of relying only on SigLIP/CLIP similarity.
+The judge catches things prompt-adherence scoring misses — wrong camera
+angle, cluttered background, harsh shadows — the exact failures that
+later ruin image-to-3D reconstruction.
+
+- `--judge` — score all generated variants (or the single image), write
+  the ranking/verdict into meta.json&#x27;s `judge` section, print it. Does
+  not delete or move anything.
+- `--best-of N` — generate N variants, judge them, keep the winner in
+  `concept/`, move the rest to `concept/rejected/`. Implies `--judge`.
+
+```bash
+concept.sh &quot;a treasure chest&quot; --best-of 4
+```
+
+**Recognition signals.** Suggest `--best-of N` when the user wants &quot;the
+best one&quot; from several tries, or has been regenerating the same concept
+repeatedly hoping for a better angle/composition. Suggest plain
+`--judge` when they want to see the scores but decide themselves.
+
+**Relay the verdict in plain language**, not raw scores — see the
+translation table below. If a variant&#x27;s `visible_faces` shows only one
+face (e.g. `&quot;front only&quot;`), that&#x27;s why `three_quarter_view` scored low;
+mention it if the user asks why a variant lost.
+
+**Cost.** The default judge model is the 30B-A3B MoE tier (~17 GB,
+first-use download), not the smaller 8B tier — R0.3&#x27;s spike found the
+8B tier does not reliably catch camera-angle violations, even with an
+explicit reasoning-first rubric; the 30B tier does. Mention this before
+suggesting `--best-of` on a laptop with limited disk. Judge latency is
+a few seconds per image after the model is loaded once.
+
+**When NOT to suggest it:** a single one-off generation the user is
+already happy with; `vlm-env` not installed and the user wants to
+generate right now (offer it as a follow-up instead).
+
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
 When the user needs **identity-locked** generations across multiple
@@ -12643,6 +13092,9 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | &quot;image_reward -0.3&quot; | &quot;people-preference score: weak — the image is technically on-prompt but doesn&#x27;t look great&quot; |
 | &quot;dreamsim_dupes: [[1, 3]]&quot; | &quot;variants 2 and 4 look like near-duplicates&quot; |
 | &quot;dreamsim_dupes: []&quot; | &quot;all variants are visually distinct&quot; |
+| &quot;judge.verdict 9, three_quarter_view 9&quot; | &quot;judge picked this one — good angle, clean composition (9/10)&quot; |
+| &quot;judge.verdict 5, three_quarter_view 3, visible_faces: front only&quot; | &quot;judge flagged this — shot straight-on, no side visible, may hurt the 3D reconstruction&quot; |
+| &quot;judge.rejected: true&quot; | &quot;judge thinks this one is likely unusable — consider regenerating&quot; |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines
@@ -13878,9 +14330,42 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
         </div>
       </div>
 
+      <div class="step" data-step="vlm-judge-env">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>vlm-env <span style="color: var(--overlay0); font-style: italic; font-weight: normal;">(optional, for <code>concept.sh --judge</code> / <code>--best-of N</code>, item 17)</span></h3>
+
+          <p><strong>What this is.</strong> A dedicated venv running <a href="https://github.com/Blaizzy/mlx-vlm">mlx-vlm</a> (MIT) with a local Qwen3-VL model (Apache 2.0) to judge 2D concepts against a rubric — camera angle, background cleanliness, lighting, single-subject, silhouette readability. Separate from <code>pipeline-tools-env</code> because mlx-vlm brings its own MLX-native model-loading stack.</p>
+
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
+<span class="tk-prompt">$ </span>python3.12 -m venv vlm-env
+<span class="tk-prompt">$ </span>source vlm-env/bin/activate
+<span class="tk-prompt">$ </span>pip install --upgrade pip
+<span class="tk-prompt">$ </span>pip install mlx-vlm
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+
+          <p>First judge call downloads the model (~17&nbsp;GB — trivial on Studio's 8&nbsp;TB local storage; see the callout below for why the default tier is this large, not the smaller 8B model you'd expect). After that, judging a batch of variants takes a few seconds per image.</p>
+
+          <div class="callout callout-info">
+            <div class="callout-label">Why the default judge model is 30B-A3B, not 8B (gate G2)</div>
+            <p>The generation-refresh spec's plan called this an open question — spike, then decide with evidence. On this repo's own test fixtures, the smaller <code>Qwen3-VL-8B-Instruct-4bit</code> tier could not reliably tell a flat front-on shot from a genuine 3/4 view, even with an explicit chain-of-thought rubric asking it to name which faces of the object it could see. The larger <code>Qwen3-VL-30B-A3B-Instruct-4bit</code> MoE tier (still 4-bit quantized, ~17&nbsp;GB) discriminates correctly on the same fixtures. See <code>docs/spike-report-generation-refresh.md</code> R0.3 for the full comparison. If disk is tight, you can still point <code>--model</code> at the 8B tier — it just won't reliably catch camera-angle problems.</p>
+          </div>
+
+          <div class="verify">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/vlm-env/bin/activate
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import mlx_vlm; print('ok')"</span>
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+              You should see <code>ok</code> with no traceback.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <p style="margin-top: 40px; padding: 24px; background: var(--mantle); border-left: 3px solid var(--mauve); border-radius: 0 4px 4px 0;">
         <strong style="color: var(--mauve); font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;">No behaviour change yet</strong><br><br>
-        <span style="color: var(--subtext1);">Installing these venvs doesn't change anything about how the v0.2 pipeline runs. The scripts that use them ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks, item 11 / consistency mode). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
+        <span style="color: var(--subtext1);">Installing these venvs doesn't change anything about how the v0.2 pipeline runs. The scripts that use them ship in v0.3 onwards (item 10 / pipeline doctor, items 1–6 / quality checks, item 11 / consistency mode, item 17 / VLM judge). If you'd rather wait until v0.3 actually lands, skip this section — the v0.3 install instructions will repeat it.</span>
       </p>
     </section>
 

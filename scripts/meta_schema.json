@@ -201,6 +201,38 @@
         },
         "dreamsim_threshold": { "type": "number" }
       }
+    },
+
+    "judge": {
+      "type": "object",
+      "description": "Item 17 — local VLM judge (mlx-vlm) rubric scoring for 2D concepts. Item 18 adds the judge.mesh subsection for 3D turntable judging.",
+      "additionalProperties": true,
+      "properties": {
+        "model": { "type": "string" },
+        "mode": { "type": "string", "enum": ["image", "mesh"] },
+        "scores": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "visible_faces": { "type": "string" },
+            "subject_match": { "type": "integer" },
+            "three_quarter_view": { "type": "integer" },
+            "background_cleanliness": { "type": "integer" },
+            "lighting_flatness": { "type": "integer" },
+            "single_subject": { "type": "integer" },
+            "silhouette_readability": { "type": "integer" }
+          }
+        },
+        "verdict": { "type": "number" },
+        "picked": { "type": ["string", "null"] },
+        "rank": { "type": "integer" },
+        "rejected": { "type": "boolean" },
+        "duration_seconds": { "type": "number" },
+        "mesh": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
     }
   },
   "additionalProperties": false

@@ -68,6 +68,7 @@ EMBEDS: dict[str, str] = {
     "scripts/_heartbeat.py":                "~/3d-pipeline/workspace/_heartbeat.py",
     "scripts/preference_score.py":          "~/3d-pipeline/workspace/preference_score.py",
     "scripts/dedup_variants.py":            "~/3d-pipeline/workspace/dedup_variants.py",
+    "scripts/vlm_judge.py":                 "~/3d-pipeline/workspace/vlm_judge.py",
 }
 
 EMBEDS_SCRIPTS: dict[str, str] = {

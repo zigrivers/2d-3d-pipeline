@@ -43,6 +43,8 @@ JSON_MODE=0
 BACKEND="mflux"
 CONSISTENCY_PACK=""
 NEGATIVE=""
+JUDGE=0
+BEST_OF=""
 
 GAME_SUFFIX=", 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed"
 
@@ -108,6 +110,8 @@ while [[ $# -gt 0 ]]; do
         --backend)         BACKEND="$2";      shift 2 ;;
         --consistency-pack) CONSISTENCY_PACK="$2"; shift 2 ;;
         --negative)        NEGATIVE="$2";     shift 2 ;;
+        --judge)           JUDGE=1;           shift   ;;
+        --best-of)         BEST_OF="$2"; JUDGE=1; COUNT="$2"; shift 2 ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -359,6 +363,62 @@ if [[ -f "$CLIP_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
                 --meta "$META_FOR_CONCEPT" 2>&1 \
                 | grep '^\[dreamsim\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[dreamsim\] }" >&"$HUMAN_FD"; done; } || true
         fi
+    fi
+fi
+
+# v0.3.5 (item 17) — local VLM judge + best-of-N auto-select. No-op when
+# vlm-env or vlm_judge.py isn't installed.
+VLM_ENV="${VLM_ENV:-$PIPELINE_ROOT/vlm-env}"
+JUDGE_SCRIPT="$SCRIPT_DIR/vlm_judge.py"
+[[ -f "$JUDGE_SCRIPT" ]] || JUDGE_SCRIPT="$PIPELINE_ROOT/workspace/vlm_judge.py"
+if [[ "$JUDGE" == "1" && -f "$JUDGE_SCRIPT" && -x "$VLM_ENV/bin/python" ]]; then
+    META_FOR_CONCEPT="${FIRST_OUTPUT}.meta.json"
+    if [[ "$COUNT" -gt 1 ]]; then
+        JUDGE_RESULT_FILE="$(mktemp)"
+        JUDGE_STDERR_FILE="$(mktemp)"
+        "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+            --mode image --images "${OUTPUT_PATHS[@]}" \
+            --meta "$META_FOR_CONCEPT" --rank --json \
+            > "$JUDGE_RESULT_FILE" 2> "$JUDGE_STDERR_FILE" || true
+        grep '^\[judge\]' "$JUDGE_STDERR_FILE" | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[judge\] }" >&"$HUMAN_FD"; done; } || true
+        rm -f "$JUDGE_STDERR_FILE"
+        python3 -c "
+import json
+d = json.load(open('$JUDGE_RESULT_FILE'))
+for r in d['results']:
+    flag = ' (below floor)' if r['rejected'] else ''
+    print(f\"[concept] Judge #{r['rank']} {r['verdict']:.0f}/10 {r['image']}{flag}\")
+" >&"$HUMAN_FD" 2>/dev/null || true
+        if [[ -n "$BEST_OF" ]]; then
+            # Move every variant except the winner to concept/rejected/,
+            # then collapse OUTPUT_PATHS to just the winner for downstream
+            # (--json outputs, chaining into generate.sh).
+            mkdir -p "$CONCEPT_DIR/rejected"
+            WINNER_PATH="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+picked = [r['image'] for r in d['results'] if r['rank'] == 1][0]
+print(picked)
+" "$JUDGE_RESULT_FILE")"
+            NEW_OUTPUT_PATHS=()
+            for path in "${OUTPUT_PATHS[@]}"; do
+                if [[ "$path" == "$WINNER_PATH" ]]; then
+                    NEW_OUTPUT_PATHS+=( "$path" )
+                else
+                    mv "$path" "$CONCEPT_DIR/rejected/$(basename "$path")"
+                    [[ -f "${path}.meta.json" ]] && mv "${path}.meta.json" "$CONCEPT_DIR/rejected/$(basename "$path").meta.json"
+                fi
+            done
+            OUTPUT_PATHS=( "${NEW_OUTPUT_PATHS[@]}" )
+            FIRST_OUTPUT="$WINNER_PATH"
+            info "Judge picked $(basename "$WINNER_PATH"); $((COUNT - 1)) variant(s) moved to concept/rejected/"
+        fi
+        rm -f "$JUDGE_RESULT_FILE"
+    else
+        "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+            --mode image --image "$FIRST_OUTPUT" \
+            --meta "$META_FOR_CONCEPT" 2>&1 \
+            | grep '^\[judge\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[judge\] }" >&"$HUMAN_FD"; done; } || true
     fi
 fi
 
