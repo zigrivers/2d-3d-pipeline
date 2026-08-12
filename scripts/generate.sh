@@ -820,7 +820,7 @@ for p in (m.get('frame_paths') or []):
         if [[ "${#JUDGE_VIEW_PATHS[@]}" -gt 0 ]]; then
             JUDGE_STDERR_FILE="$(mktemp)"
             JUDGE_JSON_FILE="$(mktemp)"
-            "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+            "$JUDGE_PYTHON" "$JUDGE_SCRIPT" \
                 --mode mesh --images "${JUDGE_VIEW_PATHS[@]}" \
                 --meta "$META_PATH" --floor "$MESH_JUDGE_FLOOR" --json \
                 > "$JUDGE_JSON_FILE" 2> "$JUDGE_STDERR_FILE" || true
