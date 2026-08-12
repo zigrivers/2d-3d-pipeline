@@ -16,7 +16,7 @@ Output JSON shape:
     {
       "status": "ok",
       "model": "zero123plus-v1.2",
-      "license_bucket": "commercial_threshold",
+      "license_bucket": "non_commercial",
       "views": [
         {"name": "v030_30",   "path": "...", "azimuth_deg": 30,  "elevation_deg": 30},
         ...
@@ -28,12 +28,17 @@ Requires diffusers + transformers + torch in pipeline-tools-env (or
 in a dedicated multiview-env). Falls back to a structured error if
 unavailable so the benchmark harness can record it cleanly.
 
-License note: Zero123++ checkpoints are released by Sudo AI under a
-permissive license (verify the current text upstream; bucket assigned
-here is `commercial_threshold` as a conservative default — same as
-SDXL / SF3D / SPAR3D). Update the bucket here and in
-scripts/_pipeline_lib.sh::license_bucket_for_model if the upstream
-license changes.
+License note (item 22, 2026-08, R0.4-adjacent verification): the
+"conservative default" this file previously carried
+(`commercial_threshold`, marked "verify the current text upstream" —
+never actually verified) was wrong. Read directly:
+SUDO-AI-3D/zero123plus's repo `LICENSE` file is Apache 2.0, but its
+README states explicitly "the code is released under Apache 2.0 and
+the model WEIGHTS are released under CC-BY-NC 4.0" — non-commercial
+for the checkpoint that matters here. Bucket corrected to
+`non_commercial`. This is why item 22 keeps Zero123++ as a
+research-comparison-only baseline, never wired as a shipped lane
+(see docs/multiview-backend-research.md).
 """
 from __future__ import annotations
 
@@ -45,7 +50,7 @@ import time
 from pathlib import Path
 
 MODEL_ID = "sudo-ai/zero123plus-v1.2"
-LICENSE_BUCKET = "commercial_threshold"
+LICENSE_BUCKET = "non_commercial"
 
 # Match tests/multiview-bench/view_configs/zero123_plus_plus.json
 NATIVE_VIEWS = [
