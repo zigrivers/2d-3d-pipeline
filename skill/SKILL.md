@@ -754,14 +754,22 @@ Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine's `Textures/`
 folder when applicable.
 
-### Paint mode — Hunyuan3D-Paint (v0.3.4+, approved)
+### Paint mode — Hunyuan3D-Paint MLX port (v0.4+, item 19 retarget)
 
-`texture.sh --mode paint -i <glb>` paints PBR textures onto an
-existing 3D mesh using Tencent's Hunyuan3D-Paint. License review
-was completed 2026-05-20; bucket is `commercial_threshold` — same
-as SF3D and SPAR3D — and shipped assets are usable in commercial
-projects subject to the same MAU threshold every Hunyuan model has.
-See `docs/license-review-hunyuan3d-paint.md` for the full record.
+`texture.sh --mode paint -i <glb> --image <ref.png>` paints PBR
+textures onto an existing 3D mesh. Retargeted from item 7's original
+CUDA-only design to
+[`dgrauet/Hunyuan3D-2.1-mlx`](https://github.com/dgrauet/Hunyuan3D-2.1-mlx)
+(Apple Silicon MLX port; upstream Hunyuan3D-Paint needs CUDA,
+unavailable on Mac). Bucket is `commercial_threshold` — same as SF3D
+and SPAR3D. **The Tencent license does NOT apply in the EU, UK, or
+South Korea** — mention this if the user's distribution plans touch
+those regions; see `docs/license-review-hunyuan3d-paint.md` and its
+2026-08-12 addendum for the full record.
+
+`--image` is required — the multiview diffusion pass needs a
+reference image (typically the concept image the mesh was generated
+from), not just the mesh geometry.
 
 **When to recommend paint mode** (per item 7 routing rules):
 
@@ -769,20 +777,33 @@ See `docs/license-review-hunyuan3d-paint.md` for the full record.
 |---|---|
 | `generator=trellis` AND `quality.textures.textures_present` is empty | Strongly recommend paint — TRELLIS-on-Mac ships vertex colours only |
 | `quality.textures.issues` includes `flat-black-albedo` or `uninitialised-*` | Recommend paint — original generator produced degenerate textures |
-| `quality.textures.issues` empty AND `textures_present` non-empty | Don't recommend paint — existing PBR is fine |
+| `quality.textures.textures_present` includes `metallic` or `roughness` already | Don't recommend paint — a real PBR bake already exists (e.g. TRELLIS.2) |
+| SF3D output with only `albedo`/`normal`, no `metallic`/`roughness` | Paint is still worthwhile — SF3D bakes metallic/roughness as flat material factors, not textures |
 | User explicitly asks "re-texture" / "paint this mesh" | Run paint regardless |
 
-The wrapper never auto-runs paint after `generate.sh`. It's always
-a separate `texture.sh --mode paint -i <glb>` call. State the
+The wrapper never auto-runs paint after `generate.sh`. It's always a
+separate `texture.sh --mode paint` call. State the
 `commercial_threshold` bucket inline (same convention as recommending
 SPAR3D over SF3D).
 
+**Hard refusal, not just a soft recommendation:** the wrapper itself
+checks (via a live `texture_quality_check.py` run, not a possibly-
+stale meta.json) whether the input already has a real baked
+metallic-roughness map, and exits with structured
+`status=error error=already_textured` JSON if so — painting a
+TRELLIS.2 output is refused with a clear explanation, not silently
+run. Relay that explanation rather than retrying; suggest
+`--mode upscale` instead if the user wants to improve an existing
+texture.
+
 Install layout: `$HUNYUAN3D_PAINT_DIR` (default
-`~/3d-pipeline/hunyuan3d-paint/`) with `.venv` and `run.py`. When
-the wrapper finds either missing, it exits with structured
-`status=error error=not_installed` JSON and points at the install
-docs. Relay the install guidance; don't try to substitute a different
-texture generator.
+`~/3d-pipeline/hunyuan3d-paint-mlx/`) with `.venv` and
+`hy3dpaint/textureGenPipeline_mlx.py`. When the wrapper finds either
+missing, it exits with structured `status=error error=not_installed`
+JSON and points at the install docs. Relay the install guidance;
+don't try to substitute a different texture generator, and don't
+suggest the Brainkeys MPS fork as a paint fallback — its paint stage
+is limited/disabled, shape-generation only.
 
 ## Flow 7: Model bake-off / benchmark
 

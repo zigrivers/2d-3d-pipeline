@@ -61,19 +61,30 @@ def _open_clip_warm(model: dict) -> tuple[str, str]:
 
 
 def _hunyuan_warm(model: dict) -> tuple[str, str]:
-    """Hunyuan3D-Paint uses huggingface_hub from inside its own venv."""
-    venv = _expand("~/3d-pipeline/hunyuan3d-paint-env")
+    """Hunyuan3D-Paint (item 19: MLX port) uses huggingface_hub from inside
+    its own venv. Weights are pulled per-file on demand by the port's own
+    code (no single fixed filename covers the whole model), so an empty
+    manifest `filename` means "warm the whole repo snapshot" rather than
+    one file — same convention as edit-lane's Qwen-Image-Edit-2511 entry."""
+    venv = _expand("~/3d-pipeline/hunyuan3d-paint-mlx/.venv")
     repo = model["hf_repo"]
     fn = model["filename"]
     cache = _expand(model["cache_dir"])
-    snippet = (
-        "from huggingface_hub import hf_hub_download; "
-        f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}); "
-        "print('ok')"
-    )
+    if fn:
+        snippet = (
+            "from huggingface_hub import hf_hub_download; "
+            f"hf_hub_download({repo!r}, {fn!r}, cache_dir={str(cache)!r}); "
+            "print('ok')"
+        )
+    else:
+        snippet = (
+            "from huggingface_hub import snapshot_download; "
+            f"snapshot_download({repo!r}, cache_dir={str(cache)!r}); "
+            "print('ok')"
+        )
     rc, out, err = _run_in_venv(venv, snippet)
     if rc == 0:
-        return ("ok", f"hunyuan {repo} {fn} downloaded")
+        return ("ok", f"hunyuan {repo} {fn or '(full snapshot)'} downloaded")
     return ("failed", err.strip()[:300])
 
 

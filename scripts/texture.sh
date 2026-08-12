@@ -8,11 +8,10 @@
 #   upscale   Run a 2x / 4x upscale via real-esrgan-ncnn-vulkan if installed.
 #             Fails clearly when the binary is missing — does NOT silently
 #             degrade to a different upscaler.
-#
-# This wrapper is deliberately scoped. PBR generation, normal-map synthesis,
-# and Hunyuan3D-Paint are NOT here yet — they require separate licence review
-# and have higher failure rates. See SKILL.md and the studio docs for the
-# longer-term plan.
+#   paint     Paint PBR textures onto an existing GLB via Hunyuan3D-Paint
+#             (item 19: dgrauet/Hunyuan3D-2.1-mlx, Apple Silicon MLX port).
+#             License bucket commercial_threshold; see
+#             docs/license-review-hunyuan3d-paint.md. Requires --image.
 
 set -euo pipefail
 
@@ -27,6 +26,7 @@ INPUT=""
 OUTPUT=""
 MODE="inspect"
 SCALE=4
+IMAGE_ARG=""
 ENGINE_STAGE=0
 JSON_MODE=0
 
@@ -35,18 +35,17 @@ usage() {
 Usage: $(basename "$0") -i INPUT [options]
 
 Required:
-  -i, --input PATH         GLB / image / directory to inspect or upscale.
+  -i, --input PATH         GLB / image / directory to inspect or upscale;
+                           a .glb/.gltf mesh in paint mode.
 
 Project context:
   --project PATH           Force a project root (skips auto-detection).
 
 Mode:
       --mode MODE          inspect (default) | upscale | paint
-                           paint is a placeholder for Hunyuan3D-Paint and
-                           currently fails with needs_license_review; do
-                           NOT enable this until the licence has been
-                           reviewed.
       --scale N            2 or 4 (default: 4) — used in upscale mode.
+      --image PATH         Reference image for the multiview diffusion
+                           pass — required in paint mode.
 
 I/O:
   -o, --output NAME_OR_PATH  Output name or path. Defaults to a name
@@ -59,6 +58,12 @@ I/O:
 
   -h, --help               This help.
 
+Paint mode (item 19): Hunyuan3D-Paint via the dgrauet/Hunyuan3D-2.1-mlx
+Apple Silicon port. License bucket commercial_threshold (Tencent Hunyuan
+3D 2.1 Community License — does NOT apply in the EU, UK, or South Korea).
+Refuses to paint over a mesh that already has baked textures — use
+--mode upscale to improve an existing texture instead.
+
 Examples:
   # Quick inspection of a GLB
   $(basename "$0") -i assets/clean/chest_clean.glb
@@ -68,6 +73,10 @@ Examples:
 
   # 4x upscale a concept image
   $(basename "$0") -i assets/concept/chest.png --mode upscale --scale 4
+
+  # Paint a vertex-color-only TRELLIS output
+  $(basename "$0") -i assets/raw/chest_trellis.glb --mode paint \\
+      --image assets/concept/chest.png
 EOF
 }
 
@@ -78,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT="$2";           shift 2 ;;
         --mode)            MODE="$2";             shift 2 ;;
         --scale)           SCALE="$2";            shift 2 ;;
+        --image)           IMAGE_ARG="$2";        shift 2 ;;
         --engine-stage)    ENGINE_STAGE=1;        shift   ;;
         --json)            JSON_MODE=1;           shift   ;;
         -h|--help)         usage; exit 0 ;;
@@ -160,23 +170,25 @@ if [[ "$MODE" == "inspect" ]]; then
     exit 0
 fi
 
-# ---------- paint mode (Hunyuan3D-Paint, approved 2026-05-20) ----------
-# Hunyuan3D-Paint generates PBR maps for an input mesh. License review
-# completed 2026-05-20 (Tencent Hunyuan Community License, bucket
-# `commercial_threshold`; see docs/license-review-hunyuan3d-paint.md).
+# ---------- paint mode (Hunyuan3D-Paint via MLX port, item 19) ----------
+# Retargeted from item 7's original CUDA-only design: upstream
+# Hunyuan3D-Paint needs CUDA custom_rasterizer/differentiable_renderer,
+# unavailable on Mac. Uses dgrauet/Hunyuan3D-2.1-mlx instead (community
+# MLX port, pinned commit per principle P-B). Bucket `commercial_threshold`
+# (Tencent Hunyuan 3D 2.1 Community License; does NOT apply in the EU, UK,
+# or South Korea — see docs/license-review-hunyuan3d-paint.md).
 # Install layout assumed (override with $HUNYUAN3D_PAINT_DIR):
-#   $HUNYUAN3D_PAINT_DIR/.venv             one venv per tool
-#   $HUNYUAN3D_PAINT_DIR/run.py            inference entrypoint
-# If the upstream uses a different entrypoint, update the python
-# invocation below to match — the wrapper is intentionally close to
-# the SF3D / SPAR3D shape.
-HUNYUAN3D_PAINT_DIR="${HUNYUAN3D_PAINT_DIR:-$PIPELINE_ROOT/hunyuan3d-paint}"
+#   $HUNYUAN3D_PAINT_DIR/.venv                                pinned-commit venv
+#   $HUNYUAN3D_PAINT_DIR/hy3dpaint/textureGenPipeline_mlx.py  pipeline module
+HUNYUAN3D_PAINT_DIR="${HUNYUAN3D_PAINT_DIR:-$PIPELINE_ROOT/hunyuan3d-paint-mlx}"
 HUNYUAN3D_PAINT_VENV="${HUNYUAN3D_PAINT_VENV:-$HUNYUAN3D_PAINT_DIR/.venv}"
 
 if [[ "$MODE" == "paint" ]]; then
-    # Sanity-check inputs: paint mode requires a GLB.
-    case "${INPUT_ABS,,}" in
-        *.glb|*.gltf) ;;
+    # Sanity-check inputs: paint mode requires a GLB. Case-insensitive
+    # glob classes, not ${VAR,,} — macOS ships bash 3.2 (no ,, support)
+    # as /usr/bin/env bash unless the user has Homebrew bash on PATH.
+    case "$INPUT_ABS" in
+        *.[Gg][Ll][Bb]|*.[Gg][Ll][Tt][Ff]) ;;
         *)
             err "paint mode requires a .glb or .gltf input (got: $INPUT_ABS)"
             if [[ "$JSON_MODE" == "1" ]]; then
@@ -192,10 +204,73 @@ if [[ "$MODE" == "paint" ]]; then
             ;;
     esac
 
-    if [[ ! -d "$HUNYUAN3D_PAINT_DIR" || ! -d "$HUNYUAN3D_PAINT_VENV" || ! -f "$HUNYUAN3D_PAINT_DIR/run.py" ]]; then
-        err "Hunyuan3D-Paint not installed (expected $HUNYUAN3D_PAINT_DIR with .venv + run.py)."
-        err "  Override location:  export HUNYUAN3D_PAINT_DIR=/path/to/Hunyuan3D-2"
-        err "  License:            Tencent Hunyuan Community License (approved 2026-05-20)"
+    if [[ -z "$IMAGE_ARG" ]]; then
+        err "paint mode requires --image PATH (a reference image for the multiview diffusion pass)"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_mode_end
+            python3 "$SCRIPT_DIR/json_emit.py" \
+                status=error stage=texture_paint \
+                error=missing_image tool=hunyuan3d-paint \
+                license_bucket=commercial_threshold \
+                input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+        fi
+        exit 2
+    fi
+    [[ -f "$IMAGE_ARG" ]] || { err "reference image not found: $IMAGE_ARG"; exit 2; }
+    IMAGE_ABS="$(cd "$(dirname "$IMAGE_ARG")" && pwd)/$(basename "$IMAGE_ARG")"
+
+    # Refusal path (item 7 routing rules, elevated from soft skill-level
+    # guidance to a hard check): refuse only when a REAL metallic-roughness
+    # map already exists (e.g. TRELLIS.2's real PBR bake). SF3D's own output
+    # commonly has albedo+normal but bakes metallic/roughness as flat
+    # material factors, not textures — that case should still get painted
+    # (this is exactly what makes a "canned SF3D GLB" a valid paint-smoke
+    # fixture: painting genuinely ADDS a metallic-roughness map that wasn't
+    # there before, rather than redundantly replacing one that was).
+    # Runs the same live check generate.sh already runs post-generation
+    # (texture_quality_check.py), not a possibly-stale meta.json field.
+    PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+    TEXQUAL_SCRIPT="$SCRIPT_DIR/texture_quality_check.py"
+    [[ -f "$TEXQUAL_SCRIPT" ]] || TEXQUAL_SCRIPT="$PIPELINE_ROOT/workspace/texture_quality_check.py"
+    INPUT_META_PATH="${INPUT_ABS}.meta.json"
+    if [[ -f "$TEXQUAL_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        TEXQUAL_JSON="$("$PIPELINE_TOOLS_ENV/bin/python" "$TEXQUAL_SCRIPT" \
+            --input "$INPUT_ABS" --meta "$INPUT_META_PATH" --json 2>/dev/null || echo '{}')"
+        HAS_MR_MAP="$(python3 -c "
+import json, sys
+present = json.loads(sys.argv[1]).get('textures_present', [])
+print('1' if ('metallic' in present or 'roughness' in present) else '0')
+" "$TEXQUAL_JSON" 2>/dev/null || echo 0)"
+        if [[ "$HAS_MR_MAP" == "1" ]]; then
+            TEXTURES_PRESENT="$(python3 -c "import json,sys; print(', '.join(json.loads(sys.argv[1]).get('textures_present', [])))" "$TEXQUAL_JSON" 2>/dev/null || echo '')"
+            err "Input already has a real metallic-roughness map ($TEXTURES_PRESENT) -- refusing to paint over existing PBR textures."
+            err "Paint mode is for meshes with no metallic-roughness map yet (vertex-color-only or"
+            err "SF3D-style scalar-factor output) or a degenerate texture pass, not a re-texture of an"
+            err "already-full-PBR mesh (e.g. TRELLIS.2 output). Use 'texture.sh --mode upscale' instead."
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_mode_end
+                python3 "$SCRIPT_DIR/json_emit.py" \
+                    status=error stage=texture_paint \
+                    error=already_textured tool=hunyuan3d-paint \
+                    license_bucket=commercial_threshold \
+                    existing_textures="$TEXTURES_PRESENT" \
+                    input="$INPUT_ABS" assets_root="$ASSETS_ROOT" \
+                    machine="$MACHINE" hardware_tier="$HW_TIER" created="$CREATED_AT"
+            fi
+            exit 2
+        fi
+    fi
+
+    DRIVER_SCRIPT="$SCRIPT_DIR/hunyuan_paint_run.py"
+    [[ -f "$DRIVER_SCRIPT" ]] || DRIVER_SCRIPT="$PIPELINE_ROOT/workspace/hunyuan_paint_run.py"
+    if [[ ! -x "$HUNYUAN3D_PAINT_VENV/bin/python" \
+          || ! -f "$HUNYUAN3D_PAINT_DIR/hy3dpaint/textureGenPipeline_mlx.py" \
+          || ! -f "$DRIVER_SCRIPT" ]]; then
+        err "Hunyuan3D-Paint (MLX port) not installed (expected $HUNYUAN3D_PAINT_DIR with .venv + hy3dpaint/)."
+        err "  Override location:  export HUNYUAN3D_PAINT_DIR=/path/to/Hunyuan3D-2.1-mlx"
+        err "  License:            Tencent Hunyuan 3D 2.1 Community License (approved 2026-05-20;"
+        err "                      does NOT apply in EU/UK/South Korea)"
         err "                      see docs/license-review-hunyuan3d-paint.md"
         if [[ "$JSON_MODE" == "1" ]]; then
             json_mode_end
@@ -210,25 +285,25 @@ if [[ "$MODE" == "paint" ]]; then
     fi
 
     LICENSE_BUCKET_PAINT="$(license_bucket_for_model hunyuan3d-paint)"
-    info "Painting textures via Hunyuan3D-Paint (license: $LICENSE_BUCKET_PAINT)"
+    info "Painting textures via Hunyuan3D-Paint MLX port (license: $LICENSE_BUCKET_PAINT)"
     info "Input mesh:  $INPUT_ABS"
+    info "Ref image:   $IMAGE_ABS"
 
     TEXTURES_DIR="$ASSETS_ROOT/textures"
     mkdir -p "$TEXTURES_DIR"
     out_base="$(basename "${INPUT_ABS%.*}")"
+    PAINTED_OBJ="$TEXTURES_DIR/${out_base}_painted.obj"
     PAINTED_PATH="$TEXTURES_DIR/${out_base}_painted.glb"
 
     PAINT_START=$(date +%s)
-    (
-        cd "$HUNYUAN3D_PAINT_DIR"
-        # shellcheck source=/dev/null
-        source "$HUNYUAN3D_PAINT_VENV/bin/activate"
-        PYTORCH_ENABLE_MPS_FALLBACK=1 python run.py \
-            "$INPUT_ABS" \
-            --output "$PAINTED_PATH"
-        deactivate
-    ) || {
+    PAINT_LOG="$(mktemp)"
+    "$HUNYUAN3D_PAINT_VENV/bin/python" "$DRIVER_SCRIPT" \
+        --port-dir "$HUNYUAN3D_PAINT_DIR" \
+        --mesh "$INPUT_ABS" \
+        --image "$IMAGE_ABS" \
+        --output "$PAINTED_OBJ" 2>&1 | tee "$PAINT_LOG" || {
         err "Hunyuan3D-Paint inference failed"
+        rm -f "$PAINT_LOG"
         if [[ "$JSON_MODE" == "1" ]]; then
             json_mode_end
             python3 "$SCRIPT_DIR/json_emit.py" \
@@ -240,11 +315,27 @@ if [[ "$MODE" == "paint" ]]; then
         fi
         exit 1
     }
+    # Library progress bars share stdout with our driver's own result line —
+    # pull just that one back out (edit.sh uses the same tee+grep pattern).
+    PAINT_RESULT_LINE="$(grep '^PAINT_RESULT ' "$PAINT_LOG" | tail -1 || true)"
+    rm -f "$PAINT_LOG"
     PAINT_END=$(date +%s)
     PAINT_DURATION=$((PAINT_END - PAINT_START))
 
+    [[ -n "$PAINT_RESULT_LINE" ]] || { err "Hunyuan3D-Paint driver did not emit a result line"; exit 1; }
     [[ -f "$PAINTED_PATH" ]] || { err "Hunyuan3D-Paint did not produce $PAINTED_PATH"; exit 1; }
     done_ "Painted in ${PAINT_DURATION}s -> $PAINTED_PATH"
+
+    META_PATH="${PAINTED_PATH}.meta.json"
+    META_HELPER_SCRIPT="$SCRIPT_DIR/meta_helper.py"
+    [[ -f "$META_HELPER_SCRIPT" ]] || META_HELPER_SCRIPT="$PIPELINE_ROOT/workspace/meta_helper.py"
+    PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
+    if [[ -f "$META_HELPER_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+        "$PIPELINE_TOOLS_ENV/bin/python" "$META_HELPER_SCRIPT" merge "$META_PATH" \
+            --section generation \
+            --data "{\"backend\": \"hunyuan3d-paint\", \"model_role\": \"paint\", \"texture_backend\": \"hunyuan3d-paint\", \"license_bucket\": \"$LICENSE_BUCKET_PAINT\", \"inputs\": [{\"path\": \"$INPUT_ABS\"}, {\"path\": \"$IMAGE_ABS\"}], \"duration_seconds\": $PAINT_DURATION}" \
+            > /dev/null 2>&1 || true
+    fi
 
     if [[ "$JSON_MODE" == "1" ]]; then
         json_mode_end

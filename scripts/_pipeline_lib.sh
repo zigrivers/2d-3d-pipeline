@@ -290,9 +290,12 @@ license_bucket_for_model() {
         # body — resolved commercial_safe, stronger than the spec's
         # cautious unclear_risky default).
         qwen-image-edit)                        echo commercial_safe ;;
-        # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
-        # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
-        # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
+        # Hunyuan3D-Paint: Tencent Hunyuan 3D 2.1 Community License. Reviewed
+        # and approved 2026-05-20; item 19 (2026-08) retargets the wrapper to
+        # the dgrauet/Hunyuan3D-2.1-mlx port (see docs/license-review-
+        # hunyuan3d-paint.md addendum — same bucket, region-exclusion
+        # correction only). Bucket is `commercial_threshold` (same as
+        # SF3D / SPAR3D).
         hunyuan3d-paint)                        echo commercial_threshold ;;
         # Scorer stack refresh (item 16, 2026-08): SigLIP 2 (Apache 2.0),
         # ImageReward (Apache 2.0), DreamSim (MIT) — all judge/metadata

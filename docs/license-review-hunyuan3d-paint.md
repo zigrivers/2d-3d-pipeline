@@ -102,6 +102,79 @@ the [improvement-plan.md](improvement-plan.md) as P2.3:
 4. Update `skill/SKILL.md`'s description of `texture.sh paint` to
    reflect the approved state.
 
+## Addendum — 2026-08-12: retarget to the MLX port (item 19)
+
+**Status:** approved (addendum only — the original decision stands).
+
+### Why this addendum exists
+
+Item 7's approved design targeted upstream
+[`Tencent/Hunyuan3D-2`](https://github.com/Tencent/Hunyuan3D-2) directly.
+Its paint stage requires CUDA (`custom_rasterizer`,
+`differentiable_renderer`) and is unimplementable on Apple Silicon as
+written. `scripts/texture.sh --mode paint` retargets to
+[`dgrauet/Hunyuan3D-2.1-mlx`](https://github.com/dgrauet/Hunyuan3D-2.1-mlx),
+a community MLX port covering both shape and paint. R0.2 spike (see
+`docs/spike-report-generation-refresh.md`) confirmed PASS: real PBR
+output (albedo + metallic-roughness, 4096×4096) on the port's own
+bundled fixture. Pinned commit
+`5fe21945b790fbb7fb28c510e89babd7b9feabe6` (2026-07-18) per principle
+P-B (fork risk: single-digit stars).
+
+### License correction — region exclusion the original review missed
+
+The original review (clause 2, above) stated the license "does not
+contain region exclusions at the time of this review (versioned
+2024-11)." **This is superseded.** Reading the port's own repo root
+`LICENSE` directly (still the upstream Tencent Hunyuan 3D 2.1
+Community License Agreement, not a separate license for the port's
+own code) during the R0.2 spike found, quoted verbatim:
+
+> "THIS LICENSE AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED
+> KINGDOM AND SOUTH KOREA AND IS EXPRESSLY LIMITED TO THE TERRITORY"
+
+**Risk assessment:** fine for Ken (US-based) and both target projects'
+current distribution plans. **Not fine** if either project ever
+targets EU/UK/South Korea distribution specifically under this
+license — flag this explicitly in `SKILL.md`'s paint-mode section and
+re-review before any such distribution decision. This correction does
+not change the approval for current use; it narrows what the approval
+covers geographically, which the original review incorrectly stated
+had no restriction.
+
+### Fork-code license note
+
+No separate license file was found for the port's own patches/code —
+the port's `LICENSE` file is the upstream Tencent license only. Treat
+the whole tree (port code included) as governed by that license until
+the maintainer states otherwise.
+
+### Not a viable fallback: the Brainkeys MPS fork
+
+[`Brainkeys/Hunyuan3D-2.1-mac`](https://github.com/Brainkeys/Hunyuan3D-2.1-mac)
+(used elsewhere in this pipeline for MPS shape generation) has its
+paint stage limited/disabled. It is **not** a paint fallback if
+`dgrauet/Hunyuan3D-2.1-mlx` becomes unavailable — only a shape-generation
+fallback. If the MLX port bit-rots, the documented fallback is "paint
+unavailable, use `texture.sh --mode upscale`" (per item 19's approved
+failure-mode design), not a silent switch to the Brainkeys fork.
+
+### Undocumented dependency (carried into the R2.3 PR)
+
+The port's default config (`use_remesh=True`, matching its own README
+usage example) requires `pymeshlab`, which is **not** listed in the
+README's MLX-path quickstart `pip install` line (only in the separate,
+CUDA-only `requirements.txt`). Without it, the paint call fails deep
+inside `__call__` with an unhelpful `TypeError`. Both setup guides'
+install step include `pip install pymeshlab` explicitly for this
+reason.
+
+### Bucket
+
+Unchanged: `commercial_threshold`. Approval terms above still apply;
+this addendum only updates the technical target (MLX port vs. CUDA
+upstream) and corrects the region-exclusion clause.
+
 ## Re-review triggers
 
 Re-open this review if any of the following change:
