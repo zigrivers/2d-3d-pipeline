@@ -25,6 +25,7 @@ PIPELINE_ROOT="${PIPELINE_ROOT:-$HOME/3d-pipeline}"
 SF3D_DIR="$PIPELINE_ROOT/stable-fast-3d"
 SPAR3D_DIR="${SPAR3D_DIR:-$PIPELINE_ROOT/stable-point-aware-3d}"
 TRELLIS_DIR="$PIPELINE_ROOT/trellis-mac"
+TRELLIS2_DIR="${TRELLIS2_DIR:-$PIPELINE_ROOT/trellis2-mac}"
 BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
 
 EXPLICIT_PROJECT=""
@@ -56,8 +57,11 @@ Project context:
                            (project mode with Unity/Unreal only)
 
 Generation options:
-  -g, --generator NAME     sf3d (default) | spar3d | trellis
-                           spar3d and trellis are experimental / opt-in.
+  -g, --generator NAME     sf3d (default) | spar3d | trellis | trellis2
+                           spar3d, trellis, and trellis2 are experimental /
+                           opt-in. trellis2 bakes real PBR textures (not
+                           just scalar factors); see the generator matrix
+                           in skill/SKILL.md before choosing it.
   -o, --output NAME        Output name (default: derived from input)
   -p, --polycount N        Target polycount after cleanup (default: 3000)
   -t, --texture-res N      SF3D texture resolution (default: 2048)
@@ -125,6 +129,18 @@ INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
 # real stdout is restored just before the final JSON line.
 [[ "$JSON_MODE" == "1" ]] && json_mode_begin
 
+# Defined here (not further down) because the background-removal step below
+# can call info() on the "applied" path — moved up after a real trellis2 run
+# hit `info: command not found` the first time BG_REMOVAL_MODE=on actually
+# triggered rembg for a generator (previously always "auto", which the
+# clean-background concept.sh fixtures used in testing never applied).
+COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
+HUMAN_FD=1
+[[ "$JSON_MODE" == "1" ]] && HUMAN_FD=2
+info()  { printf "${COL_BLUE}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+done_() { printf "${COL_GREEN}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
+err()   { printf "${COL_RED}[pipeline]${COL_RESET} %s\n" "$1" >&2; }
+
 # Resolve project context BEFORE setting output paths
 resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
 
@@ -134,8 +150,8 @@ resolve_project_context "$EXPLICIT_PROJECT" "$PWD"
 [[ -z "$TEXTURE_RES" ]] && TEXTURE_RES="$(config_default texture_resolution 2048)"
 
 case "$GENERATOR" in
-    sf3d|trellis|spar3d) ;;
-    *) echo "ERROR: -g must be sf3d, spar3d, or trellis (got: $GENERATOR)" >&2; exit 1 ;;
+    sf3d|trellis|spar3d|trellis2) ;;
+    *) echo "ERROR: -g must be sf3d, spar3d, trellis, or trellis2 (got: $GENERATOR)" >&2; exit 1 ;;
 esac
 case "$UP_AXIS" in y|z) ;; *) echo "ERROR: -u must be y or z" >&2; exit 1 ;; esac
 
@@ -158,6 +174,7 @@ check_and_normalize_input
 # v0.3: conditional background removal. Reads input.background_uniformity
 # from the meta.json that check_and_normalize_input just wrote. Updates
 # $INPUT to the no-background PNG when the run actually applies.
+[[ -z "$BG_REMOVAL_MODE" && "$GENERATOR" == "trellis2" ]] && BG_REMOVAL_MODE="on"
 [[ -z "$BG_REMOVAL_MODE" ]] && BG_REMOVAL_MODE="$(read_pipeline_config bg_removal_mode auto 2>/dev/null || echo auto)"
 PIPELINE_TOOLS_ENV="${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}"
 REMBG_SCRIPT="$SCRIPT_DIR/rembg_preprocess.py"
@@ -178,13 +195,6 @@ if d.get('applied') and d.get('output_path'):
         INPUT="$NEW_INPUT"
     fi
 fi
-
-COL_GREEN='\033[0;32m'; COL_BLUE='\033[0;34m'; COL_RED='\033[0;31m'; COL_RESET='\033[0m'
-HUMAN_FD=1
-[[ "$JSON_MODE" == "1" ]] && HUMAN_FD=2
-info()  { printf "${COL_BLUE}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
-done_() { printf "${COL_GREEN}[pipeline]${COL_RESET} %s\n" "$1" >&"$HUMAN_FD"; }
-err()   { printf "${COL_RED}[pipeline]${COL_RESET} %s\n" "$1" >&2; }
 
 START_TS=$(date +%s)
 CREATED_AT="$(iso_now)"
@@ -286,7 +296,9 @@ elif [[ "$GENERATOR" == "spar3d" ]]; then
     popd > /dev/null
 
 elif [[ "$GENERATOR" == "trellis" ]]; then
-    [[ -d "$TRELLIS_DIR/.venv" ]] || { err "TRELLIS.2 venv not found at $TRELLIS_DIR/.venv"; exit 1; }
+    # This is the legacy v1 TRELLIS port (non_commercial) — do not confuse
+    # with `trellis2` below, a separate MIT-licensed port at a different path.
+    [[ -d "$TRELLIS_DIR/.venv" ]] || { err "TRELLIS venv not found at $TRELLIS_DIR/.venv"; exit 1; }
     pushd "$TRELLIS_DIR" > /dev/null
     # shellcheck source=/dev/null
     source .venv/bin/activate
@@ -298,10 +310,48 @@ elif [[ "$GENERATOR" == "trellis" ]]; then
     [[ -f "${TMP_BASE}.obj" ]] && rm -f "${TMP_BASE}.obj"
     deactivate
     popd > /dev/null
+
+elif [[ "$GENERATOR" == "trellis2" ]]; then
+    # Item 15. rembg preprocessing (below, generic to all generators) is
+    # forced "on" for this generator specifically so the input always has
+    # a real alpha channel by the time we get here — Trellis2ImageTo3DPipeline
+    # .preprocess_image() skips its own bundled RMBG-2.0 (CC BY-NC,
+    # non-commercial) call whenever the input already has alpha. Without
+    # that, RMBG-2.0 would silently run on any input the generic "auto"
+    # background-removal heuristic decided to leave alone (e.g. an
+    # already-clean concept.sh render), pulling a non-commercial model
+    # into a run whose license bucket says commercial_safe.
+    [[ -d "$TRELLIS2_DIR/.venv" ]] || { err "TRELLIS.2 venv not found at $TRELLIS2_DIR/.venv"; exit 1; }
+    pushd "$TRELLIS2_DIR" > /dev/null
+    # shellcheck source=/dev/null
+    source .venv/bin/activate
+
+    TMP_BASE="$RAW_DIR/${OUTPUT_NAME}_trellis2_tmp_$$"
+    python generate.py "$INPUT" --output "$TMP_BASE" --texture-size "$TEXTURE_RES"
+    [[ -f "${TMP_BASE}.glb" ]] || { err "TRELLIS.2 did not produce ${TMP_BASE}.glb"; exit 1; }
+    mv "${TMP_BASE}.glb" "$RAW_PATH"
+    [[ -f "${TMP_BASE}.obj" ]] && rm -f "${TMP_BASE}.obj"
+    deactivate
+    popd > /dev/null
 fi
 
 GEN_TS=$(date +%s)
 done_ "Generation finished in $((GEN_TS - START_TS))s -> $RAW_PATH"
+
+# Item 15 — record which generator produced this asset. meta_schema.json's
+# `generation` section was reserved but nothing wrote it before this change.
+META_HELPER_SCRIPT="$SCRIPT_DIR/meta_helper.py"
+[[ -f "$META_HELPER_SCRIPT" ]] || META_HELPER_SCRIPT="$PIPELINE_ROOT/workspace/meta_helper.py"
+if [[ -f "$META_HELPER_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
+    GENERATION_DATA="$(python3 "$SCRIPT_DIR/json_emit.py" \
+        backend="$GENERATOR" \
+        license_bucket="$LICENSE_BUCKET" \
+        --int polycount_target="$POLYCOUNT" \
+        --int texture_resolution="$TEXTURE_RES" \
+        --int duration_seconds=$((GEN_TS - START_TS)) 2>/dev/null)"
+    "$PIPELINE_TOOLS_ENV/bin/python" "$META_HELPER_SCRIPT" merge "$META_PATH" \
+        --section generation --data "$GENERATION_DATA" > /dev/null 2>&1 || true
+fi
 
 if [[ $SKIP_CLEAN -eq 1 ]]; then
     info "Skipping cleanup (--no-clean). Final asset: $RAW_PATH"

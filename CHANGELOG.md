@@ -2,6 +2,76 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R1.4: TRELLIS.2 backend (item 15)
+
+- `scripts/generate.sh` — new `-g trellis2` generator, dispatching to a
+  separate, pinned-commit install at `~/3d-pipeline/trellis2-mac`
+  (distinct from the existing `-g trellis`, which is a different,
+  older model and stays untouched). Produces real PBR-textured GLBs
+  (baseColor + metallic/roughness, Metal-baked) — verified with
+  `trimesh` against a real Studio generation. Background removal is
+  forced through the pipeline's own `rembg_preprocess.py` for this
+  generator specifically (`BG_REMOVAL_MODE` defaults to `on`, not
+  `auto`), so the port's bundled RMBG-2.0 (CC BY-NC) never fires —
+  confirmed live via a stale RMBG-2.0 cache timestamp and a real
+  non-uniform alpha channel on the input the port actually received.
+- `scripts/generate.sh` — also wires the `generation` meta.json section
+  (`backend`, `license_bucket`, `polycount_target`, `texture_resolution`,
+  `duration_seconds`) for **all** generators, not just trellis2: no
+  script previously wrote this section at all, despite
+  `meta_schema.json` reserving it since v0.3.
+- `scripts/_pipeline_lib.sh` — `license_bucket_for_model` gains
+  `trellis2` → `commercial_safe` (MIT port + MIT weights, gate G1). The
+  existing `trellis` (v1) → `non_commercial` mapping is untouched.
+- `scripts/pipeline_doctor.py` — new pinned-commit smoke check
+  (`pinned_commit` / `repo_path` venv fields, principle P-B): compares
+  a venv's `git rev-parse HEAD` against the pinned commit and reports
+  `drift` with a working `fix_command` on mismatch. Verified both
+  directions live: PASS at the pin, correct FAIL after a temporary
+  `git checkout` to a different commit, restored afterward.
+- `scripts/model_manifest.json` — new `trellis2` feature set,
+  `trellis2-env` venv (pinned to commit `d58628f4f5b9c3de8274cb110074154f4b31cef2`),
+  and two model entries (`trellis2-weights`, MIT; `dinov3-encoder`,
+  Meta license, gated, `commercial_safe` — both self-managed by the
+  port at first use via `huggingface_hub`, same pattern as R1.2's
+  `qwen3-vl-judge`).
+- `docs/model-review-trellis2.md` (new) — license review, port limits,
+  live evidence, and a bake-off placeholder for plan phase R1.5.
+- Two real bugs found and fixed while getting a smoke generation
+  working end-to-end on the Studio:
+  1. `generate.sh` called `info()` (in the background-removal
+     "applied" branch) roughly 60 lines before `info()`/`done_()`/
+     `err()` were actually defined — a pre-existing ordering bug that
+     was dormant because no generator had ever forced
+     `BG_REMOVAL_MODE=on` before, and the "auto" heuristic never
+     applied to the clean-background fixtures used in prior testing.
+     Fixed by moving the color/logging function definitions earlier,
+     right after `json_mode_begin`.
+  2. The new `trellis2` dispatch block didn't clean up the `.obj`
+     sidecar file `generate.py` also writes alongside the GLB (the
+     existing `trellis` v1 block already does this for its own
+     sidecar) — fixed by adding the same cleanup line.
+- `skill/SKILL.md` — generator recommendation matrix gains TRELLIS.2
+  rows; new `commercial_safe` entry for `trellis2`; generator lists and
+  example dialogue updated to distinguish TRELLIS (v1) from
+  TRELLIS.2 (v2) explicitly.
+- `context/asset-pipeline-ai-context.md` (+ HTML mirror) — correction
+  pass over stale "TRELLIS.2 = CC BY-NC / vertex colors only" claims
+  (§05, §08, §19 and others): those statements were accurate for the
+  legacy TRELLIS (v1) port when originally written, but had drifted
+  into describing the *wrong* model under the "TRELLIS.2" name. Now
+  explicit throughout: TRELLIS (v1, `non_commercial`, vertex-colors-only)
+  vs TRELLIS.2 (v2, item 15, `commercial_safe`, real PBR) are two
+  different models, not the same one at two points in time.
+- Both setup guides — the existing "Install TRELLIS.2 (optional)" step
+  was actually installing the legacy v1 port under a misleading label;
+  relabeled as TRELLIS (v1, legacy) and given its own verify step, and
+  a new, separate TRELLIS.2 (v2) install step added with the pinned
+  commit, the Metal Toolchain prerequisite (hit during the R0.1 spike —
+  without it, all four Metal backend packages silently fall back to a
+  slow CPU path), the `o_voxel` submodule fallback fix, and a DINOv3
+  gated-access callout.
+
 ## 2026-08-12 — R1.3: mesh judge (item 18)
 
 - `scripts/vlm_judge.py` — new `--mode mesh`. Renders of a mesh's

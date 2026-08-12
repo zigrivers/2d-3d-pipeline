@@ -38,7 +38,7 @@
 - [16 · Why one venv per tool](#16-why-one-venv-per-tool)
 - [17 · Why a Claude Code skill, not a CLI Claude can call](#17-why-a-claude-code-skill-not-a-cli-claude-can-call)
 - [18 · Why mflux, not diffusers](#18-why-mflux-not-diffusers)
-- [19 · Why TRELLIS is optional](#19-why-trellis-is-optional)
+- [19 · Why TRELLIS (v1) and TRELLIS.2 (v2) are both optional](#19-why-trellis-v1-and-trellis2-v2-are-both-optional)
 
 **Rough edges**
 - [20 · Setup failures we've already hit](#20-setup-failures-weve-already-hit)
@@ -143,7 +143,7 @@ Flows 1+2 chain ("make me a 3D treasure chest"); flows 1+2+3 chain ("make me a 5
 
 | | |
 |---|---|
-| **Commercial use** | Output must be shippable in commercial games. This rules out FLUX dev (non-commercial), TRELLIS (CC BY-NC), and certain LoRAs. Models chosen carefully — see [section 08](#08-licensing-landscape). |
+| **Commercial use** | Output must be shippable in commercial games. This rules out FLUX dev (non-commercial), TRELLIS v1 (CC BY-NC — not to be confused with TRELLIS.2 v2, which is MIT), and certain LoRAs. Models chosen carefully — see [section 08](#08-licensing-landscape). |
 | **Local execution** | No cloud API calls in the hot path. Privacy, cost, latency, and rights ownership all benefit. Acceptable to use HuggingFace as a one-time weights distribution channel. |
 | **Mac native** | Apple Silicon, MLX or Metal/MPS where possible. No CUDA. This excludes many state-of-the-art models that haven't been ported. |
 | **AI-driveable** | Every component must be callable by Claude Code with predictable I/O. CLI tools win over GUI tools. Filename conventions matter. |
@@ -187,7 +187,7 @@ On a 24 GB PC GPU, FLUX dev quantized to int8 barely fits. On a 128 GB Mac, you 
 
 ### What unified memory *doesn't* give us
 
-Apple Silicon's MPS backend is still less mature than CUDA. Some operations fall back to CPU silently, dramatically slowing things down. Both SF3D and TRELLIS were ported with explicit MPS workarounds (`PYTORCH_ENABLE_MPS_FALLBACK=1` is required for SF3D). Some operations — notably `nvdiffrast` in TRELLIS — have no Mac port at all and are stubbed out, which is why TRELLIS produces vertex colors only (no PBR textures) on Mac.
+Apple Silicon's MPS backend is still less mature than CUDA. Some operations fall back to CPU silently, dramatically slowing things down. SF3D and both TRELLIS generators were ported with explicit MPS workarounds (`PYTORCH_ENABLE_MPS_FALLBACK=1` is required for SF3D). Some operations — notably `nvdiffrast` in TRELLIS (v1) — have no Mac port at all and are stubbed out, which is why TRELLIS (v1) produces vertex colors only (no PBR textures) on Mac. TRELLIS.2 (v2)'s port avoids this gap entirely with its own Metal-based texture-baking stage, so it does not inherit this limitation.
 
 ---
 
@@ -230,39 +230,64 @@ The runtime for all three models is **mflux**, an MLX-native port. See [section 
 
 ## 05 · 3D models
 
-Two 3D generators supported. SF3D is default; TRELLIS.2 is optional.
+Three 3D generators supported: SF3D (default), TRELLIS (v1, optional),
+and TRELLIS.2 (v2, optional, item 15 of the 2026-08 refresh). **TRELLIS
+and TRELLIS.2 are two different models from two different Mac ports —
+do not conflate them**, including in prose below; the "v1"/"v2" tags are
+load-bearing.
 
 | Model | License | Output | Speed | When to use |
 |---|---|---|---|---|
 | **SF3D** (default) | Stability Community License (commercial OK under $1M ARR) | Textured GLB with PBR materials | ~10–20s per asset after weights cached | Default for everything. Game assets, props, decorations. Solid for stylized work. |
-| **TRELLIS.2** (optional) | CC BY-NC 4.0 (non-commercial) | GLB with **vertex colors only** on Mac (PBR textures need nvdiffrast which has no Mac port) | ~30–60s per asset | Higher-fidelity geometry for hero assets when textures don't matter. Non-commercial use only. |
+| **TRELLIS** (v1, optional) | CC BY-NC 4.0 (non-commercial) | GLB with **vertex colors only** on Mac (PBR textures need nvdiffrast which has no Mac port) | ~30–60s per asset | Higher-fidelity geometry for hero assets when textures don't matter. Non-commercial use only. |
+| **TRELLIS.2** (v2, optional, item 15) | MIT — port + weights (gate G1; see `docs/model-review-trellis2.md`) | Textured GLB with **real PBR materials** (baseColor + metallic/roughness, Metal-baked — no nvdiffrast dependency) | ~5–6 min per asset (cold weight load + generation + bake, M3 Ultra) | Denser, sharper geometry than SF3D *and* real PBR textures. Slower, and a large (~15 GB) weight download; not yet the default — see gate G6 in the generation-quality-refresh spec. |
 
 ### Why SF3D as default
 
 Three considerations stacked up:
 
 1. **Commercial safe at Ken's scale.** Stability Community License permits commercial use up to $1M ARR. Ken's projects are far below that ceiling and likely to stay that way for years.
-2. **PBR materials.** SF3D outputs textured GLBs with full PBR maps (baseColor, normal, roughness, metallic). These import cleanly into Unity (with glTFast) and Unreal 5.1+ (native GLB support). TRELLIS on Mac gives vertex colors only, which look adequate in some engines and bad in others.
-3. **Speed.** SF3D is genuinely fast — sub-20-second generation after weights are cached. TRELLIS is 2–3× slower and produces inferior textures on Mac.
+2. **PBR materials.** SF3D outputs textured GLBs with full PBR maps (baseColor, normal, roughness, metallic). These import cleanly into Unity (with glTFast) and Unreal 5.1+ (native GLB support). TRELLIS (v1) on Mac gives vertex colors only, which look adequate in some engines and bad in others — TRELLIS.2 (v2) does bake real PBR maps (this specific gap doesn't apply to it), but it isn't the default either; see below.
+3. **Speed.** SF3D is genuinely fast — sub-20-second generation after weights are cached. TRELLIS (v1) is 2–3× slower and produces inferior textures on Mac; TRELLIS.2 (v2) is slower still (~5–6 min) despite the real PBR output.
 
-### Why TRELLIS is still in the pipeline (and why it's optional)
+### Why TRELLIS (v1) is still in the pipeline (and why it's optional)
 
-TRELLIS produces denser, sharper geometry than SF3D — sometimes meaningfully so for organic shapes (creatures, characters, sculptural pieces). When geometry quality matters more than commercial-safety (e.g., a personal art project), TRELLIS is the better tool. We keep it as an opt-in install because:
+TRELLIS (v1) produces denser, sharper geometry than SF3D — sometimes meaningfully so for organic shapes (creatures, characters, sculptural pieces). When geometry quality matters more than commercial-safety (e.g., a personal art project), TRELLIS (v1) is the better tool. We keep it as an opt-in install because:
 
 - The license blocks commercial use, so it can't be default
 - The Mac port is mature for geometry but stubs out texturing
 - The 15+ GB weight download is heavy if you're not going to use it
 
+### TRELLIS.2 (v2, item 15) — the real-PBR upgrade
+
+A separate, newer upstream model with a separate MIT-licensed Mac port
+(pinned commit; see `docs/model-review-trellis2.md` for the full license
+review), installed at `~/3d-pipeline/trellis2-mac` and selected via
+`generate.sh -g trellis2`. Unlike TRELLIS (v1) above, this port bakes
+real PBR maps through a Metal-based texture-baking stage — no
+nvdiffrast dependency, no vertex-colors-only fallback. `commercial_safe`
+(MIT port + MIT weights, confirmed via gate G1). Background removal
+routes through the pipeline's own `rembg_preprocess.py` (forced on for
+this generator) rather than the port's bundled RMBG-2.0 (CC BY-NC),
+so a non-commercial model never enters a `commercial_safe`-bucketed run.
+Still opt-in, not default, because:
+
+- It's substantially slower than SF3D (~5–6 min vs ~15s)
+- The default-generator decision (gate G6) is deliberately deferred to a
+  bake-off against SF3D/SPAR3D (see the plan's R1.5 phase) before
+  anything changes
+- The weight download is the same ~15 GB class as v1
+
 ### What about Hunyuan3D, InstantMesh, others?
 
 - **Hunyuan3D 2 / 2mini** — explored extensively. Hunyuan3D-2mini is Apache 2.0 and produces great geometry, but the Mac port is less mature than SF3D's and the texture stage requires a separate pass. Currently not in the default pipeline but a reasonable future addition.
 - **InstantMesh** — older. Surpassed by SF3D on quality.
-- **3DTopia, OpenLRM** — explored, lower quality than SF3D or TRELLIS.
+- **3DTopia, OpenLRM** — explored, lower quality than SF3D or TRELLIS (v1).
 - **Closed services (Meshy, CSM)** — disqualified on local-execution.
 
 ### The view-quality contract
 
-Both SF3D and TRELLIS work from a single 2D image. They internally compute multi-view representations but the input is one image. This means the 2D prompt has to convey enough 3D form information:
+SF3D and both TRELLIS generators work from a single 2D image. They internally compute multi-view representations but the input is one image. This means the 2D prompt has to convey enough 3D form information:
 
 - **3/4 view** is dramatically better than pure front or pure side
 - **Clean white/neutral background** reduces background-bleed into geometry
@@ -275,7 +300,7 @@ The default game-asset prompt suffix in `concept.sh` encodes these — "3/4 view
 
 ## 06 · Cleanup & repair
 
-Both SF3D and TRELLIS produce meshes that are *almost* game-ready but not quite. Cleanup happens via headless Blender Python scripts. Two distinct cleanup paths exist:
+All 2D-to-3D generators (SF3D, TRELLIS v1, TRELLIS.2 v2) produce meshes that are *almost* game-ready but not quite. Cleanup happens via headless Blender Python scripts. Two distinct cleanup paths exist:
 
 ### Game-asset cleanup — `clean_asset.py`
 
@@ -357,7 +382,8 @@ This is the part most easily gotten wrong. The pipeline is engineered around a s
 | FLUX schnell | Apache 2.0 | **Yes**, unrestricted |
 | FLUX dev | FLUX.1 NC | **No** — non-commercial only |
 | SF3D | Stability Community License | **Yes**, up to $1M ARR |
-| TRELLIS.2 | CC BY-NC 4.0 | **No** — non-commercial only |
+| TRELLIS (v1) | CC BY-NC 4.0 | **No** — non-commercial only |
+| TRELLIS.2 (v2, item 15) | MIT — port + weights (gate G1) | **Yes**, unrestricted |
 | mflux runtime | MIT | Yes, unrestricted |
 | Blender | GPL | Yes — outputs are not infected (free use of files Blender produced) |
 | 3D Print Toolbox | GPL (Blender add-on) | Yes — same as Blender; outputs aren't GPL'd |
@@ -371,7 +397,7 @@ Pipeline defaults are chosen so that running with no options produces commercial
 - 3D default: SF3D (Stability Community License, well under $1M)
 - Cleanup: Blender + 3D Print Toolbox (GPL, outputs not infected)
 
-The user has to explicitly opt into FLUX dev or TRELLIS to leave the commercial-safe zone. The SKILL.md instructs Claude to refuse these for Ken's commercial projects (Grithkin, GripCraft) or to warn loudly if asked.
+The user has to explicitly opt into FLUX dev or TRELLIS (v1) to leave the commercial-safe zone — TRELLIS.2 (v2) does not require this opt-in, since it's `commercial_safe`. The SKILL.md instructs Claude to refuse FLUX dev / TRELLIS (v1) for Ken's commercial projects (Grithkin, GripCraft) or to warn loudly if asked.
 
 ### What the SKILL.md says vs. what Ken can override
 
@@ -786,27 +812,49 @@ mflux supports FLUX schnell, FLUX dev, Z-Image Turbo, Qwen Image, and a growing 
 
 ---
 
-## 19 · Why TRELLIS is optional
+## 19 · Why TRELLIS (v1) and TRELLIS.2 (v2) are both optional
 
-TRELLIS.2 is listed as "Step 04 (optional)" in the setup guide. Three reasons it's not default:
+**These are two different models with two different Mac ports — v1 is
+listed as "Step 04 (optional)" in the setup guide, v2 as a separate
+opt-in step (item 15 of the 2026-08 generation-quality refresh; see
+`docs/model-review-trellis2.md`). Do not conflate them.**
 
-### License blocks commercial use
+### TRELLIS (v1): license blocks commercial use
 
-CC BY-NC 4.0. Can't ship TRELLIS-generated assets in Grithkin or GripCraft. For Ken's primary use case, it's blocked.
+CC BY-NC 4.0. Can't ship TRELLIS (v1)-generated assets in Grithkin or GripCraft. For Ken's primary use case, it's blocked.
 
-### Mac port is incomplete
+### TRELLIS (v1): Mac port is incomplete
 
 The original TRELLIS uses nvdiffrast for texture baking. nvdiffrast has no Mac port. The Mac fork stubs it out, falling back to vertex colors. The result is sharper geometry but visibly worse surface appearance than SF3D's full PBR. For most game-asset uses, this is a meaningful step down.
 
-### 15 GB+ of weights to download
+### TRELLIS (v1): 15 GB+ of weights to download
 
-SF3D ships ~2 GB. TRELLIS is closer to 15 GB. Including TRELLIS by default would significantly extend first-run setup time. Making it optional means users who don't need it don't pay the cost.
+SF3D ships ~2 GB. TRELLIS (v1) is closer to 15 GB. Including it by default would significantly extend first-run setup time. Making it optional means users who don't need it don't pay the cost.
 
-### When TRELLIS still earns its keep
+### When TRELLIS (v1) still earns its keep
 
 - Personal / non-commercial art projects where geometry matters more than texture
-- Organic shapes (creatures, characters) where TRELLIS's denser triangulation reads better
+- Organic shapes (creatures, characters) where its denser triangulation reads better
 - Source meshes for further sculpting in Blender / ZBrush — when texture won't survive anyway
+
+### TRELLIS.2 (v2): why it's opt-in despite real PBR and a commercial-safe license
+
+Unlike v1, TRELLIS.2's MIT-licensed port bakes real PBR textures — the
+license and vertex-colors objections above don't apply to it (gate G1;
+`docs/model-review-trellis2.md`). It's still not default because:
+
+- It's the slowest generator in the pipeline (~5–6 min per asset vs
+  SF3D's ~15s) — a real cost for iteration-heavy workflows
+- Same 15+ GB weight download class as v1
+- Promoting any generator to default is gate G6 — deliberately gated on
+  a real bake-off against SF3D/SPAR3D (plan phase R1.5) rather than a
+  spec-time decision
+
+### When TRELLIS.2 (v2) earns its keep
+
+- Hero assets where both geometry density *and* real PBR texturing matter
+- Commercial projects that would otherwise need TRELLIS (v1)'s geometry
+  quality but can't accept its non-commercial license
 
 ---
 
@@ -908,7 +956,7 @@ Rare but seen: SF3D's texture baking stage hangs indefinitely. Cause unknown —
 
 ### Mesh comes out flat / 1D
 
-SF3D and TRELLIS both occasionally produce degenerate output — a flat plane or a thin sliver instead of a recognizable 3D shape. Causes:
+All 2D-to-3D generators occasionally produce degenerate output — a flat plane or a thin sliver instead of a recognizable 3D shape (this is exactly the failure mode item 18's mesh judge — `generate.sh --judge-mesh` — is designed to catch). Causes:
 
 - 2D input has too little 3D form information (pure front view, complex background)
 - 2D input is a clipart-style image with hard edges and no gradients

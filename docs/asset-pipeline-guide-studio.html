@@ -896,7 +896,7 @@ footer .signature { color: var(--peach); }
         <li><a href="#prerequisites"><span class="num">01</span>Prerequisites</a></li>
         <li><a href="#huggingface"><span class="num">02</span>HuggingFace</a></li>
         <li><a href="#install-sf3d"><span class="num">03</span>Install SF3D</a></li>
-        <li><a href="#install-trellis"><span class="num">04</span>Install TRELLIS.2</a></li>
+        <li><a href="#install-trellis"><span class="num">04</span>Install TRELLIS</a></li>
         <li><a href="#install-mflux"><span class="num">05</span>Install mflux</a></li>
         <li><a href="#workspace"><span class="num">06</span>Workspace</a></li>
         <li><a href="#scripts"><span class="num">07</span>Wrapper scripts</a></li>
@@ -961,7 +961,7 @@ footer .signature { color: var(--peach); }
         </div>
         <div class="spec">
           <div class="spec-label">3D Generator</div>
-          <div class="spec-value">SF3D · TRELLIS.2</div>
+          <div class="spec-value">SF3D · TRELLIS · TRELLIS.2</div>
         </div>
         <div class="spec">
           <div class="spec-label">Cleanup &amp; Repair</div>
@@ -1127,7 +1127,7 @@ footer .signature { color: var(--peach); }
           </ul>
           <div class="callout callout-warn">
             <div class="callout-label">License watch</div>
-            RMBG-2.0 is <strong>CC BY-NC 4.0</strong> (non-commercial). It's used by TRELLIS.2 for background removal. For shipped commercial games, use SF3D (which doesn't depend on RMBG-2.0) or swap in <code>rembg</code> instead. FLUX.1-dev is also non-commercial without a BFL license.
+            RMBG-2.0 is <strong>CC BY-NC 4.0</strong> (non-commercial). It's bundled by the legacy TRELLIS (v1) port for background removal. TRELLIS.2 (v2, item 15) never touches RMBG-2.0 — <code>generate.sh -g trellis2</code> always routes background removal through the pipeline's own <code>rembg_preprocess.py</code> first, so RMBG-2.0's license doesn't enter that chain. For shipped commercial games with TRELLIS (v1), use SF3D or TRELLIS.2 instead, or swap in <code>rembg</code>. FLUX.1-dev is also non-commercial without a BFL license.
           </div>
         </div>
       </div>
@@ -1244,29 +1244,60 @@ footer .signature { color: var(--peach); }
     <!-- ============ INSTALL TRELLIS ============ -->
     <section id="install-trellis">
       <div class="section-num">04 / Setup</div>
-      <h2>Install <em>TRELLIS.2</em> <span style="font-size: 24px; color: var(--overlay0); font-style: normal;">(optional)</span></h2>
-      <p class="section-deck">Microsoft's TRELLIS.2 produces denser, sharper geometry than SF3D but outputs vertex colors only on Mac (no PBR textures). Skip this if you only want SF3D for now — you can come back later.</p>
+      <h2>Install <em>TRELLIS</em> <span style="font-size: 24px; color: var(--overlay0); font-style: normal;">(optional, two generations)</span></h2>
+      <p class="section-deck"><strong>Two different models, two different local installs — do not conflate them.</strong> TRELLIS (v1) is legacy: non-commercial, vertex colors only on Mac. TRELLIS.2 (v2, item 15 of the 2026-08 refresh) is a newer, separate model: commercial-safe, real PBR textures, but noticeably slower. Skip both if you only want SF3D for now — you can come back later.</p>
 
       <div class="step" data-step="trellis-clone">
         <label class="step-check"><input type="checkbox"></label>
         <div class="step-body">
-          <h3>Clone the Mac port and run setup</h3>
+          <h3>TRELLIS (v1, legacy) <span style="color: var(--overlay0); font-style: italic; font-weight: normal;">— non-commercial, vertex colors only</span></h3>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
 <span class="tk-prompt">$ </span>git clone https://github.com/shivampkumar/trellis-mac.git
 <span class="tk-prompt">$ </span>cd trellis-mac
 <span class="tk-prompt">$ </span>bash setup.sh</pre></div>
-          <p>10–15 minutes. Downloads ~15 GB of model weights.</p>
+          <p>10–15 minutes. Downloads ~15 GB of model weights. Used by <code>generate.sh -g trellis</code>.</p>
+          <div class="verify">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source .venv/bin/activate
+<span class="tk-prompt">$ </span>python generate.py --help
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+              You should see usage information with <code>--seed</code>, <code>--output</code>, and <code>--pipeline-type</code> options.
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="step" data-step="trellis-verify">
+      <div class="step" data-step="trellis2-clone">
         <label class="step-check"><input type="checkbox"></label>
         <div class="step-body">
-          <h3>Verify</h3>
-          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source .venv/bin/activate
+          <h3>TRELLIS.2 (v2, item 15) <span style="color: var(--overlay0); font-style: italic; font-weight: normal;">— commercial-safe, real PBR textures</span></h3>
+          <p><strong>What this is.</strong> A separate, newer upstream model (<a href="https://github.com/microsoft/TRELLIS.2" target="_blank">microsoft/TRELLIS.2</a>, MIT) via the same porter's Mac fork, at a <strong>pinned commit</strong> — not the unpinned <code>HEAD</code> the v1 install above uses. Bakes real PBR maps (baseColor + metallic/roughness) through a Metal texture-baking stage; no vertex-colors fallback. Selected via <code>generate.sh -g trellis2</code>. See <code>docs/model-review-trellis2.md</code> for the full license review.</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>xcodebuild -downloadComponent MetalToolchain</pre></div>
+          <div class="callout callout-warn">
+            <div class="callout-label">Do this before <code>setup.sh</code>, not after</div>
+            <p>Without the Metal Toolchain component (a separate ~688&nbsp;MB download even with full Xcode installed), all four Metal backend packages (<code>mtlbvh</code>, <code>mtldiffrast</code>, <code>cumesh</code>/<code>mtlmesh</code>, <code>flex-gemm</code>/<code>mtlgemm</code>) fail to build with <code>cannot execute tool 'metal' due to missing Metal Toolchain</code>. Every Metal backend then silently falls back to a slow CPU path — the port's own README benchmarks do not apply.</p>
+          </div>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
+<span class="tk-prompt">$ </span>git clone https://github.com/shivampkumar/trellis-mac.git trellis2-mac
+<span class="tk-prompt">$ </span>cd trellis2-mac
+<span class="tk-prompt">$ </span>git checkout d58628f4f5b9c3de8274cb110074154f4b31cef2
+<span class="tk-prompt">$ </span>bash setup.sh
+<span class="tk-prompt">$ </span>git submodule update --init --recursive --depth 1</pre></div>
+          <p>10–15 minutes plus a ~15&nbsp;GB weight download on first real generation (weights aren't fetched by <code>setup.sh</code> itself — <code>generate.py</code> pulls them from Hugging Face on first use). The <code>git checkout</code> line is the pinned-commit requirement (P-B): this port is a community fork, and pinning means an upstream force-push or a stray local <code>git pull</code> can't silently swap in unreviewed code. <code>pipeline_doctor.py --check venvs</code> verifies the pin and tells you the exact <code>git checkout</code> to run if it ever drifts. The final <code>git submodule update</code> is a fallback fix for the <code>o_voxel</code> GLB-export package — <code>setup.sh</code>'s own dependency-clone helper doesn't fetch its <code>eigen</code> submodule.</p>
+          <div class="callout callout-info">
+            <div class="callout-label">DINOv3 gate</div>
+            <p>TRELLIS.2 uses <code>facebook/dinov3-vitl16-pretrain-lvd1689m</code> as an internal image encoder — already listed in the gated-models step above. If you skipped accepting it there, go back and click <strong>Agree and access repository</strong> on that model page before running a real generation, or the first <code>generate.py</code> call will fail with a 403. DINOv3's license has no commercial-use restriction (Meta's standard Trade-Controls / military-use clauses only) and is never shipped in output GLBs, so accepting it doesn't affect the <code>commercial_safe</code> bucket.</p>
+          </div>
+          <div class="verify">
+            <div class="verify-header">Verify</div>
+            <div class="verify-body">
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source .venv/bin/activate
 <span class="tk-prompt">$ </span>python generate.py --help
 <span class="tk-prompt">$ </span>deactivate</pre></div>
-          <p>You should see usage information with <code>--seed</code>, <code>--output</code>, and <code>--pipeline-type</code> options.</p>
+              You should see usage information with <code>--pipeline-type</code>, <code>--texture-size</code>, and <code>--no-texture</code> options — <code>--texture-size</code> is new relative to the v1 CLI above and is the PBR-baking resolution knob.
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -1690,6 +1721,10 @@ license_bucket_for_model() {
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
+        # TRELLIS.2 (item 15, 2026-08): distinct from the legacy `trellis`
+        # (v1) entry above — MIT port + MIT weights (gate G1, R0.1 spike;
+        # see docs/model-review-trellis2.md). Do not conflate v1 and v2.
+        trellis2)                               echo commercial_safe ;;
         # Hunyuan3D-Paint: Tencent Hunyuan Community License. Reviewed
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
@@ -2443,6 +2478,7 @@ PIPELINE_ROOT=&quot;${PIPELINE_ROOT:-$HOME/3d-pipeline}&quot;
 SF3D_DIR=&quot;$PIPELINE_ROOT/stable-fast-3d&quot;
 SPAR3D_DIR=&quot;${SPAR3D_DIR:-$PIPELINE_ROOT/stable-point-aware-3d}&quot;
 TRELLIS_DIR=&quot;$PIPELINE_ROOT/trellis-mac&quot;
+TRELLIS2_DIR=&quot;${TRELLIS2_DIR:-$PIPELINE_ROOT/trellis2-mac}&quot;
 BLENDER=&quot;${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}&quot;
 
 EXPLICIT_PROJECT=&quot;&quot;
@@ -2474,8 +2510,11 @@ Project context:
                            (project mode with Unity/Unreal only)
 
 Generation options:
-  -g, --generator NAME     sf3d (default) | spar3d | trellis
-                           spar3d and trellis are experimental / opt-in.
+  -g, --generator NAME     sf3d (default) | spar3d | trellis | trellis2
+                           spar3d, trellis, and trellis2 are experimental /
+                           opt-in. trellis2 bakes real PBR textures (not
+                           just scalar factors); see the generator matrix
+                           in skill/SKILL.md before choosing it.
   -o, --output NAME        Output name (default: derived from input)
   -p, --polycount N        Target polycount after cleanup (default: 3000)
   -t, --texture-res N      SF3D texture resolution (default: 2048)
@@ -2543,6 +2582,18 @@ INPUT=&quot;$(cd &quot;$(dirname &quot;$INPUT&quot;)&quot; &amp;&amp; pwd)/$(bas
 # real stdout is restored just before the final JSON line.
 [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_begin
 
+# Defined here (not further down) because the background-removal step below
+# can call info() on the &quot;applied&quot; path — moved up after a real trellis2 run
+# hit `info: command not found` the first time BG_REMOVAL_MODE=on actually
+# triggered rembg for a generator (previously always &quot;auto&quot;, which the
+# clean-background concept.sh fixtures used in testing never applied).
+COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
+HUMAN_FD=1
+[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
+info()  { printf &quot;${COL_BLUE}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+done_() { printf &quot;${COL_GREEN}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
+err()   { printf &quot;${COL_RED}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
+
 # Resolve project context BEFORE setting output paths
 resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
 
@@ -2552,8 +2603,8 @@ resolve_project_context &quot;$EXPLICIT_PROJECT&quot; &quot;$PWD&quot;
 [[ -z &quot;$TEXTURE_RES&quot; ]] &amp;&amp; TEXTURE_RES=&quot;$(config_default texture_resolution 2048)&quot;
 
 case &quot;$GENERATOR&quot; in
-    sf3d|trellis|spar3d) ;;
-    *) echo &quot;ERROR: -g must be sf3d, spar3d, or trellis (got: $GENERATOR)&quot; &gt;&amp;2; exit 1 ;;
+    sf3d|trellis|spar3d|trellis2) ;;
+    *) echo &quot;ERROR: -g must be sf3d, spar3d, trellis, or trellis2 (got: $GENERATOR)&quot; &gt;&amp;2; exit 1 ;;
 esac
 case &quot;$UP_AXIS&quot; in y|z) ;; *) echo &quot;ERROR: -u must be y or z&quot; &gt;&amp;2; exit 1 ;; esac
 
@@ -2576,6 +2627,7 @@ check_and_normalize_input
 # v0.3: conditional background removal. Reads input.background_uniformity
 # from the meta.json that check_and_normalize_input just wrote. Updates
 # $INPUT to the no-background PNG when the run actually applies.
+[[ -z &quot;$BG_REMOVAL_MODE&quot; &amp;&amp; &quot;$GENERATOR&quot; == &quot;trellis2&quot; ]] &amp;&amp; BG_REMOVAL_MODE=&quot;on&quot;
 [[ -z &quot;$BG_REMOVAL_MODE&quot; ]] &amp;&amp; BG_REMOVAL_MODE=&quot;$(read_pipeline_config bg_removal_mode auto 2&gt;/dev/null || echo auto)&quot;
 PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
 REMBG_SCRIPT=&quot;$SCRIPT_DIR/rembg_preprocess.py&quot;
@@ -2596,13 +2648,6 @@ if d.get(&#x27;applied&#x27;) and d.get(&#x27;output_path&#x27;):
         INPUT=&quot;$NEW_INPUT&quot;
     fi
 fi
-
-COL_GREEN=&#x27;\033[0;32m&#x27;; COL_BLUE=&#x27;\033[0;34m&#x27;; COL_RED=&#x27;\033[0;31m&#x27;; COL_RESET=&#x27;\033[0m&#x27;
-HUMAN_FD=1
-[[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; HUMAN_FD=2
-info()  { printf &quot;${COL_BLUE}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
-done_() { printf &quot;${COL_GREEN}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; }
-err()   { printf &quot;${COL_RED}[pipeline]${COL_RESET} %s\n&quot; &quot;$1&quot; &gt;&amp;2; }
 
 START_TS=$(date +%s)
 CREATED_AT=&quot;$(iso_now)&quot;
@@ -2704,7 +2749,9 @@ elif [[ &quot;$GENERATOR&quot; == &quot;spar3d&quot; ]]; then
     popd &gt; /dev/null
 
 elif [[ &quot;$GENERATOR&quot; == &quot;trellis&quot; ]]; then
-    [[ -d &quot;$TRELLIS_DIR/.venv&quot; ]] || { err &quot;TRELLIS.2 venv not found at $TRELLIS_DIR/.venv&quot;; exit 1; }
+    # This is the legacy v1 TRELLIS port (non_commercial) — do not confuse
+    # with `trellis2` below, a separate MIT-licensed port at a different path.
+    [[ -d &quot;$TRELLIS_DIR/.venv&quot; ]] || { err &quot;TRELLIS venv not found at $TRELLIS_DIR/.venv&quot;; exit 1; }
     pushd &quot;$TRELLIS_DIR&quot; &gt; /dev/null
     # shellcheck source=/dev/null
     source .venv/bin/activate
@@ -2716,10 +2763,48 @@ elif [[ &quot;$GENERATOR&quot; == &quot;trellis&quot; ]]; then
     [[ -f &quot;${TMP_BASE}.obj&quot; ]] &amp;&amp; rm -f &quot;${TMP_BASE}.obj&quot;
     deactivate
     popd &gt; /dev/null
+
+elif [[ &quot;$GENERATOR&quot; == &quot;trellis2&quot; ]]; then
+    # Item 15. rembg preprocessing (below, generic to all generators) is
+    # forced &quot;on&quot; for this generator specifically so the input always has
+    # a real alpha channel by the time we get here — Trellis2ImageTo3DPipeline
+    # .preprocess_image() skips its own bundled RMBG-2.0 (CC BY-NC,
+    # non-commercial) call whenever the input already has alpha. Without
+    # that, RMBG-2.0 would silently run on any input the generic &quot;auto&quot;
+    # background-removal heuristic decided to leave alone (e.g. an
+    # already-clean concept.sh render), pulling a non-commercial model
+    # into a run whose license bucket says commercial_safe.
+    [[ -d &quot;$TRELLIS2_DIR/.venv&quot; ]] || { err &quot;TRELLIS.2 venv not found at $TRELLIS2_DIR/.venv&quot;; exit 1; }
+    pushd &quot;$TRELLIS2_DIR&quot; &gt; /dev/null
+    # shellcheck source=/dev/null
+    source .venv/bin/activate
+
+    TMP_BASE=&quot;$RAW_DIR/${OUTPUT_NAME}_trellis2_tmp_$$&quot;
+    python generate.py &quot;$INPUT&quot; --output &quot;$TMP_BASE&quot; --texture-size &quot;$TEXTURE_RES&quot;
+    [[ -f &quot;${TMP_BASE}.glb&quot; ]] || { err &quot;TRELLIS.2 did not produce ${TMP_BASE}.glb&quot;; exit 1; }
+    mv &quot;${TMP_BASE}.glb&quot; &quot;$RAW_PATH&quot;
+    [[ -f &quot;${TMP_BASE}.obj&quot; ]] &amp;&amp; rm -f &quot;${TMP_BASE}.obj&quot;
+    deactivate
+    popd &gt; /dev/null
 fi
 
 GEN_TS=$(date +%s)
 done_ &quot;Generation finished in $((GEN_TS - START_TS))s -&gt; $RAW_PATH&quot;
+
+# Item 15 — record which generator produced this asset. meta_schema.json&#x27;s
+# `generation` section was reserved but nothing wrote it before this change.
+META_HELPER_SCRIPT=&quot;$SCRIPT_DIR/meta_helper.py&quot;
+[[ -f &quot;$META_HELPER_SCRIPT&quot; ]] || META_HELPER_SCRIPT=&quot;$PIPELINE_ROOT/workspace/meta_helper.py&quot;
+if [[ -f &quot;$META_HELPER_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    GENERATION_DATA=&quot;$(python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+        backend=&quot;$GENERATOR&quot; \
+        license_bucket=&quot;$LICENSE_BUCKET&quot; \
+        --int polycount_target=&quot;$POLYCOUNT&quot; \
+        --int texture_resolution=&quot;$TEXTURE_RES&quot; \
+        --int duration_seconds=$((GEN_TS - START_TS)) 2&gt;/dev/null)&quot;
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$META_HELPER_SCRIPT&quot; merge &quot;$META_PATH&quot; \
+        --section generation --data &quot;$GENERATION_DATA&quot; &gt; /dev/null 2&gt;&amp;1 || true
+fi
 
 if [[ $SKIP_CLEAN -eq 1 ]]; then
     info &quot;Skipping cleanup (--no-clean). Final asset: $RAW_PATH&quot;
@@ -6864,10 +6949,38 @@ def _venv_pip_freeze(venv_path: Path) -&gt; str:
     return r.stdout if r.returncode == 0 else &quot;&quot;
 
 
+def _check_pinned_commit(repo_path: Path, expected_commit: str) -&gt; dict:
+    &quot;&quot;&quot;Item 15 / principle P-B: community-fork risk is named with a pinned
+    commit + this smoke check, so an upstream force-push or an accidental
+    local `git pull` doesn&#x27;t silently swap in unreviewed code.&quot;&quot;&quot;
+    if not repo_path.exists():
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: &quot;repo-missing&quot;, &quot;path&quot;: str(repo_path)}
+    try:
+        result = subprocess.run(
+            [&quot;git&quot;, &quot;-C&quot;, str(repo_path), &quot;rev-parse&quot;, &quot;HEAD&quot;],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+    except Exception as e:
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: f&quot;git-rev-parse-failed: {e}&quot;}
+    actual = result.stdout.strip()
+    if actual != expected_commit:
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: &quot;commit-mismatch&quot;,
+                &quot;expected_commit&quot;: expected_commit, &quot;actual_commit&quot;: actual}
+    return {&quot;status&quot;: &quot;ok&quot;}
+
+
 def check_venv(venv: dict) -&gt; dict:
     name = venv[&quot;name&quot;]
     path = _expand(venv[&quot;path&quot;])
     lockfile = REPO_ROOT / venv[&quot;lockfile&quot;]
+
+    pinned_commit = venv.get(&quot;pinned_commit&quot;)
+    if pinned_commit:
+        repo_path = _expand(venv.get(&quot;repo_path&quot;) or venv[&quot;path&quot;])
+        commit_check = _check_pinned_commit(repo_path, pinned_commit)
+        if commit_check[&quot;status&quot;] != &quot;ok&quot;:
+            return {&quot;status&quot;: &quot;drift&quot;, &quot;name&quot;: name, **commit_check,
+                    &quot;fix_command&quot;: f&quot;cd {repo_path} &amp;&amp; git checkout {pinned_commit}&quot;}
 
     if not lockfile.exists() or not lockfile.read_text().strip():
         return {&quot;status&quot;: &quot;skipped&quot;, &quot;name&quot;: name,
@@ -8203,6 +8316,13 @@ PIPELINE_EOF</pre></div>
       &quot;components&quot;: [
         &quot;qwen3-vl-judge&quot;
       ]
+    },
+    &quot;trellis2&quot;: {
+      &quot;description&quot;: &quot;Item 15 \u2014 TRELLIS.2 2D-to-3D backend (opt-in; generate.sh -g trellis2). Bakes real PBR maps, unlike SF3D&#x27;s scalar factors.&quot;,
+      &quot;components&quot;: [
+        &quot;trellis2-weights&quot;,
+        &quot;dinov3-encoder&quot;
+      ]
     }
   },
   &quot;venvs&quot;: [
@@ -8266,6 +8386,18 @@ PIPELINE_EOF</pre></div>
       &quot;purpose&quot;: &quot;Local VLM judge (mlx-vlm) for concept.sh --judge / --best-of&quot;,
       &quot;python_version&quot;: &quot;3.12&quot;,
       &quot;lockfile&quot;: &quot;scripts/lockfiles/vlm-env.txt&quot;
+    },
+    {
+      &quot;name&quot;: &quot;trellis2-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/trellis2-mac&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;trellis2&quot;,
+      &quot;size_gb&quot;: 2,
+      &quot;purpose&quot;: &quot;TRELLIS.2 2D-to-3D backend (generate.sh -g trellis2). Community fork pinned per principle P-B.&quot;,
+      &quot;python_version&quot;: &quot;3.11&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/trellis2-env.txt&quot;,
+      &quot;pinned_commit&quot;: &quot;d58628f4f5b9c3de8274cb110074154f4b31cef2&quot;,
+      &quot;repo_path&quot;: &quot;~/3d-pipeline/trellis2-mac&quot;
     }
   ],
   &quot;models&quot;: [
@@ -8447,6 +8579,42 @@ PIPELINE_EOF</pre></div>
       &quot;hf_repo&quot;: &quot;mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit&quot;,
       &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
       &quot;warm_target&quot;: &quot;qwen3-vl-judge&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;trellis2-weights&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;trellis2&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 14000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;trellis2&quot;,
+      &quot;notes&quot;: &quot;MIT (gate G1, R0.1 spike; see docs/model-review-trellis2.md). Downloaded automatically by generate.py on first use via huggingface_hub, into the standard HF cache (no dedicated env var).&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;microsoft/TRELLIS.2-4B&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;trellis2-weights&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;dinov3-encoder&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;trellis2&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 1100,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;trellis2&quot;,
+      &quot;notes&quot;: &quot;Meta DINOv3 custom license (gate G1, R0.1 spike): no commercial-use restriction, no revenue cap, no field-of-use limit; used only as an internal feature extractor, never shipped in output GLBs. Gated on HF — requires prior access grant on the authenticated account. Downloaded automatically by generate.py on first use.&quot;,
+      &quot;requires_hf_auth&quot;: true,
+      &quot;hf_repo&quot;: &quot;facebook/dinov3-vitl16-pretrain-lvd1689m&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;dinov3-encoder&quot;,
       &quot;comfyui_kind&quot;: null
     }
   ],
@@ -13044,7 +13212,7 @@ change behaviour. The wrappers do the same detection in `_pipeline_lib.sh`
 The three core halves are unchanged:
 
 - **2D** — text → image via mflux
-- **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS.2, then Blender cleanup
+- **3D** — image → mesh via SF3D (default) / SPAR3D / TRELLIS (v1) / TRELLIS.2 (v2), then Blender cleanup
 - **Print** — clean GLB → printable STL via Blender mesh repair + scaling
 
 v0.2 added four lanes; v0.3.2 adds a fifth. None are defaults:
@@ -13071,7 +13239,7 @@ Use these exact names in conversation, manifest entries, and JSON output:
 
 | Bucket                          | Models                                              |
 | ------------------------------- | --------------------------------------------------- |
-| `commercial_safe`               | z-image-turbo, flux-schnell, qwen-image             |
+| `commercial_safe`               | z-image-turbo, flux-schnell, qwen-image, trellis2   |
 | `commercial_threshold`          | sf3d, spar3d                                        |
 | `non_commercial`                | flux-dev, trellis                                   |
 | `source_available_restricted`   | (reserved; nothing default-mapped here yet)         |
@@ -13143,7 +13311,7 @@ don&#x27;t have to pre-check.
 - `engine`: `&quot;unity&quot; | &quot;unreal&quot; | &quot;none&quot;` — overrides auto-detection
 - `engine_path`: relative-to-project or absolute path for final GLB staging
 - `defaults.generator_2d`: `&quot;z-image-turbo&quot; | &quot;flux-schnell&quot; | &quot;flux-dev&quot; | &quot;qwen-image&quot;`
-- `defaults.generator_3d`: `&quot;sf3d&quot; | &quot;spar3d&quot; | &quot;trellis&quot;`
+- `defaults.generator_3d`: `&quot;sf3d&quot; | &quot;spar3d&quot; | &quot;trellis&quot; | &quot;trellis2&quot;`
 - `defaults.polycount`: integer
 - `defaults.texture_resolution`: integer
 - `defaults.lora`: absolute path to .safetensors
@@ -13312,10 +13480,14 @@ only needs one variant, mflux + LoRA is faster and uses less disk.
 ## Flow 2: 2D image → 3D asset
 
 Use `generate.sh` with `-i &lt;image_path&gt;`. Default to SF3D unless asked
-for SPAR3D or TRELLIS.2 or the asset needs unusual topology. Mention the
-license bucket if you pick anything other than SF3D.
+for SPAR3D, TRELLIS (v1), or TRELLIS.2 (v2, item 15) — or the asset
+needs unusual topology or real PBR at higher geometry density than
+SF3D gives. Mention the license bucket if you pick anything other than
+SF3D. **TRELLIS and TRELLIS.2 are two different models — v1 is
+`non_commercial` and vertex-colors-only; v2 is `commercial_safe` with
+real PBR but the slowest generator in the pipeline (~5–6 min/asset).**
 
-### Generator recommendation matrix (v0.3+)
+### Generator recommendation matrix (v0.3+, item 15 adds TRELLIS.2)
 
 Before invoking `generate.sh`, classify the asset by reading the user&#x27;s
 request. Match the closest row and recommend that generator (stating
@@ -13323,22 +13495,32 @@ the license bucket inline, as already required for non-default choices).
 
 | Intent signals (in prompt or context) | Recommend | Why |
 |---|---|---|
-| &quot;character&quot;, &quot;figure&quot;, &quot;creature&quot;, &quot;person&quot; with detail | TRELLIS | Better topology for organic forms; user must accept `non_commercial` |
+| &quot;character&quot;, &quot;figure&quot;, &quot;creature&quot;, &quot;person&quot; with detail, commercial OK | TRELLIS.2 | Same organic-topology advantage as v1, real PBR, `commercial_safe` — but ~5–6 min/asset, slowest option |
+| &quot;character&quot;, &quot;figure&quot;, &quot;creature&quot;, &quot;person&quot; with detail, non-commercial OK | TRELLIS (v1) | Faster than TRELLIS.2 (~30–60s); user must accept `non_commercial` and vertex-colors-only texture |
 | &quot;mech&quot;, &quot;robot&quot;, &quot;weapon&quot;, &quot;gun&quot;, &quot;tool&quot;, &quot;hard surface&quot; | SPAR3D | Sharper edges; ~2× faster |
 | &quot;quick&quot;, &quot;draft&quot;, &quot;iterate&quot;, &quot;prototype&quot;, &quot;test&quot; | SPAR3D | ~2× speed at acceptable quality for iteration |
 | &quot;prop&quot;, &quot;chest&quot;, &quot;barrel&quot;, &quot;rock&quot;, &quot;crate&quot;, default | SF3D | Default; `commercial_safe` ‡; reliable |
-| Asset needs visible back face (e.g. character figurine) | TRELLIS, or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
-| Final asset for **commercial** release | SF3D **or** SPAR3D only | Both `commercial_threshold`; **never** TRELLIS here |
+| Asset needs visible back face (e.g. character figurine) | TRELLIS.2 or TRELLIS (v1), or multi-view (Flow 9, v0.4) | SF3D hallucinates the back |
+| Final asset for **commercial** release, best geometry+texture, time not critical | TRELLIS.2 | `commercial_safe`; real PBR; slow |
+| Final asset for **commercial** release, speed matters | SF3D **or** SPAR3D | Both `commercial_threshold`; fast; **never TRELLIS (v1)** here |
 
 ‡ Note SF3D is technically `commercial_threshold`, the same as SPAR3D — but it&#x27;s the documented default so the threshold disclosure is implicit. Be explicit when picking ANYTHING else.
 
 When you deviate from SF3D, state the bucket and the reason in
-conversation. Example:
+conversation. Examples:
 
-&gt; &quot;This is a character with fine detail — I&#x27;d recommend TRELLIS for
-&gt; better topology. License bucket `non_commercial`, which means this
-&gt; asset can&#x27;t ship in Grithkin or GripCraft commercially. Want me to
-&gt; proceed with TRELLIS, or use SF3D (commercial-safe but noisier topology)?&quot;
+&gt; &quot;This is a character with fine detail and needs to ship commercially —
+&gt; I&#x27;d recommend TRELLIS.2 for better topology and real PBR textures.
+&gt; License bucket `commercial_safe`, so no restriction there, but it&#x27;s
+&gt; the slowest generator (~5–6 minutes vs SF3D&#x27;s ~15 seconds). Want me
+&gt; to proceed with TRELLIS.2, or use SF3D (faster, noisier topology)?&quot;
+
+&gt; &quot;This is a character with fine detail, for a personal project — I&#x27;d
+&gt; recommend TRELLIS (v1) for better topology. License bucket
+&gt; `non_commercial`, which means this asset can&#x27;t ship in Grithkin or
+&gt; GripCraft commercially. Want me to proceed with TRELLIS (v1), use the
+&gt; slower but commercial-safe TRELLIS.2 instead, or use SF3D
+&gt; (commercial-safe but noisier topology)?&quot;
 
 If unclear, ask one short question to disambiguate intent.
 
