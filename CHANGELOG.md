@@ -27,6 +27,13 @@ keeps using the endpoint.
   `VLM_ENV: unbound variable` under `set -u` (v0.6.1 missed the
   invocation call site when switching to `judge_python()`) — found by
   the same live run, fixed in PR #22.
+- Packaging: v0.6.1 shipped `prompt_doctor.py` without registering it
+  in `tools/_embed_lib.py::EMBEDS`, so setup guides carried no install
+  block for it and `--auto-retry` degraded to "doctor unavailable" on
+  installed pipelines — found by a forced-failure live test (mock
+  rejecting judge + real doctor + real generation, which then verified
+  the full retry loop: reject → rewrite → regenerate once → loop guard
+  holds). Both guides now embed it.
 
 ## 2026-08-12 — v0.6.1: concept doctor (`concept.sh --auto-retry`)
 
