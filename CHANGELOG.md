@@ -2,6 +2,75 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-11 — R1.1: scorer stack refresh (item 16)
+
+- `scripts/clip_score.py` — new `--scorer {clip,siglip2}` flag, default
+  `siglip2` (Apache 2.0; commercial_safe), replacing OpenCLIP ViT-L/14 as
+  the default prompt-adherence scorer per arXiv:2606.18451. CLIP path kept
+  for back-compat via `--scorer clip`. `clip.scorer` is a new sibling field
+  in the `clip` meta.json section; `clip.model` now reports the actual
+  model ID used.
+- `scripts/preference_score.py` (new) — ImageReward (Apache 2.0;
+  commercial_safe) human-preference scoring. Writes `clip.image_reward` +
+  `clip.image_reward_model`. Includes a `transformers.modeling_utils`
+  compat shim: ImageReward's vendored BLIP/BERT code imports three
+  pruning-related helpers that modern `transformers` relocated or removed
+  outright; the shim re-adds them so SigLIP 2 (needs recent `transformers`)
+  and ImageReward (needs the old API surface) can share one
+  `pipeline-tools-env` venv instead of forking it.
+- `scripts/dedup_variants.py` (new) — DreamSim (MIT; commercial_safe)
+  perceptual near-duplicate detection across `-n N` concept variants.
+  Union-find groups pairs below a distance threshold (default 0.15).
+  Writes `clip.dreamsim_dupes` + `clip.dreamsim_threshold`.
+- `scripts/calibrate_clip.py` — `--scorer {clip,siglip2}` flag; calibration
+  bands are now nested `calibration[scorer][model_name]` in
+  `scripts/clip_calibration.json` (was flat `calibration[model_name]`).
+  Also fixes a real pre-existing bug in `_score_one`: it parsed
+  `clip_score.py --json`'s output by taking the last stdout line, but that
+  output is pretty-printed (`indent=2`) across multiple lines — the last
+  line is just `}`, so every calibration run silently scored 0 samples and
+  fell back to `skipped_too_few_samples`. Now parses from the first `{`
+  onward. Verified with a live 2-sample SigLIP 2 run (see PR).
+- `scripts/clip_calibration.json` — restructured to
+  `{"siglip2": {...}, "clip": {...}}`. SigLIP 2 bands are a small-sample
+  bootstrap (n=5 real fixtures scored 2026-08-11), not a full percentile
+  calibration; run `calibrate_clip.py --scorer siglip2` once real
+  generation history accumulates.
+- `scripts/_pipeline_lib.sh` — `license_bucket_for_model` gains `siglip2`,
+  `imagereward`, `dreamsim` → `commercial_safe`.
+- `scripts/meta_schema.json` — `clip` section gains `scorer`,
+  `image_reward`, `image_reward_model`, `dreamsim_dupes`,
+  `dreamsim_threshold` (additive; `additionalProperties: true` already
+  allowed this, added for documentation/validation clarity).
+- `scripts/concept.sh` — after generation, also runs
+  `preference_score.py` (top-ranked variant) and, when `-n N > 1`,
+  `dedup_variants.py` across all variants. Both no-op gracefully if
+  `pipeline-tools-env` or the script isn't installed, matching the
+  existing CLIP-scoring pattern.
+- `docs/asset-pipeline-guide.html` + `-studio.html` — `pipeline-tools-env`
+  install steps updated with the full working recipe: pin
+  `transformers==4.57.6` (newest release with both SigLIP 2 support and
+  the API surface ImageReward's vendored BLIP code needs), `dreamsim`,
+  `image-reward --no-build-isolation` (its `setup.py` needs `pkg_resources`
+  at build time without declaring `setuptools` as a build dep — same class
+  of issue as SF3D's `texture_baker`), `git+https://github.com/openai/CLIP.git`
+  (an undeclared runtime dependency of `image-reward`), and a `timm`
+  re-pin (`image-reward`'s install downgrades it below what
+  `open_clip_torch` needs; verified the newer `timm` still works for
+  `image-reward` despite its conservative pin). Verify step updated to
+  test `ImageReward` through the compat shim, not a bare import — a bare
+  import fails even on the pinned `transformers` version.
+- `skill/SKILL.md` — translation table: CLIP rows replaced with SigLIP
+  equivalents; new rows for `image_reward` and `dreamsim_dupes`. Pre-flight
+  section notes `--warm-cache` doesn't yet cover ImageReward/DreamSim
+  weights (out of scope for this item; they download on first real use).
+- Real evidence this round: SigLIP 2 discriminates prompt/subject match
+  strongly (0.165 own-prompt vs -0.105 mismatched-prompt, stable across 3
+  runs) but — like CLIP — is weak on compositional violations (view angle,
+  clutter) at the raw-embedding level, consistent with why item 17's VLM
+  judge exists as a complementary signal rather than a CLIP-family
+  replacement.
+
 ## 2026-08-11 — heartbeat race fix + post-squash repo hygiene
 
 - `scripts/_heartbeat.py` — `write()` timeout path now returns a fresh

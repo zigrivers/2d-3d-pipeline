@@ -76,7 +76,7 @@ def _extract_pair(entry: dict) -> tuple[str, str, str] | None:
     return generator, str(cp), prompt
 
 
-def _score_one(image_path: str, prompt: str, model_name: str) -> float | None:
+def _score_one(image_path: str, prompt: str, model_name: str, scorer: str) -> float | None:
     """Run clip_score.py once, return raw similarity. None on failure."""
     if not CLIP_SCORE.exists():
         return None
@@ -89,13 +89,19 @@ def _score_one(image_path: str, prompt: str, model_name: str) -> float | None:
              "--image", image_path,
              "--meta", meta_path,
              "--model-name", model_name,
+             "--scorer", scorer,
              "--json"],
             capture_output=True, text=True, timeout=120,
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             return None
-        last = cp.stdout.strip().splitlines()[-1]
-        data = json.loads(last)
+        # clip_score.py --json pretty-prints (indent=2), so the JSON object
+        # spans multiple lines. Its own stdout may also carry a leading
+        # "[meta_helper] merged ..." status line ahead of the object.
+        # Take everything from the first "{" onward.
+        stdout = cp.stdout
+        start = stdout.index("{")
+        data = json.loads(stdout[start:])
         return float(data.get("similarity"))
     except Exception:
         return None
@@ -116,6 +122,8 @@ def main() -> int:
                    help="Models with fewer than N scored samples are left untouched")
     p.add_argument("--dry-run", action="store_true",
                    help="Compute + report but don't write")
+    p.add_argument("--scorer", choices=["clip", "siglip2"], default="siglip2",
+                   help="Which scorer's bands to (re)calibrate (default: siglip2)")
     p.add_argument("--json", action="store_true",
                    help="Emit JSON summary on stdout")
     args = p.parse_args()
@@ -150,12 +158,14 @@ def main() -> int:
     for model_name, pairs in pairs_by_model.items():
         scores: list[float] = []
         for img, prompt in pairs:
-            s = _score_one(img, prompt, model_name)
+            s = _score_one(img, prompt, model_name, args.scorer)
             if s is not None:
                 scores.append(s)
         scores_by_model[model_name] = scores
 
-    # Load existing calibration so we can keep models we didn't recalibrate.
+    # Load existing calibration so we can keep models/scorers we didn't
+    # recalibrate. Nested by scorer since v0.3.5 (item 16) — bands live at
+    # calibration[scorer][model_name].
     out_path = Path(os.path.expanduser(args.out))
     existing = {}
     if out_path.exists():
@@ -169,7 +179,9 @@ def main() -> int:
         "at": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "manifest": str(manifest_path),
         "min_samples": args.min_samples,
+        "scorer": args.scorer,
     }
+    scorer_bands = dict(new_calibration.get(args.scorer) or {})
 
     summary: list[dict] = []
     for model_name, scores in scores_by_model.items():
@@ -187,8 +199,9 @@ def main() -> int:
             "p10": round(_percentile(scores, 10), 4),
             "n_samples": len(scores),
         }
-        new_calibration[model_name] = bands
+        scorer_bands[model_name] = bands
         summary.append({"model": model_name, "scored": len(scores), "status": "updated", "bands": bands})
+    new_calibration[args.scorer] = scorer_bands
 
     if not args.dry_run:
         out_path.write_text(json.dumps(new_calibration, indent=2, sort_keys=True) + "\n")
