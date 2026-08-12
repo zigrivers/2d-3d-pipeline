@@ -2,6 +2,99 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — R2.3: paint retarget (item 19)
+
+- `scripts/texture.sh --mode paint` retargeted from item 7's original
+  CUDA-only Hunyuan3D-Paint design to
+  [`dgrauet/Hunyuan3D-2.1-mlx`](https://github.com/dgrauet/Hunyuan3D-2.1-mlx)
+  (Apple Silicon MLX port; upstream needs CUDA
+  `custom_rasterizer`/`differentiable_renderer`, unavailable on Mac).
+  Pinned commit `5fe21945b790fbb7fb28c510e89babd7b9feabe6` per
+  principle P-B. Bucket unchanged: `commercial_threshold`.
+- New `--image PATH` flag (required in paint mode) — the port's
+  pipeline needs a reference image for its multiview diffusion pass,
+  not just mesh geometry.
+- New `scripts/hunyuan_paint_run.py` — thin CLI driver around
+  `Hunyuan3DPaintPipelineMLX`, mirroring the exact call shape verified
+  in the R0.2 spike. Confirmed live on the Studio, twice: the port's
+  own bundled fixture (22,447 vertices, 269.6s wall clock, matching
+  R0.2) and a real generate.sh SF3D output (121s, real distinct
+  albedo + metallic-roughness maps where none existed before).
+- **Refusal path, verified live against a real TRELLIS.2 output:**
+  `texture.sh --mode paint` now runs `texture_quality_check.py` live
+  (not a possibly-stale meta.json field) and refuses with
+  `status=error error=already_textured` when the input already has a
+  real baked metallic-roughness map. Deliberately narrower than a
+  blanket "any existing texture" check — a canned SF3D GLB has
+  albedo+normal but bakes metallic/roughness as flat material
+  factors, not textures, so painting it is still correct and adds a
+  genuinely new MR map; a TRELLIS.2 output's real PBR bake
+  (`albedo, roughness, metallic`) is correctly refused instead.
+  Confirmed both directions live: SF3D input painted successfully,
+  TRELLIS.2 input refused with the expected JSON + clear stderr
+  explanation.
+- Item 7's original regression tests re-verified live:
+  `--mode inspect` and `--mode upscale` unchanged (upscale correctly
+  fails `not_installed` — no `real-esrgan-ncnn-vulkan` on this Studio,
+  same as before this PR).
+- **Real pre-existing bug found and fixed:** `texture.sh`'s paint-mode
+  extension check used `${VAR,,}` (bash 4+ lowercase parameter
+  expansion), which crashes with `bad substitution` under macOS's
+  system `/bin/bash` (3.2, what `env bash` resolves to without
+  Homebrew bash on PATH) — confirmed live, this code path had
+  apparently never been exercised before this PR. Fixed with a
+  portable case-insensitive glob (`*.[Gg][Ll][Bb]`); no other script
+  in the repo used the `,,` pattern.
+- `generation.model_role: "paint"` and `generation.texture_backend:
+  "hunyuan3d-paint"` now actually written to the painted output's
+  meta.json (per item 7's original spec) — the pre-retarget stub
+  never wrote either field despite the spec requiring both;
+  `meta_helper.py validate` confirmed passing on a real output.
+- `scripts/hunyuan_paint_run.py` added to embeds (43 blocks now,
+  manually inserted per `CONVENTIONS.md`'s regenerate-can't-create-
+  new-blocks limitation — same pattern as R2.2).
+- `scripts/model_manifest.json` — `hunyuan3d-paint-env` venv path
+  corrected to the real installed location
+  (`~/3d-pipeline/hunyuan3d-paint-mlx/.venv`, was the old CUDA-era
+  `hunyuan3d-paint-env`), gains `pinned_commit` + `repo_path`.
+  `hunyuan3d-paint` model entry corrected to the real MLX weights
+  repo (`dgrauet/hunyuan3d-2.1-mlx`, was `tencent/Hunyuan3D-2` with a
+  nonexistent `hunyuan3d-paint.safetensors` filename); `requires_hf_auth`
+  corrected to `false`. Verified: `pipeline_doctor.py --check venvs
+  --include hunyuan3d-paint` shows the pinned-commit check passing
+  against the real installed repo; `--check disk` correctly sums the
+  corrected entries.
+- `scripts/_install_lib.py::_hunyuan_warm` — fixed to point at the
+  real venv path and to `snapshot_download` the whole repo when
+  `filename` is empty (the port downloads weights per-file on demand,
+  no single fixed filename covers "the model"), instead of a
+  `hf_hub_download` call that referenced a venv/filename combination
+  that no longer exists.
+- **License review addendum**
+  (`docs/license-review-hunyuan3d-paint.md`): corrects the original
+  2026-05-20 review's clause 2 ("does not contain region exclusions")
+  — the port's actual `LICENSE` file states verbatim "THIS LICENSE
+  AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED KINGDOM AND
+  SOUTH KOREA." Fine for Ken (US) and current distribution plans; flag
+  explicitly before any EU/UK/South Korea distribution decision.
+  Documents the Brainkeys MPS fork is a shape-only fallback, not a
+  paint fallback (its paint stage is limited/disabled) — the real
+  fallback if this port bit-rots is "paint unavailable, use
+  `--mode upscale`," not silently switching forks. Documents the
+  undocumented `pymeshlab` dependency (README's MLX-path quickstart
+  omits it; needed for the default `use_remesh=True` path).
+- `skill/SKILL.md` Flow 6 — paint subsection rewritten for the MLX
+  port: `--image` requirement, the metallic-roughness-based refusal
+  signal (elevated from soft routing guidance to a hard wrapper
+  check), region-exclusion warning, Brainkeys-not-a-fallback note.
+- Both setup guides — new "Hunyuan3D-Paint MLX port" install step
+  with the real, evidence-based install recipe (README's actual
+  MLX-path quickstart + the `pymeshlab` fix), pinned-commit warning,
+  region-exclusion and Brainkeys callouts.
+- `scripts/_pipeline_lib.sh` — `hunyuan3d-paint` bucket comment
+  updated to reference the MLX retarget and addendum (bucket value
+  itself, `commercial_threshold`, was already correct).
+
 ## 2026-08-12 — R2.2: edit lane (item 21)
 
 - New `scripts/edit.sh` — instruction-based concept editing and
