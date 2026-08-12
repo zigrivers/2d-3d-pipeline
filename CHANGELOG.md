@@ -2,6 +2,68 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — v0.6.1: concept doctor (`concept.sh --auto-retry`)
+
+With `--best-of N`, when the VLM judge rejects every variant, the new
+opt-in `--auto-retry` flag asks an LLM at an OpenAI-compatible endpoint
+(`$PIPELINE_PROMPT_DOCTOR_ENDPOINT`) to rewrite the prompt against the
+judge's lowest-scoring rubric dimensions, then reruns the generation
+once with the rewritten prompt. Directly targets the flat/front-view
+failure mode behind issue #19 at the concept stage.
+
+- `scripts/prompt_doctor.py` — stdlib-only; sends original prompt +
+  judge scores, asks for strict JSON back; picks the endpoint's served
+  model (the filesystem-path entry in /v1/models — models[0] on an
+  mlx_lm server can be any HF-cache entry) unless
+  `$PIPELINE_PROMPT_DOCTOR_MODEL` overrides; disables local thinking
+  models' hidden reasoning channel so the rewrite lands in `content`.
+  Any failure exits non-zero and the caller keeps the rejected winner —
+  behavior without the flag or endpoint is unchanged.
+- `scripts/concept.sh` — retry re-execs itself with the rewritten
+  prompt (`--no-game-prompt`, since the doctor rewrites the full
+  suffixed prompt), forwarding model/size/steps/quantize/json/project;
+  `PIPELINE_DOCTOR_RETRIED` guards against retry loops; under `--json`
+  the real stdout is restored before the re-exec so the retry's JSON
+  contract stays intact. Retried outputs get an `_retry` name suffix.
+- Tests: `tests/python/test_prompt_doctor.py` — 5 subprocess tests
+  against a stdlib mock chat server (request shape, served-model pick,
+  env overrides, unchanged-prompt rejection, unreachable endpoint).
+- Live evidence (2026-08-12): fed a real judge-rejection fixture
+  ("front only — blade nearly invisible" fantasy-sword scores) to a
+  local Qwen3.6-35B endpoint: rewrote to "fantasy sword, seen from a
+  3/4 angle showing the front and right side, ..." in 16.5 s.
+
+## 2026-08-12 — v0.6.1: optional remote judge endpoint
+
+`vlm_judge.py` gains `--endpoint URL` / `$PIPELINE_JUDGE_ENDPOINT`: when
+set, concept and mesh judging go to any OpenAI-compatible vision chat
+server instead of loading Qwen3-VL in-process. Generic, opt-in wiring —
+with the env var unset, nothing changes anywhere.
+
+- `scripts/vlm_judge.py` — remote path is stdlib-only (`urllib`), sends
+  the same rubric at temperature 0 with images as base64 data URLs, and
+  parses identically; scores verified byte-identical to the in-process
+  path on a real fixture (every dimension including `visible_faces`).
+  A 5s reachability probe runs before any scoring; an unreachable
+  endpoint warns and falls back in-process — never mid-rank, so one
+  ranking never mixes two judges. meta.json's `judge` section records
+  the `endpoint` used (schema already allows extra keys).
+- `scripts/_pipeline_lib.sh` — new `judge_python()`: picks the vlm-env
+  interpreter when installed, else plain `python3` when an endpoint is
+  set (the remote path needs no mlx-vlm). `concept.sh` and `generate.sh`
+  gate on it instead of hard-requiring vlm-env.
+- `benchmark.sh`/`model_bakeoff.py` need no changes: the env var reaches
+  vlm_judge.py through normal subprocess inheritance (verified live).
+- Tests: `tests/python/test_vlm_judge_endpoint.py` — 5 subprocess tests
+  against a stdlib mock server (request shape, data-URL round-trip,
+  one-call-per-image de-biasing preserved under --rank, env-var pickup,
+  graceful fallback). Runs without mlx-vlm installed — itself part of
+  the contract.
+- Live evidence (2026-08-12): `concept.sh "wooden supply crate"
+  --best-of 2` judged both variants remotely, winner's meta.json carries
+  the endpoint; measured ~18-19s per fresh judge call against a busy
+  server, ~2.6s with the server's vision cache warm.
+
 ## 2026-08-12 — v0.6.0: 2026-08 generation-quality refresh (items 15–25)
 
 Full round of `docs/spec-generation-refresh-2026.md`, shipped as one

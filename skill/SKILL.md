@@ -339,6 +339,26 @@ a few seconds per image after the model is loaded once.
 already happy with; `vlm-env` not installed and the user wants to
 generate right now (offer it as a follow-up instead).
 
+**Concept doctor (v0.6.1, `--auto-retry`).** With `--best-of N`, if the
+judge rejects every variant (all below the floor), `--auto-retry` sends
+the prompt plus the judge's scores to an OpenAI-compatible chat endpoint
+(`$PIPELINE_PROMPT_DOCTOR_ENDPOINT`) which rewrites the prompt to target
+the lowest-scoring dimensions (most commonly forcing a real 3/4 view),
+then regenerates once with the rewritten prompt. Opt-in twice over: the
+flag AND the endpoint must both be present, and a retry never retries
+again. If the doctor endpoint is unset or fails, the run keeps the
+rejected winner exactly as before.
+
+**Remote judge endpoint (v0.6.1).** If `PIPELINE_JUDGE_ENDPOINT` is set
+(or `vlm_judge.py --endpoint URL`), judge calls go to an OpenAI-compatible
+vision chat server (e.g. `mlx_vlm server` on another machine) instead of
+loading the model in-process — same rubric, temperature-0 sampling, and
+scoring. With an endpoint set, `vlm-env` isn't required at all; an
+unreachable endpoint warns and falls back to the in-process path. This is
+generic wiring: nothing in the pipeline assumes any particular server
+exists, and with the env var unset nothing changes. All wrappers
+(`concept.sh`, `generate.sh`, `benchmark.sh`) inherit it automatically.
+
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
 When the user needs **identity-locked** generations across multiple
