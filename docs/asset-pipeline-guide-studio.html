@@ -1319,6 +1319,15 @@ footer .signature { color: var(--peach); }
 <span class="tk-prompt">$ </span>pip install --upgrade pip
 <span class="tk-prompt">$ </span>pip install mflux
 <span class="tk-prompt">$ </span>deactivate</pre></div>
+          <div class="callout callout-info">
+            <div class="callout-label">Already have mflux installed? Check the version (item 20)</div>
+            <p>FLUX.2 klein and ERNIE-Image (below) need <strong>mflux ≥ 0.18</strong>. An older install parses the model name fine but fails deep inside model loading — not at an obvious version-check point. If you set this venv up before 2026-08, upgrade explicitly:</p>
+            <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/mflux-env/bin/activate
+<span class="tk-prompt">$ </span>pip show mflux | grep Version
+<span class="tk-prompt">$ </span>pip install --upgrade mflux
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+            <p><code>pipeline_doctor.py --check venvs</code> also catches this and prints the same upgrade command.</p>
+          </div>
         </div>
       </div>
 
@@ -1359,6 +1368,30 @@ footer .signature { color: var(--peach); }
 <span class="tk-prompt">$ </span>deactivate</pre></div>
           <p style="margin-top: 16px; font-size: 14px; color: var(--subtext0);">Open the result:</p>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>open /tmp/test_flux.png</pre></div>
+        </div>
+      </div>
+
+      <div class="step" data-step="mflux-flux2-klein">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Optional: FLUX.2 klein 4B (item 20)</h3>
+          <p>Apache 2.0, <code>commercial_safe</code>, already available in this venv once mflux is &ge;&nbsp;0.18 (see the callout above). Adds built-in instruction editing and FLUX-ecosystem LoRA support in one checkpoint &mdash; a better default LoRA path than FLUX.1 schnell going forward. Note the dedicated command below: <code>mflux-generate</code> itself refuses FLUX.2 Klein (&quot;Use mflux-generate-flux2 instead&quot;) &mdash; confirmed live.</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/mflux-env/bin/activate
+<span class="tk-prompt">$ </span>mflux-generate-flux2 \
+    --prompt <span class="tk-str">"a stylized treasure chest"</span> \
+    --model flux2-klein-4b --steps 20 --seed 42 \
+    -q 8 \
+    --output /tmp/test_flux2klein.png
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+          <p>First run downloads its own weights (~2 minutes on this Studio). Usable through <code>concept.sh -m flux2-klein</code> once verified.</p>
+          <div class="callout callout-warn">
+            <div class="callout-label">Don't substitute the 9B/dev klein variants</div>
+            <p><code>flux2-klein-4B</code> is the Apache 2.0 exception in the FLUX.2 family &mdash; the 9B and dev variants are BFL non-commercial, same restriction as FLUX.1 dev. <code>concept.sh -m flux2-klein</code> is hardcoded to the 4B checkpoint for this reason; don't repoint it without a fresh license review.</p>
+          </div>
+          <div class="callout callout-gotcha">
+            <div class="callout-label">ERNIE-Image is wired but currently broken &mdash; don't bother testing it</div>
+            <p>The spec also called for ERNIE-Image (item 20). It's wired into <code>concept.sh -m ernie-image</code>, but as of mflux 0.18.1 (the latest release at time of writing) it fails on <em>every</em> attempt: <code>FileNotFoundError: No safetensors files found in .../text_encoder_2</code>. Confirmed live against both <code>baidu/ERNIE-Image</code> and <code>baidu/ERNIE-Image-Turbo</code> &mdash; neither repo's actual current Hugging Face file layout has a <code>text_encoder_2</code> folder at all, so this is an upstream mflux/HF-repo mismatch, not a pipeline bug. Check <code>pip index versions mflux</code> for a release past 0.18.1 before trying <code>-m ernie-image</code> again.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -1719,6 +1752,11 @@ iso_now() {
 license_bucket_for_model() {
     case &quot;$1&quot; in
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
+        # Item 20 (2026-08): FLUX.2 klein 4B is the Apache 2.0 exception in
+        # the FLUX.2 family (9B/dev variants are BFL non-commercial — never
+        # add those here without a fresh license review). ERNIE-Image 8B
+        # is Apache 2.0 from baidu/ernie-image.
+        flux2-klein|ernie-image)       echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
         # TRELLIS.2 (item 15, 2026-08): distinct from the legacy `trellis`
@@ -2049,7 +2087,13 @@ Project context:
                            Falls back to ~/3d-pipeline/workspace/
 
 Generation options:
-  -m, --model NAME         z-image-turbo (default) | flux-schnell | flux-dev
+  -m, --model NAME         z-image-turbo (default) | flux-schnell | flux-dev |
+                           flux2-klein | ernie-image
+                           flux2-klein (item 20): Apache 2.0, FLUX-ecosystem
+                           LoRA + built-in instruction editing in one
+                           checkpoint. ernie-image (item 20): Apache 2.0,
+                           strongest-at-release open t2i for prompt
+                           adherence. Both commercial_safe.
   -w, --width N            Width in pixels (default: 1024)
   -H, --height N           Height in pixels (default: 1024)
   -s, --steps N            Inference steps (default per model: 9 / 4 / 30)
@@ -2137,13 +2181,30 @@ fi
 
 # Validate model
 case &quot;$MODEL&quot; in
-    z-image-turbo|flux-schnell|flux-dev) ;;
-    *) echo &quot;ERROR: model must be z-image-turbo, flux-schnell, or flux-dev&quot; &gt;&amp;2; exit 1 ;;
+    z-image-turbo|flux-schnell|flux-dev|flux2-klein|ernie-image) ;;
+    *) echo &quot;ERROR: model must be z-image-turbo, flux-schnell, flux-dev, flux2-klein, or ernie-image&quot; &gt;&amp;2; exit 1 ;;
 esac
 case &quot;$QUANTIZE&quot; in 4|8) ;; *) echo &quot;ERROR: -q must be 4 or 8&quot; &gt;&amp;2; exit 1 ;; esac
-if [[ -n &quot;$LORA_PATH&quot; &amp;&amp; &quot;$MODEL&quot; == &quot;z-image-turbo&quot; ]]; then
-    echo &quot;WARNING: LoRA support is FLUX-only; ignoring for Z-Image&quot; &gt;&amp;2
-    LORA_PATH=&quot;&quot;
+if [[ -n &quot;$LORA_PATH&quot; ]]; then
+    case &quot;$MODEL&quot; in
+        z-image-turbo)
+            echo &quot;WARNING: LoRA support is FLUX-only; ignoring for Z-Image&quot; &gt;&amp;2
+            LORA_PATH=&quot;&quot;
+            ;;
+        flux2-klein|ernie-image)
+            # Item 20/21: FLUX.1 LoRAs (trained for flux-schnell/flux-dev)
+            # are a different checkpoint architecture than FLUX.2 klein or
+            # ERNIE-Image — loading one against the wrong model family
+            # fails deep inside mflux with a confusing tensor-shape error,
+            # or silently degrades output. Fail fast with a clear message
+            # instead of forwarding the mismatch.
+            echo &quot;ERROR: --lora points at a FLUX.1-era LoRA path, but -m $MODEL is a&quot; &gt;&amp;2
+            echo &quot;       different model family. FLUX.1 LoRAs (trained for flux-schnell&quot; &gt;&amp;2
+            echo &quot;       or flux-dev) are not compatible with $MODEL. Pick a LoRA trained&quot; &gt;&amp;2
+            echo &quot;       for $MODEL, or switch to -m flux-dev.&quot; &gt;&amp;2
+            exit 1
+            ;;
+    esac
 fi
 
 # Default steps per model
@@ -2152,6 +2213,8 @@ if [[ -z &quot;$STEPS&quot; ]]; then
         z-image-turbo) STEPS=9 ;;
         flux-schnell)  STEPS=4 ;;
         flux-dev)      STEPS=30 ;;
+        flux2-klein)   STEPS=20 ;;
+        ernie-image)   STEPS=20 ;;
     esac
 fi
 
@@ -2293,6 +2356,29 @@ for i in $(seq 1 &quot;$COUNT&quot;); do
                     -q &quot;$QUANTIZE&quot; \
                     --output &quot;$OUT_PATH&quot; \
                     &quot;${LORA_ARGS[@]}&quot;
+                ;;
+            flux2-klein)
+                # Item 20. flux2-klein-4b is the Apache 2.0 exception in the
+                # FLUX.2 family (klein 9B/dev are BFL non-commercial) — do
+                # not change this to a 9B variant without a license re-check.
+                # mflux-generate itself refuses FLUX.2 Klein (&quot;Use
+                # mflux-generate-flux2 instead&quot;) — confirmed live.
+                mflux-generate-flux2 \
+                    --prompt &quot;$FINAL_PROMPT&quot; \
+                    --model flux2-klein-4b \
+                    --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
+                    --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
+                    -q &quot;$QUANTIZE&quot; \
+                    --output &quot;$OUT_PATH&quot;
+                ;;
+            ernie-image)
+                mflux-generate \
+                    --prompt &quot;$FINAL_PROMPT&quot; \
+                    --model ernie-image \
+                    --width &quot;$WIDTH&quot; --height &quot;$HEIGHT&quot; \
+                    --steps &quot;$STEPS&quot; --seed &quot;$ITER_SEED&quot; \
+                    -q &quot;$QUANTIZE&quot; \
+                    --output &quot;$OUT_PATH&quot;
                 ;;
         esac
     fi
@@ -6969,6 +7055,34 @@ def _check_pinned_commit(repo_path: Path, expected_commit: str) -&gt; dict:
     return {&quot;status&quot;: &quot;ok&quot;}
 
 
+def _check_min_package_version(venv_path: Path, package: str, min_version: str) -&gt; dict:
+    &quot;&quot;&quot;Item 20: mflux &lt;0.18 silently lacks flux2-klein/ernie-image support —
+    the model names parse but mflux errors deep inside model loading rather
+    than at the point a user would think to check a version number. This
+    check surfaces that before dispatch, with an upgrade hint.&quot;&quot;&quot;
+    pip = venv_path / &quot;bin&quot; / &quot;pip&quot;
+    if not pip.exists():
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: &quot;venv-missing&quot;, &quot;path&quot;: str(venv_path)}
+    try:
+        result = subprocess.run(
+            [str(pip), &quot;show&quot;, package],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+    except Exception as e:
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: f&quot;pip-show-failed: {e}&quot;}
+    version = None
+    for line in result.stdout.splitlines():
+        if line.lower().startswith(&quot;version:&quot;):
+            version = line.split(&quot;:&quot;, 1)[1].strip()
+            break
+    if version is None:
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: f&quot;{package}-not-installed&quot;}
+    if _version_tuple(version) &lt; _version_tuple(min_version):
+        return {&quot;status&quot;: &quot;drift&quot;, &quot;reason&quot;: &quot;version-too-old&quot;,
+                &quot;actual_version&quot;: version, &quot;min_version&quot;: min_version}
+    return {&quot;status&quot;: &quot;ok&quot;, &quot;actual_version&quot;: version}
+
+
 def check_venv(venv: dict) -&gt; dict:
     name = venv[&quot;name&quot;]
     path = _expand(venv[&quot;path&quot;])
@@ -6981,6 +7095,14 @@ def check_venv(venv: dict) -&gt; dict:
         if commit_check[&quot;status&quot;] != &quot;ok&quot;:
             return {&quot;status&quot;: &quot;drift&quot;, &quot;name&quot;: name, **commit_check,
                     &quot;fix_command&quot;: f&quot;cd {repo_path} &amp;&amp; git checkout {pinned_commit}&quot;}
+
+    min_pkg = venv.get(&quot;min_package_version&quot;)
+    if min_pkg:
+        pkg_check = _check_min_package_version(path, min_pkg[&quot;package&quot;], min_pkg[&quot;version&quot;])
+        if pkg_check[&quot;status&quot;] != &quot;ok&quot;:
+            return {&quot;status&quot;: &quot;drift&quot;, &quot;name&quot;: name, **pkg_check,
+                    &quot;fix_command&quot;: f&quot;source {path}/bin/activate &amp;&amp; &quot;
+                                    f&quot;pip install --upgrade {min_pkg[&#x27;package&#x27;]}&quot;}
 
     if not lockfile.exists() or not lockfile.read_text().strip():
         return {&quot;status&quot;: &quot;skipped&quot;, &quot;name&quot;: name,
@@ -8332,9 +8454,10 @@ PIPELINE_EOF</pre></div>
       &quot;required&quot;: true,
       &quot;feature_set&quot;: &quot;tier1&quot;,
       &quot;size_gb&quot;: 8,
-      &quot;purpose&quot;: &quot;2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)&quot;,
+      &quot;purpose&quot;: &quot;2D generation (Z-Image Turbo / FLUX schnell / FLUX dev / FLUX.2 klein / ERNIE-Image)&quot;,
       &quot;python_version&quot;: &quot;3.12&quot;,
-      &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;,
+      &quot;min_package_version&quot;: { &quot;package&quot;: &quot;mflux&quot;, &quot;version&quot;: &quot;0.18&quot; }
     },
     {
       &quot;name&quot;: &quot;pipeline-tools-env&quot;,
@@ -13310,7 +13433,7 @@ don&#x27;t have to pre-check.
 
 - `engine`: `&quot;unity&quot; | &quot;unreal&quot; | &quot;none&quot;` — overrides auto-detection
 - `engine_path`: relative-to-project or absolute path for final GLB staging
-- `defaults.generator_2d`: `&quot;z-image-turbo&quot; | &quot;flux-schnell&quot; | &quot;flux-dev&quot; | &quot;qwen-image&quot;`
+- `defaults.generator_2d`: `&quot;z-image-turbo&quot; | &quot;flux-schnell&quot; | &quot;flux-dev&quot; | &quot;flux2-klein&quot; | &quot;ernie-image&quot; | &quot;qwen-image&quot;`
 - `defaults.generator_3d`: `&quot;sf3d&quot; | &quot;spar3d&quot; | &quot;trellis&quot; | &quot;trellis2&quot;`
 - `defaults.polycount`: integer
 - `defaults.texture_resolution`: integer
@@ -13372,9 +13495,45 @@ routed to stderr so they don&#x27;t corrupt the result.
 ## Flow 1: Text → 2D image
 
 Use `concept.sh` with the user&#x27;s prompt. Default model is Z-Image Turbo
-(commercial_safe, ~10-30s). Use `flux-schnell` only when a LoRA is needed;
-use `flux-dev` only if user accepts non-commercial output (mention the
-bucket).
+(commercial_safe, ~10-30s) — this default is unchanged by item 20; don&#x27;t
+switch it silently (principle P-A).
+
+| Situation | Model | Why |
+|---|---|---|
+| Default | `z-image-turbo` | Fast, `commercial_safe`, good general quality |
+| A FLUX-ecosystem LoRA is needed, or built-in instruction editing | `flux2-klein` (item 20) | Same checkpoint does generation + instruction edits; `commercial_safe` (Apache 2.0 — the FLUX.2 family&#x27;s permissive exception; 9B/dev variants are NOT, don&#x27;t substitute those) |
+| A FLUX.1-era LoRA specifically is needed (legacy) | `flux-schnell` | `commercial_safe`; kept working, no longer the recommended LoRA path — prefer `flux2-klein` for new LoRA work |
+| Prompt adherence is weak / 3/4-view compliance keeps failing on Z-Image | ~~`ernie-image`~~ **currently broken, see below** | Would be the strongest-at-release open t2i for prompt adherence; wired but non-functional pending an upstream fix |
+| User accepts non-commercial output | `flux-dev` | Mention the `non_commercial` bucket explicitly |
+
+**Z-Image Turbo&#x27;s known weakness**: subjects tend to face the camera
+head-on rather than at a 3/4 angle, even with the game-asset prompt
+suffix. The suffix + `--judge`/`--best-of` (item 17) compensate for most
+of this, but if a user keeps getting front-on results despite judge
+rejections, suggest retrying with `flux2-klein` rather than just
+re-rolling Z-Image seeds indefinitely — `ernie-image` would be the
+other retry option but is currently broken (see below), so don&#x27;t
+suggest it yet.
+
+**`ernie-image` is wired but currently non-functional** (verified live,
+2026-08-12): mflux 0.18.1 (the latest release) expects a `text_encoder_2`
+component that doesn&#x27;t exist in either `baidu/ERNIE-Image`&#x27;s or
+`baidu/ERNIE-Image-Turbo`&#x27;s actual current Hugging Face repo layout
+(confirmed by listing both repos directly) — both fail identically with
+`FileNotFoundError: No safetensors files found in .../text_encoder_2`.
+This is an upstream mflux/HF-repo mismatch, not a pipeline bug, and not
+fixable by re-wiring `concept.sh`. Don&#x27;t suggest `-m ernie-image` to a
+user until a newer mflux release fixes this — check `pip index versions
+mflux` for a release past 0.18.1 first. The dispatch code stays in
+place so no further wiring is needed once mflux does fix it.
+
+**LoRA + FLUX.2/ERNIE**: FLUX.1 LoRAs (trained for `flux-schnell` /
+`flux-dev`) are a different checkpoint architecture than `flux2-klein`
+or `ernie-image` and are not interchangeable — `concept.sh` errors out
+immediately with a message naming the mismatch rather than forwarding
+it into a confusing mflux crash. If a user wants LoRA output on the
+newer models, they need a LoRA actually trained for that model family;
+there isn&#x27;t a curated one in this pipeline yet.
 
 For variations, use `-n N`. For specific names, `-o NAME`. Default output
 is in `&lt;project&gt;/assets/concept/` or `~/3d-pipeline/workspace/concept/`.

@@ -112,9 +112,10 @@
       "required": true,
       "feature_set": "tier1",
       "size_gb": 8,
-      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev)",
+      "purpose": "2D generation (Z-Image Turbo / FLUX schnell / FLUX dev / FLUX.2 klein / ERNIE-Image)",
       "python_version": "3.12",
-      "lockfile": "scripts/lockfiles/mflux-env.txt"
+      "lockfile": "scripts/lockfiles/mflux-env.txt",
+      "min_package_version": { "package": "mflux", "version": "0.18" }
     },
     {
       "name": "pipeline-tools-env",

@@ -273,6 +273,11 @@ iso_now() {
 license_bucket_for_model() {
     case "$1" in
         z-image-turbo|flux-schnell|qwen-image) echo commercial_safe ;;
+        # Item 20 (2026-08): FLUX.2 klein 4B is the Apache 2.0 exception in
+        # the FLUX.2 family (9B/dev variants are BFL non-commercial — never
+        # add those here without a fresh license review). ERNIE-Image 8B
+        # is Apache 2.0 from baidu/ernie-image.
+        flux2-klein|ernie-image)       echo commercial_safe ;;
         sf3d|spar3d)                            echo commercial_threshold ;;
         flux-dev|trellis)                       echo non_commercial ;;
         # TRELLIS.2 (item 15, 2026-08): distinct from the legacy `trellis`
