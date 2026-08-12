@@ -287,6 +287,15 @@ def main() -> int:
     args = p.parse_args()
 
     endpoint = args.endpoint.strip()
+    if endpoint and args.mode == "mesh":
+        # Multi-image judging over the served path is NOT score-equivalent to
+        # in-process: verified live 2026-08-12 — identical 8 turntable views
+        # scored 8/10 "consistent solid volume" in-process but 0/10 "hairline
+        # sliver" via mlx_vlm server's continuous-batching path. Single-image
+        # parity is verified identical, so only mesh mode falls back here.
+        print("[judge] mesh mode judges in-process (served multi-image path "
+              "is not score-equivalent; see CHANGELOG v0.6.2)", file=sys.stderr)
+        endpoint = ""
     if endpoint and not _endpoint_probe(endpoint):
         print(f"[judge] WARNING: endpoint {endpoint} unreachable — "
               "falling back to in-process mlx-vlm", file=sys.stderr)

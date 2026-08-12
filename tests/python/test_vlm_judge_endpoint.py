@@ -138,7 +138,11 @@ def test_image_mode_via_endpoint(tmp_path, png):
         server.stop()
 
 
-def test_mesh_mode_sends_all_views_in_one_call(tmp_path, png):
+def test_mesh_mode_ignores_endpoint_and_judges_in_process(tmp_path, png):
+    # Multi-image judging over the served path diverges from in-process
+    # (verified live 2026-08-12: same 8 views, 8/10 in-process vs 0/10 served),
+    # so mesh mode must never use the endpoint. In this mlx-vlm-less test env
+    # that means: no HTTP request, graceful no-op exit.
     views = []
     for i in range(3):
         v = tmp_path / f"view{i}.png"
@@ -151,12 +155,9 @@ def test_mesh_mode_sends_all_views_in_one_call(tmp_path, png):
         r = _run_judge(["--mode", "mesh", "--images", *views,
                         "--meta", str(meta), "--json",
                         "--endpoint", server.base])
-        assert r.returncode == 0, r.stderr
-        out = json.loads(r.stdout)
-        assert out["verdict"] == 8.0
-        assert len(server.requests) == 1
-        content = server.requests[0]["payload"]["messages"][0]["content"]
-        assert [c["type"] for c in content] == ["image_url"] * 3 + ["text"]
+        assert r.returncode == 0
+        assert server.requests == []
+        assert "in-process" in r.stderr
     finally:
         server.stop()
 
