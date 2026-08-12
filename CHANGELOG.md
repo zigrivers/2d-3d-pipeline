@@ -2,6 +2,32 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — v0.6.2: mesh judging never uses the remote endpoint
+
+Found by a live full-pipeline test the same day v0.6.1 shipped: the served
+multi-image path is **not score-equivalent** to in-process judging. The
+identical 8 turntable views of a real SF3D treasure chest scored 8/10
+("consistent solid volume in all views") in-process but 0/10 ("collapses
+to a hairline sliver in several views") through `mlx_vlm server`'s
+continuous-batching path — a catastrophic false rejection, confirmed
+wrong by inspecting the actual frames. Single-image parity remains
+verified byte-identical, so `--mode image` (the best-of-N hot path)
+keeps using the endpoint.
+
+- `scripts/vlm_judge.py` — `--mode mesh` now always judges in-process,
+  with a stderr note when an endpoint was set. No flag to override:
+  a judge that scores differently by transport is worse than a slower
+  judge.
+- Root cause not yet isolated (suspects: the server's batched prefill /
+  vision-cache handling of many near-identical images; its 8-view
+  request also prefilled only 3,909 prompt tokens where ~1,500 covers a
+  single view + rubric). Tracked for investigation in the server-setup
+  repo.
+- Also in this entry: `generate.sh --judge-mesh` crashed with
+  `VLM_ENV: unbound variable` under `set -u` (v0.6.1 missed the
+  invocation call site when switching to `judge_python()`) — found by
+  the same live run, fixed in PR #22.
+
 ## 2026-08-12 — v0.6.1: concept doctor (`concept.sh --auto-retry`)
 
 With `--best-of N`, when the VLM judge rejects every variant, the new

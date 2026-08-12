@@ -13386,6 +13386,15 @@ def main() -&gt; int:
     args = p.parse_args()
 
     endpoint = args.endpoint.strip()
+    if endpoint and args.mode == &quot;mesh&quot;:
+        # Multi-image judging over the served path is NOT score-equivalent to
+        # in-process: verified live 2026-08-12 — identical 8 turntable views
+        # scored 8/10 &quot;consistent solid volume&quot; in-process but 0/10 &quot;hairline
+        # sliver&quot; via mlx_vlm server&#x27;s continuous-batching path. Single-image
+        # parity is verified identical, so only mesh mode falls back here.
+        print(&quot;[judge] mesh mode judges in-process (served multi-image path &quot;
+              &quot;is not score-equivalent; see CHANGELOG v0.6.2)&quot;, file=sys.stderr)
+        endpoint = &quot;&quot;
     if endpoint and not _endpoint_probe(endpoint):
         print(f&quot;[judge] WARNING: endpoint {endpoint} unreachable — &quot;
               &quot;falling back to in-process mlx-vlm&quot;, file=sys.stderr)
@@ -15735,6 +15744,10 @@ unreachable endpoint warns and falls back to the in-process path. This is
 generic wiring: nothing in the pipeline assumes any particular server
 exists, and with the env var unset nothing changes. All wrappers
 (`concept.sh`, `generate.sh`, `benchmark.sh`) inherit it automatically.
+**Image mode only**: mesh judging (`--judge-mesh`) always runs
+in-process — the served multi-image path was measured to produce
+different (wrong) scores on identical inputs, so it is deliberately
+never used (v0.6.2).
 
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 

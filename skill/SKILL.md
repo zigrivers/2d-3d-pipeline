@@ -358,6 +358,10 @@ unreachable endpoint warns and falls back to the in-process path. This is
 generic wiring: nothing in the pipeline assumes any particular server
 exists, and with the env var unset nothing changes. All wrappers
 (`concept.sh`, `generate.sh`, `benchmark.sh`) inherit it automatically.
+**Image mode only**: mesh judging (`--judge-mesh`) always runs
+in-process — the served multi-image path was measured to produce
+different (wrong) scores on identical inputs, so it is deliberately
+never used (v0.6.2).
 
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
