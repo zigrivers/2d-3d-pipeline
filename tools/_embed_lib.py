@@ -73,6 +73,7 @@ EMBEDS: dict[str, str] = {
     "scripts/edit_drift_check.py":          "~/3d-pipeline/workspace/edit_drift_check.py",
     "scripts/hunyuan_paint_run.py":         "~/3d-pipeline/workspace/hunyuan_paint_run.py",
     "scripts/reuv_mesh.py":                 "~/3d-pipeline/workspace/reuv_mesh.py",
+    "scripts/pbr_pass.py":                  "~/3d-pipeline/workspace/pbr_pass.py",
 }
 
 EMBEDS_SCRIPTS: dict[str, str] = {

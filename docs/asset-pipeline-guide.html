@@ -1798,6 +1798,21 @@ license_bucket_for_model() {
         # only, never shipped in output assets, but bucketed per
         # cross-cutting principle 4 for consistency + auditability.
         siglip2|imagereward|dreamsim)           echo commercial_safe ;;
+        # Item 24 texture post (2026-08). SeedVR2 3B/7B: HF cards
+        # both state `license: apache-2.0` (gate G5, R0.6 spike) —
+        # stronger than the spec&#x27;s cautious unclear_risky-until-
+        # verified default. StableDelight: code + weights both
+        # apache-2.0 (verified directly, code repo LICENSE file +
+        # Stable-X/yoso-delight-v0-4-base HF card).
+        seedvr2|stabledelight)                  echo commercial_safe ;;
+        # Marigold-IID Appearance (gate G4, R0.6 spike): CreativeML
+        # OpenRAIL++-M — commercial use allowed, real but narrow
+        # behavioral-use restrictions (not a commercial-use/MAU gate).
+        # See docs/decision-marigold-bucket.md for the full call —
+        # mention the restriction inline whenever this pass is
+        # recommended, same convention as commercial_threshold&#x27;s MAU
+        # footnote.
+        marigold-iid)                           echo commercial_safe ;;
         &quot;&quot;)                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
@@ -4831,13 +4846,15 @@ chmod +x ~/3d-pipeline/workspace/model_bakeoff.py</pre></div>
 # Modes:
 #   inspect   Report stats about an input image, GLB, or texture folder.
 #             No filesystem changes.
-#   upscale   Run a 2x / 4x upscale via real-esrgan-ncnn-vulkan if installed.
-#             Fails clearly when the binary is missing — does NOT silently
-#             degrade to a different upscaler.
+#   upscale   Run a 2x / 4x upscale via --engine realesrgan (default) or
+#             seedvr2 (item 24: SeedVR2 3B/7B natively in mflux).
 #   paint     Paint PBR textures onto an existing GLB via Hunyuan3D-Paint
 #             (item 19: dgrauet/Hunyuan3D-2.1-mlx, Apple Silicon MLX port).
 #             License bucket commercial_threshold; see
 #             docs/license-review-hunyuan3d-paint.md. Requires --image.
+#   pbr       Item 24: albedo -&gt; StableDelight -&gt; Marigold-IID roughness +
+#             metallic decomposition, written into a new GLB. Refuses on a
+#             mesh that already has a real metallic-roughness map.
 
 set -euo pipefail
 
@@ -4852,6 +4869,8 @@ INPUT=&quot;&quot;
 OUTPUT=&quot;&quot;
 MODE=&quot;inspect&quot;
 SCALE=4
+ENGINE=&quot;realesrgan&quot;
+ESRGAN_BIN=&quot;&quot;
 IMAGE_ARG=&quot;&quot;
 ENGINE_STAGE=0
 JSON_MODE=0
@@ -4868,8 +4887,11 @@ Project context:
   --project PATH           Force a project root (skips auto-detection).
 
 Mode:
-      --mode MODE          inspect (default) | upscale | paint
+      --mode MODE          inspect (default) | upscale | paint | pbr
       --scale N            2 or 4 (default: 4) — used in upscale mode.
+      --engine NAME        realesrgan (default) | seedvr2 — used in
+                           upscale mode. seedvr2 runs natively in mflux
+                           (item 24; 3B on laptop tier, 7B on studio).
       --image PATH         Reference image for the multiview diffusion
                            pass — required in paint mode.
 
@@ -4890,6 +4912,14 @@ Apple Silicon port. License bucket commercial_threshold (Tencent Hunyuan
 Refuses to paint over a mesh that already has baked textures — use
 --mode upscale to improve an existing texture instead.
 
+PBR mode (item 24): albedo -&gt; StableDelight -&gt; Marigold-IID roughness +
+metallic decomposition. License bucket commercial_safe for both models
+(StableDelight: apache-2.0 code + weights; Marigold-IID: CreativeML
+OpenRAIL++-M, commercial use allowed with narrow behavioral-use
+restrictions — see docs/decision-marigold-bucket.md). Same refusal rule
+as paint mode: refuses on a mesh that already has a metallic-roughness
+map.
+
 Examples:
   # Quick inspection of a GLB
   $(basename &quot;$0&quot;) -i assets/clean/chest_clean.glb
@@ -4899,6 +4929,12 @@ Examples:
 
   # 4x upscale a concept image
   $(basename &quot;$0&quot;) -i assets/concept/chest.png --mode upscale --scale 4
+
+  # SeedVR2 upscale instead of Real-ESRGAN
+  $(basename &quot;$0&quot;) -i assets/concept/chest.png --mode upscale --engine seedvr2
+
+  # PBR pass on an SF3D output (adds roughness + metallic)
+  $(basename &quot;$0&quot;) -i assets/clean/chest_clean.glb --mode pbr
 
   # Paint a vertex-color-only TRELLIS output
   $(basename &quot;$0&quot;) -i assets/raw/chest_trellis.glb --mode paint \\
@@ -4913,6 +4949,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)       OUTPUT=&quot;$2&quot;;           shift 2 ;;
         --mode)            MODE=&quot;$2&quot;;             shift 2 ;;
         --scale)           SCALE=&quot;$2&quot;;            shift 2 ;;
+        --engine)          ENGINE=&quot;$2&quot;;           shift 2 ;;
         --image)           IMAGE_ARG=&quot;$2&quot;;        shift 2 ;;
         --engine-stage)    ENGINE_STAGE=1;        shift   ;;
         --json)            JSON_MODE=1;           shift   ;;
@@ -4923,11 +4960,14 @@ done
 
 [[ -z &quot;$INPUT&quot; ]] &amp;&amp; { echo &quot;ERROR: -i/--input is required&quot; &gt;&amp;2; usage; exit 1; }
 [[ -e &quot;$INPUT&quot; ]] || { echo &quot;ERROR: input does not exist: $INPUT&quot; &gt;&amp;2; exit 1; }
-case &quot;$MODE&quot;  in inspect|upscale|paint) ;;
-    *) echo &quot;ERROR: --mode must be inspect, upscale, or paint (got: $MODE)&quot; &gt;&amp;2; exit 1 ;;
+case &quot;$MODE&quot;  in inspect|upscale|paint|pbr) ;;
+    *) echo &quot;ERROR: --mode must be inspect, upscale, paint, or pbr (got: $MODE)&quot; &gt;&amp;2; exit 1 ;;
 esac
 case &quot;$SCALE&quot; in 2|4) ;;
     *) echo &quot;ERROR: --scale must be 2 or 4 (got: $SCALE)&quot; &gt;&amp;2; exit 1 ;;
+esac
+case &quot;$ENGINE&quot; in realesrgan|seedvr2) ;;
+    *) echo &quot;ERROR: --engine must be realesrgan or seedvr2 (got: $ENGINE)&quot; &gt;&amp;2; exit 1 ;;
 esac
 
 # Under --json: route subcommand stdout to stderr so the JSON line is alone.
@@ -5180,42 +5220,132 @@ print(&#x27;1&#x27; if (&#x27;metallic&#x27; in present or &#x27;roughness&#x27;
     exit 0
 fi
 
-# ---------- upscale mode ----------
-# Detect a real-esrgan-ncnn-vulkan binary. Different distributions name it
-# differently; check both common forms.
-ESRGAN_BIN=&quot;&quot;
-for candidate in real-esrgan-ncnn-vulkan realesrgan-ncnn-vulkan; do
-    if command -v &quot;$candidate&quot; &gt;/dev/null 2&gt;&amp;1; then
-        ESRGAN_BIN=&quot;$candidate&quot;
-        break
-    fi
-done
+# ---------- pbr mode (StableDelight -&gt; Marigold-IID, item 24) ----------
+# License buckets both commercial_safe: StableDelight (code + weights
+# apache-2.0, verified directly at implementation time) and Marigold-IID
+# (CreativeML OpenRAIL++-M, gate G4 -- see docs/decision-marigold-bucket.md).
+PBR_PASS_ENV=&quot;${PBR_PASS_ENV:-$PIPELINE_ROOT/pbr-pass-env}&quot;
 
-if [[ -z &quot;$ESRGAN_BIN&quot; ]]; then
-    err &quot;real-esrgan-ncnn-vulkan binary not found in PATH.&quot;
-    err &quot;  Install one of:&quot;
-    err &quot;    https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases&quot;
-    err &quot;    https://github.com/nihui/realesrgan-ncnn-vulkan/releases&quot;
-    err &quot;  Place the binary on your PATH as one of:&quot;
-    err &quot;    real-esrgan-ncnn-vulkan&quot;
-    err &quot;    realesrgan-ncnn-vulkan&quot;
+if [[ &quot;$MODE&quot; == &quot;pbr&quot; ]]; then
+    case &quot;$INPUT_ABS&quot; in
+        *.[Gg][Ll][Bb]|*.[Gg][Ll][Tt][Ff]) ;;
+        *)
+            err &quot;pbr mode requires a .glb or .gltf input (got: $INPUT_ABS)&quot;
+            if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+                json_mode_end
+                python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                    status=error stage=texture_pbr \
+                    error=unsupported_input tool=pbr-pass \
+                    license_bucket=commercial_safe \
+                    input=&quot;$INPUT_ABS&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                    machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+            fi
+            exit 2
+            ;;
+    esac
+
+    # Same refusal rule and mechanism as paint mode: refuse when a real
+    # metallic-roughness map already exists (TRELLIS.2 output, a prior
+    # paint pass) -- a PBR pass on an already-PBR mesh is redundant/wrong.
+    PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+    TEXQUAL_SCRIPT=&quot;$SCRIPT_DIR/texture_quality_check.py&quot;
+    [[ -f &quot;$TEXQUAL_SCRIPT&quot; ]] || TEXQUAL_SCRIPT=&quot;$PIPELINE_ROOT/workspace/texture_quality_check.py&quot;
+    INPUT_META_PATH=&quot;${INPUT_ABS}.meta.json&quot;
+    if [[ -f &quot;$TEXQUAL_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+        TEXQUAL_JSON=&quot;$(&quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$TEXQUAL_SCRIPT&quot; \
+            --input &quot;$INPUT_ABS&quot; --meta &quot;$INPUT_META_PATH&quot; --json 2&gt;/dev/null || echo &#x27;{}&#x27;)&quot;
+        HAS_MR_MAP=&quot;$(python3 -c &quot;
+import json, sys
+present = json.loads(sys.argv[1]).get(&#x27;textures_present&#x27;, [])
+print(&#x27;1&#x27; if (&#x27;metallic&#x27; in present or &#x27;roughness&#x27; in present) else &#x27;0&#x27;)
+&quot; &quot;$TEXQUAL_JSON&quot; 2&gt;/dev/null || echo 0)&quot;
+        if [[ &quot;$HAS_MR_MAP&quot; == &quot;1&quot; ]]; then
+            TEXTURES_PRESENT=&quot;$(python3 -c &quot;import json,sys; print(&#x27;, &#x27;.join(json.loads(sys.argv[1]).get(&#x27;textures_present&#x27;, [])))&quot; &quot;$TEXQUAL_JSON&quot; 2&gt;/dev/null || echo &#x27;&#x27;)&quot;
+            err &quot;Input already has a real metallic-roughness map ($TEXTURES_PRESENT) -- refusing to run the PBR pass over existing PBR textures.&quot;
+            err &quot;PBR mode is for meshes with no metallic-roughness map yet (SF3D-style&quot;
+            err &quot;scalar-factor output), not a re-pass of an already-full-PBR mesh (e.g.&quot;
+            err &quot;TRELLIS.2 output or a prior paint/pbr pass).&quot;
+            if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+                json_mode_end
+                python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                    status=error stage=texture_pbr \
+                    error=already_textured tool=pbr-pass \
+                    license_bucket=commercial_safe \
+                    existing_textures=&quot;$TEXTURES_PRESENT&quot; \
+                    input=&quot;$INPUT_ABS&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                    machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+            fi
+            exit 2
+        fi
+    fi
+
+    DRIVER_SCRIPT=&quot;$SCRIPT_DIR/pbr_pass.py&quot;
+    [[ -f &quot;$DRIVER_SCRIPT&quot; ]] || DRIVER_SCRIPT=&quot;$PIPELINE_ROOT/workspace/pbr_pass.py&quot;
+    if [[ ! -x &quot;$PBR_PASS_ENV/bin/python&quot; || ! -f &quot;$DRIVER_SCRIPT&quot; ]]; then
+        err &quot;pbr-pass-env (StableDelight + Marigold-IID) not installed (expected $PBR_PASS_ENV).&quot;
+        err &quot;  Override location: export PBR_PASS_ENV=/path/to/venv&quot;
+        err &quot;  License: StableDelight apache-2.0; Marigold-IID CreativeML OpenRAIL++-M&quot;
+        err &quot;           (commercial_safe with a use-restriction note; see&quot;
+        err &quot;           docs/decision-marigold-bucket.md)&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=texture_pbr \
+                error=not_installed tool=pbr-pass \
+                license_bucket=commercial_safe \
+                input=&quot;$INPUT_ABS&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    out_base=&quot;$(basename &quot;${INPUT_ABS%.*}&quot;)&quot;
+    PBR_PATH=&quot;$TEXTURES_DIR/${out_base}_pbr.glb&quot;
+    PBR_META_PATH=&quot;${PBR_PATH}.meta.json&quot;
+    info &quot;Running PBR pass (StableDelight -&gt; Marigold-IID, license: commercial_safe)&quot;
+    info &quot;Input mesh:  $INPUT_ABS&quot;
+    info &quot;Output:      $PBR_PATH&quot;
+
+    PBR_START=$(date +%s)
+    &quot;$PBR_PASS_ENV/bin/python&quot; &quot;$DRIVER_SCRIPT&quot; \
+        --input &quot;$INPUT_ABS&quot; --output &quot;$PBR_PATH&quot; --meta &quot;$PBR_META_PATH&quot; 2&gt;&amp;1 \
+        | { while IFS= read -r line; do printf &quot;[pbr] %s\n&quot; &quot;${line#\[pbr\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || {
+        err &quot;PBR pass failed&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error stage=texture_pbr \
+                error=inference_failed tool=pbr-pass \
+                license_bucket=commercial_safe \
+                input=&quot;$INPUT_ABS&quot; assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+        fi
+        exit 1
+    }
+    PBR_END=$(date +%s)
+    PBR_DURATION=$((PBR_END - PBR_START))
+
+    [[ -f &quot;$PBR_PATH&quot; ]] || { err &quot;PBR pass did not produce $PBR_PATH&quot;; exit 1; }
+    done_ &quot;PBR pass complete in ${PBR_DURATION}s -&gt; $PBR_PATH&quot;
+
     if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
         json_mode_end
         python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
-            status=error \
-            stage=texture_upscale \
-            error=not_installed \
-            tool=real-esrgan-ncnn-vulkan \
-            input=&quot;$INPUT_ABS&quot; \
+            status=ok stage=texture_pbr \
+            tool=pbr-pass \
+            license_bucket=commercial_safe \
+            input=&quot;$INPUT_ABS&quot; output=&quot;$PBR_PATH&quot; \
             assets_root=&quot;$ASSETS_ROOT&quot; \
-            machine=&quot;$MACHINE&quot; \
-            hardware_tier=&quot;$HW_TIER&quot; \
-            created=&quot;$CREATED_AT&quot;
+            --int duration_seconds=&quot;$PBR_DURATION&quot; \
+            machine=&quot;$MACHINE&quot; hardware_tier=&quot;$HW_TIER&quot; created=&quot;$CREATED_AT&quot;
+    else
+        echo &quot;$PBR_PATH&quot;
     fi
-    exit 2
+    exit 0
 fi
 
-# Refuse to upscale directories / GLBs.
+# ---------- upscale mode ----------
+# Refuse to upscale directories / GLBs (both engines need an image input).
 KIND=&quot;$(echo &quot;$INSPECT_JSON&quot; | python3 -c &#x27;import json,sys; print(json.load(sys.stdin).get(&quot;kind&quot;,&quot;&quot;))&#x27;)&quot;
 if [[ &quot;$KIND&quot; != &quot;image&quot; ]]; then
     err &quot;Upscale mode currently supports image inputs only (got kind=$KIND).&quot;
@@ -5236,12 +5366,93 @@ else
 fi
 mkdir -p &quot;$(dirname &quot;$OUT_PATH&quot;)&quot;
 
-info &quot;Tool:    $ESRGAN_BIN&quot;
-info &quot;Scale:   ${SCALE}x&quot;
-info &quot;Output:  $OUT_PATH&quot;
+if [[ &quot;$ENGINE&quot; == &quot;realesrgan&quot; ]]; then
+    # Detect a real-esrgan-ncnn-vulkan binary. Different distributions name
+    # it differently; check both common forms.
+    for candidate in real-esrgan-ncnn-vulkan realesrgan-ncnn-vulkan; do
+        if command -v &quot;$candidate&quot; &gt;/dev/null 2&gt;&amp;1; then
+            ESRGAN_BIN=&quot;$candidate&quot;
+            break
+        fi
+    done
 
-# Run the upscaler. Both common builds accept -i / -o / -s.
-&quot;$ESRGAN_BIN&quot; -i &quot;$INPUT_ABS&quot; -o &quot;$OUT_PATH&quot; -s &quot;$SCALE&quot;
+    if [[ -z &quot;$ESRGAN_BIN&quot; ]]; then
+        err &quot;real-esrgan-ncnn-vulkan binary not found in PATH.&quot;
+        err &quot;  Install one of:&quot;
+        err &quot;    https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases&quot;
+        err &quot;    https://github.com/nihui/realesrgan-ncnn-vulkan/releases&quot;
+        err &quot;  Place the binary on your PATH as one of:&quot;
+        err &quot;    real-esrgan-ncnn-vulkan&quot;
+        err &quot;    realesrgan-ncnn-vulkan&quot;
+        err &quot;  Or use --engine seedvr2 instead (item 24, no ncnn-vulkan dependency).&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error \
+                stage=texture_upscale \
+                error=not_installed \
+                tool=real-esrgan-ncnn-vulkan \
+                input=&quot;$INPUT_ABS&quot; \
+                assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; \
+                hardware_tier=&quot;$HW_TIER&quot; \
+                created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    info &quot;Engine:  realesrgan ($ESRGAN_BIN)&quot;
+    info &quot;Scale:   ${SCALE}x&quot;
+    info &quot;Output:  $OUT_PATH&quot;
+
+    # Run the upscaler. Both common builds accept -i / -o / -s.
+    &quot;$ESRGAN_BIN&quot; -i &quot;$INPUT_ABS&quot; -o &quot;$OUT_PATH&quot; -s &quot;$SCALE&quot;
+else
+    # seedvr2 (item 24): runs natively via mflux&#x27;s mflux-upscale-seedvr2
+    # console script. --resolution takes an absolute target, not a ratio,
+    # so translate --scale into one from the input&#x27;s own longest side.
+    MFLUX_VENV=&quot;${MFLUX_VENV:-$PIPELINE_ROOT/mflux-env}&quot;
+    if [[ ! -x &quot;$MFLUX_VENV/bin/mflux-upscale-seedvr2&quot; ]]; then
+        err &quot;mflux-upscale-seedvr2 not found (expected in $MFLUX_VENV).&quot;
+        err &quot;  SeedVR2 ships in mflux &gt;= 0.18; run the mflux setup from the setup guide.&quot;
+        if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
+            json_mode_end
+            python3 &quot;$SCRIPT_DIR/json_emit.py&quot; \
+                status=error \
+                stage=texture_upscale \
+                error=not_installed \
+                tool=seedvr2 \
+                license_bucket=commercial_safe \
+                input=&quot;$INPUT_ABS&quot; \
+                assets_root=&quot;$ASSETS_ROOT&quot; \
+                machine=&quot;$MACHINE&quot; \
+                hardware_tier=&quot;$HW_TIER&quot; \
+                created=&quot;$CREATED_AT&quot;
+        fi
+        exit 2
+    fi
+
+    INPUT_W=&quot;$(echo &quot;$INSPECT_JSON&quot; | python3 -c &#x27;import json,sys; print(json.load(sys.stdin).get(&quot;width&quot;) or 0)&#x27;)&quot;
+    INPUT_H=&quot;$(echo &quot;$INSPECT_JSON&quot; | python3 -c &#x27;import json,sys; print(json.load(sys.stdin).get(&quot;height&quot;) or 0)&#x27;)&quot;
+    LONG_SIDE=$(( INPUT_W &gt; INPUT_H ? INPUT_W : INPUT_H ))
+    TARGET_RES=$(( LONG_SIDE * SCALE ))
+
+    # Item 24: SeedVR2 3B on laptop tier, 7B on studio tier.
+    SEEDVR2_MODEL_ARGS=()
+    [[ &quot;$HW_TIER&quot; == &quot;studio&quot; ]] &amp;&amp; SEEDVR2_MODEL_ARGS=(--model seedvr2-7b)
+
+    info &quot;Engine:  seedvr2 (${SEEDVR2_MODEL_ARGS[1]:-seedvr2-3b}, license: commercial_safe)&quot;
+    info &quot;Scale:   ${SCALE}x (target resolution ${TARGET_RES}px)&quot;
+    info &quot;Output:  $OUT_PATH&quot;
+
+    source &quot;$MFLUX_VENV/bin/activate&quot;
+    mflux-upscale-seedvr2 \
+        --image-path &quot;$INPUT_ABS&quot; \
+        --resolution &quot;$TARGET_RES&quot; \
+        --output &quot;$OUT_PATH&quot; \
+        &quot;${SEEDVR2_MODEL_ARGS[@]}&quot;
+    deactivate
+fi
 
 [[ -f &quot;$OUT_PATH&quot; ]] || { err &quot;upscaler did not produce $OUT_PATH&quot;; exit 1; }
 
@@ -5253,6 +5464,21 @@ if [[ $ENGINE_STAGE -eq 1 &amp;&amp; -n &quot;${ENGINE_PATH:-}&quot; ]]; then
     ENGINE_STAGED=&quot;$ENGINE_TEX_DIR/$(basename &quot;$OUT_PATH&quot;)&quot;
     cp &quot;$OUT_PATH&quot; &quot;$ENGINE_STAGED&quot;
     info &quot;Engine-staged: $ENGINE_STAGED&quot;
+fi
+
+UPSCALE_TOOL=&quot;$ESRGAN_BIN&quot;
+UPSCALE_LICENSE_BUCKET=&quot;&quot;
+[[ &quot;$ENGINE&quot; == &quot;seedvr2&quot; ]] &amp;&amp; { UPSCALE_TOOL=&quot;seedvr2&quot;; UPSCALE_LICENSE_BUCKET=&quot;commercial_safe&quot;; }
+
+# Item 24 — record which upscale engine produced this output.
+OUT_META_PATH=&quot;${OUT_PATH}.meta.json&quot;
+PIPELINE_TOOLS_ENV=&quot;${PIPELINE_TOOLS_ENV:-$PIPELINE_ROOT/pipeline-tools-env}&quot;
+META_HELPER_SCRIPT=&quot;$SCRIPT_DIR/meta_helper.py&quot;
+[[ -f &quot;$META_HELPER_SCRIPT&quot; ]] || META_HELPER_SCRIPT=&quot;$PIPELINE_ROOT/workspace/meta_helper.py&quot;
+if [[ -f &quot;$META_HELPER_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; ]]; then
+    &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$META_HELPER_SCRIPT&quot; merge &quot;$OUT_META_PATH&quot; \
+        --section quality --data &quot;{\&quot;textures\&quot;: {\&quot;upscale_engine\&quot;: \&quot;$ENGINE\&quot;}}&quot; \
+        &gt; /dev/null 2&gt;&amp;1 || true
 fi
 
 END_TS=$(date +%s)
@@ -5267,7 +5493,9 @@ if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
         status=ok \
         stage=texture_upscale \
         mode=upscale \
-        tool=&quot;$ESRGAN_BIN&quot; \
+        engine=&quot;$ENGINE&quot; \
+        tool=&quot;$UPSCALE_TOOL&quot; \
+        license_bucket=&quot;$UPSCALE_LICENSE_BUCKET&quot; \
         --int scale=&quot;$SCALE&quot; \
         input=&quot;$INPUT_ABS&quot; \
         output=&quot;$OUT_PATH&quot; \
@@ -6581,7 +6809,23 @@ PIPELINE_EOF</pre></div>
           &quot;properties&quot;: {
             &quot;textures_present&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
             &quot;issues&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
-            &quot;stats&quot;: { &quot;type&quot;: &quot;object&quot; }
+            &quot;stats&quot;: { &quot;type&quot;: &quot;object&quot; },
+            &quot;upscale_engine&quot;: {
+              &quot;type&quot;: &quot;string&quot;,
+              &quot;description&quot;: &quot;Item 24 — texture.sh --mode upscale --engine: &#x27;realesrgan&#x27; or &#x27;seedvr2&#x27;.&quot;
+            },
+            &quot;pbr_pass&quot;: {
+              &quot;type&quot;: &quot;object&quot;,
+              &quot;description&quot;: &quot;Item 24 — texture.sh --mode pbr (pbr_pass.py: StableDelight -&gt; Marigold-IID).&quot;,
+              &quot;additionalProperties&quot;: true,
+              &quot;properties&quot;: {
+                &quot;applied&quot;: { &quot;type&quot;: &quot;boolean&quot; },
+                &quot;maps_added&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;string&quot; } },
+                &quot;delight_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
+                &quot;marigold_seconds&quot;: { &quot;type&quot;: &quot;number&quot; },
+                &quot;duration_seconds&quot;: { &quot;type&quot;: &quot;number&quot; }
+              }
+            }
           }
         },
         &quot;uv&quot;: {
@@ -8814,6 +9058,19 @@ PIPELINE_EOF</pre></div>
         &quot;qwen-image-edit-2511&quot;,
         &quot;qwen-multi-angle-lora&quot;
       ]
+    },
+    &quot;seedvr2&quot;: {
+      &quot;description&quot;: &quot;Item 24 \u2014 SeedVR2 3B/7B upscale engine (opt-in; texture.sh --mode upscale --engine seedvr2). Runs through the existing mflux-env venv, no separate install.&quot;,
+      &quot;components&quot;: [
+        &quot;seedvr2-weights&quot;
+      ]
+    },
+    &quot;pbr-pass&quot;: {
+      &quot;description&quot;: &quot;Item 24 \u2014 albedo -&gt; StableDelight -&gt; Marigold-IID roughness/metallic pass (opt-in; texture.sh --mode pbr). Dedicated venv (diffusers + torch, not shared with pipeline-tools-env).&quot;,
+      &quot;components&quot;: [
+        &quot;stabledelight&quot;,
+        &quot;marigold-iid&quot;
+      ]
     }
   },
   &quot;venvs&quot;: [
@@ -8902,6 +9159,26 @@ PIPELINE_EOF</pre></div>
       &quot;purpose&quot;: &quot;Item 21 — not a separate install. Shares the mflux-env venv (mflux-generate-qwen-edit); this entry exists only so the edit-lane feature_set has a venv to check against.&quot;,
       &quot;python_version&quot;: &quot;3.12&quot;,
       &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;
+    },
+    {
+      &quot;name&quot;: &quot;seedvr2&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/mflux-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;seedvr2&quot;,
+      &quot;size_gb&quot;: 0,
+      &quot;purpose&quot;: &quot;Item 24 — not a separate install. Shares the mflux-env venv (mflux-upscale-seedvr2); this entry exists only so the seedvr2 feature_set has a venv to check against.&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/mflux-env.txt&quot;
+    },
+    {
+      &quot;name&quot;: &quot;pbr-pass-env&quot;,
+      &quot;path&quot;: &quot;~/3d-pipeline/pbr-pass-env&quot;,
+      &quot;required&quot;: false,
+      &quot;feature_set&quot;: &quot;pbr-pass&quot;,
+      &quot;size_gb&quot;: 6,
+      &quot;purpose&quot;: &quot;Item 24 — dedicated diffusers + torch stack for texture.sh --mode pbr (StableDelight + Marigold-IID). Not shared with pipeline-tools-env to keep that venv&#x27;s dependency set lean.&quot;,
+      &quot;python_version&quot;: &quot;3.12&quot;,
+      &quot;lockfile&quot;: &quot;scripts/lockfiles/pbr-pass-env.txt&quot;
     }
   ],
   &quot;models&quot;: [
@@ -9155,6 +9432,60 @@ PIPELINE_EOF</pre></div>
       &quot;hf_repo&quot;: &quot;fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA&quot;,
       &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
       &quot;warm_target&quot;: &quot;qwen-multi-angle-lora&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;seedvr2-weights&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;seedvr2&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 15000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;mflux&quot;,
+      &quot;notes&quot;: &quot;Item 24. Gate G5 (R0.6 spike): both ByteDance-Seed/SeedVR2-3B and -7B HF cards state license: apache-2.0. mflux&#x27;s mflux-upscale-seedvr2 actually downloads from a repackaging repo, numz/SeedVR2_comfyUI (credits the ByteDance Seed upstream) -- verified separately, also apache-2.0/MIT (both permissive). Downloaded automatically on first use, no separate venv (mflux-env).&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;numz/SeedVR2_comfyUI&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;seedvr2-weights&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;stabledelight&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;pbr-pass&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 2000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;stabledelight&quot;,
+      &quot;notes&quot;: &quot;Item 24. Code (Stable-X/StableDelight) and weights (Stable-X/yoso-delight-v0-4-base) both apache-2.0, verified by reading the repo LICENSE and HF card directly. Downloaded via torch.hub.load on first use into pbr-pass-env. Two real bugs worked around in scripts/pbr_pass.py (see its docstring): a stale diffusers.models.controlnet import path in the dynamically-downloaded pipeline module, and hubconf.py&#x27;s device default of cuda:0.&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;Stable-X/yoso-delight-v0-4-base&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;stabledelight&quot;,
+      &quot;comfyui_kind&quot;: null
+    },
+    {
+      &quot;id&quot;: &quot;marigold-iid&quot;,
+      &quot;filename&quot;: &quot;&quot;,
+      &quot;feature_set&quot;: &quot;pbr-pass&quot;,
+      &quot;license_bucket&quot;: &quot;commercial_safe&quot;,
+      &quot;size_mb&quot;: 2000,
+      &quot;cache_dir&quot;: &quot;~/.cache/huggingface/hub&quot;,
+      &quot;env_var&quot;: &quot;&quot;,
+      &quot;download_url&quot;: &quot;&quot;,
+      &quot;sha256&quot;: &quot;&quot;,
+      &quot;managed_by&quot;: &quot;marigold-iid&quot;,
+      &quot;notes&quot;: &quot;Item 24. Gate G4 (R0.6 spike + docs/decision-marigold-bucket.md): CreativeML OpenRAIL++-M -- commercial use allowed, narrow behavioral-use restrictions (bucketed commercial_safe with a use-restriction note, not unclear_risky). diffusers&gt;=0.39 ships MarigoldIntrinsicsPipeline natively, confirmed working on MPS (R0.7 spike + R3.2 live chain test with StableDelight).&quot;,
+      &quot;requires_hf_auth&quot;: false,
+      &quot;hf_repo&quot;: &quot;prs-eth/marigold-iid-appearance-v1-1&quot;,
+      &quot;storage_layout&quot;: &quot;hf_snapshot&quot;,
+      &quot;warm_target&quot;: &quot;marigold-iid&quot;,
       &quot;comfyui_kind&quot;: null
     }
   ],
@@ -10671,6 +11002,166 @@ def main() -&gt; int:
         print(json.dumps(payload[&quot;reuv&quot;], sort_keys=True))
     else:
         print(f&quot;[reuv] occupancy {occ_before:.1%} -&gt; {occ_after:.1%} ({duration}s)&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>pbr_pass.py</code>
+                <span class="script-summary-desc">v0.4 item 24 &mdash; albedo -&gt; StableDelight -&gt; Marigold-IID PBR pass (texture.sh --mode pbr)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/pbr_pass.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.4 item 24 — PBR texture pass (albedo -&gt; StableDelight -&gt; Marigold-IID).
+
+Extracts a GLB&#x27;s existing baseColorTexture, runs it through StableDelight
+(removes baked-in specular highlights) then Marigold-IID Appearance
+(roughness + metallic decomposition), and writes a new GLB with the
+delighted albedo as baseColorTexture and a packed roughness/metallic as
+metallicRoughnessTexture (glTF convention: G=roughness, B=metallic).
+
+Caller (texture.sh --mode pbr) is responsible for refusing to run this
+on a mesh that already has a metallicRoughnessTexture — this script
+always overwrites whatever material state the mesh has.
+
+Two real upstream bugs worked around here, both confirmed live on this
+Studio (R3.2 spike, 2026-08):
+
+1. StableDelight&#x27;s dynamically-downloaded custom pipeline module
+   (`controlnetvae.py`) imports `from diffusers.models.controlnet import
+   ControlNetOutput` — that path was reorganized into
+   `diffusers.models.controlnets.controlnet` in the diffusers version
+   this pipeline uses. Patching the downloaded cache file doesn&#x27;t stick
+   (diffusers re-syncs it against the remote hash on each load), so the
+   fix is a `sys.modules` alias registered before the dynamic import
+   fires — same technique as R0.4&#x27;s MV-Adapter nvdiffrast/triton stub.
+2. `torch.hub.load(..., &quot;StableDelight_turbo&quot;)` defaults to
+   `device=&quot;cuda:0&quot;` — pass `device=&quot;mps&quot;` explicitly (a real, accepted
+   kwarg on the hub entry point, not a hack).
+
+Usage:
+    pbr_pass.py --input PATH.glb --output PATH.glb --meta PATH [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+
+def _imports():
+    try:
+        import numpy as np
+        import torch
+        import trimesh
+        from diffusers import MarigoldIntrinsicsPipeline
+        return np, torch, trimesh, MarigoldIntrinsicsPipeline
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); install the pbr-pass-env venv.&quot;, file=sys.stderr)
+        sys.exit(2)
+
+
+def _load_stabledelight(torch, device: str):
+    import diffusers.models.controlnets.controlnet as _cn
+    sys.modules[&quot;diffusers.models.controlnet&quot;] = _cn
+    return torch.hub.load(&quot;Stable-X/StableDelight&quot;, &quot;StableDelight_turbo&quot;, trust_repo=True, device=device)
+
+
+def _merge_meta(meta_path: Path, payload: dict) -&gt; None:
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;quality&quot;, &quot;--data&quot;, json.dumps({&quot;textures&quot;: payload})],
+        check=False, capture_output=True,
+    )
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--input&quot;, required=True)
+    p.add_argument(&quot;--output&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--device&quot;, default=&quot;mps&quot;)
+    p.add_argument(&quot;--marigold-steps&quot;, type=int, default=10)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    np, torch, trimesh, MarigoldIntrinsicsPipeline = _imports()
+
+    t0 = time.time()
+    mesh = trimesh.load(Path(args.input).expanduser(), force=&quot;mesh&quot;)
+    material = getattr(mesh.visual, &quot;material&quot;, None)
+    albedo_tex = getattr(material, &quot;baseColorTexture&quot;, None) if material is not None else None
+    if albedo_tex is None:
+        print(&quot;ERROR: input has no baseColorTexture to process.&quot;, file=sys.stderr)
+        return 2
+    albedo_img = albedo_tex.convert(&quot;RGB&quot;) if hasattr(albedo_tex, &quot;convert&quot;) else albedo_tex
+
+    delight_predictor = _load_stabledelight(torch, args.device)
+    delighted = delight_predictor(albedo_img)
+    t_delight = time.time()
+
+    marigold = MarigoldIntrinsicsPipeline.from_pretrained(
+        &quot;prs-eth/marigold-iid-appearance-v1-1&quot;, variant=&quot;fp16&quot;, torch_dtype=torch.float16,
+    ).to(args.device)
+    output = marigold(delighted, num_inference_steps=args.marigold_steps)
+    t_marigold = time.time()
+
+    # prediction shape (2, H, W, 3): [0]=albedo (sRGB), [1]=material stack
+    # (roughness, metallicity, unused) per Marigold&#x27;s own target_properties.
+    final_albedo = output.prediction[0]
+    material_stack = output.prediction[1]
+    roughness = material_stack[..., 0]
+    metallic = material_stack[..., 1]
+
+    h, w = roughness.shape
+    mr = np.zeros((h, w, 3), dtype=np.uint8)
+    mr[..., 1] = (np.clip(roughness, 0, 1) * 255).astype(np.uint8)  # glTF: G=roughness
+    mr[..., 2] = (np.clip(metallic, 0, 1) * 255).astype(np.uint8)   # glTF: B=metallic
+
+    from PIL import Image
+    final_albedo_img = Image.fromarray((np.clip(final_albedo, 0, 1) * 255).astype(np.uint8))
+    mr_img = Image.fromarray(mr)
+
+    uv = getattr(mesh.visual, &quot;uv&quot;, None)
+    new_mesh = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
+    new_mesh.visual = trimesh.visual.TextureVisuals(
+        uv=uv,
+        material=trimesh.visual.material.PBRMaterial(
+            baseColorTexture=final_albedo_img,
+            metallicRoughnessTexture=mr_img,
+            metallicFactor=1.0,
+            roughnessFactor=1.0,
+        ),
+    )
+    new_mesh.export(Path(args.output).expanduser())
+    duration = round(time.time() - t0, 2)
+
+    payload = {
+        &quot;pbr_pass&quot;: {
+            &quot;applied&quot;: True,
+            &quot;maps_added&quot;: [&quot;albedo&quot;, &quot;roughness&quot;, &quot;metallic&quot;],
+            &quot;delight_seconds&quot;: round(t_delight - t0, 2),
+            &quot;marigold_seconds&quot;: round(t_marigold - t_delight, 2),
+            &quot;duration_seconds&quot;: duration,
+        }
+    }
+    _merge_meta(Path(args.meta).expanduser(), payload)
+
+    if args.json:
+        print(json.dumps(payload[&quot;pbr_pass&quot;], sort_keys=True))
+    else:
+        print(f&quot;[pbr] albedo + roughness + metallic written in {duration}s&quot;)
     return 0
 
 
@@ -15104,18 +15595,31 @@ glTF JSON chunk directly.
 ### Upscale
 
 ```bash
-~/3d-pipeline/workspace/texture.sh -i &lt;path&gt; --mode upscale --scale 4 [--json]
+~/3d-pipeline/workspace/texture.sh -i &lt;path&gt; --mode upscale --scale 4 [--engine realesrgan|seedvr2] [--json]
 ```
 
-Uses `real-esrgan-ncnn-vulkan` if installed. If not installed, the
-wrapper fails with `status=error error=not_installed` JSON and stderr
-install guidance — relay that and offer to wait until the user installs
-it. **Do not invent a fallback path.** Real-ESRGAN ncnn-vulkan is the
-only supported upscaler today.
+Two engines (item 24, v0.4+):
+
+- **`realesrgan`** (default) — `real-esrgan-ncnn-vulkan` if installed.
+  If not installed, the wrapper fails with `status=error
+  error=not_installed` JSON and stderr install guidance — relay that
+  and offer to wait until the user installs it, or suggest `--engine
+  seedvr2` instead.
+- **`seedvr2`** — SeedVR2 3B (laptop tier) / 7B (studio tier) via
+  mflux&#x27;s native `mflux-upscale-seedvr2`, no separate install (ships
+  in mflux ≥ 0.18, same venv as everything else in mflux-env).
+  `commercial_safe` (gate G5, R0.6 spike: both HF cards
+  `license: apache-2.0`; confirmed live on this Studio, real 2x
+  upscale). Modern and maintained where Real-ESRGAN ncnn-vulkan isn&#x27;t
+  (last portable release 2022) — suggest it first if the user hasn&#x27;t
+  already got Real-ESRGAN installed, since it needs zero extra setup.
+  Real-ESRGAN stays the *default* until a formal bake-off flips it
+  (principle P-A — no silent default change).
 
 Output lands in `assets/textures/` (or `~/3d-pipeline/workspace/textures/`
 in global mode). `--engine-stage` copies to the engine&#x27;s `Textures/`
-folder when applicable.
+folder when applicable. `quality.textures.upscale_engine` in the
+output&#x27;s meta.json records which engine ran.
 
 ### Paint mode — Hunyuan3D-Paint MLX port (v0.4+, item 19 retarget)
 
@@ -15167,6 +15671,37 @@ JSON and points at the install docs. Relay the install guidance;
 don&#x27;t try to substitute a different texture generator, and don&#x27;t
 suggest the Brainkeys MPS fork as a paint fallback — its paint stage
 is limited/disabled, shape-generation only.
+
+### PBR pass — StableDelight + Marigold-IID (v0.4+, item 24)
+
+```bash
+~/3d-pipeline/workspace/texture.sh -i &lt;glb&gt; --mode pbr [--json]
+```
+
+Albedo → StableDelight (removes baked-in specular highlights) →
+Marigold-IID Appearance (roughness + metallic decomposition) → writes
+a new GLB with the delighted albedo as `baseColorTexture` and a
+packed `metallicRoughnessTexture`. Both models `commercial_safe`:
+StableDelight (code + weights apache-2.0, verified directly) and
+Marigold-IID (CreativeML OpenRAIL++-M, gate G4 — commercial use
+allowed with narrow behavioral-use restrictions; mention this inline
+when recommending the pass, see `docs/decision-marigold-bucket.md`
+for the full call). No `--image` needed — the reference is the mesh&#x27;s
+own existing `baseColorTexture`, extracted automatically.
+
+**Same hard-refusal rule as paint mode, same mechanism:** refuses
+with `status=error error=already_textured` when
+`quality.textures.textures_present` already includes `metallic` or
+`roughness` (TRELLIS.2 output, a prior paint/pbr pass) — use
+`--mode upscale` to improve an existing texture instead. Best fit is
+exactly SF3D&#x27;s own output (`albedo`/`normal` present, no real
+metallic-roughness map — see the paint-mode routing table above,
+same signal).
+
+Install layout: `$PBR_PASS_ENV` (default `~/3d-pipeline/pbr-pass-env/`)
+— a dedicated diffusers + torch venv, not shared with
+pipeline-tools-env. Missing venv exits with structured
+`status=error error=not_installed` JSON; relay the install guidance.
 
 ## Flow 7: Model bake-off / benchmark
 
@@ -16110,6 +16645,25 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
           <p>Verify:</p>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>gltfpack
 <span class="tk-cmt"># -&gt; "gltfpack 1.2" + usage (exit 0) -- no --version flag, this is the real check</span></pre></div>
+        </div>
+      </div>
+
+      <div class="step" data-step="pbr-pass-env-install">
+        <label class="step-check"><input type="checkbox"></label>
+        <div class="step-body">
+          <h3>Optional: pbr-pass-env (item 24 &mdash; PBR texture pass)</h3>
+          <p>Powers <code>texture.sh --mode pbr</code> (albedo &rarr; StableDelight &rarr; Marigold-IID roughness + metallic decomposition). Dedicated venv, not shared with <code>pipeline-tools-env</code>, ~6&nbsp;GB. Both models <code>commercial_safe</code>: StableDelight (code + weights apache-2.0) and Marigold-IID (CreativeML OpenRAIL++-M &mdash; commercial use allowed, narrow behavioral-use restrictions; see <code>docs/decision-marigold-bucket.md</code>).</p>
+          <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
+<span class="tk-prompt">$ </span>python3.12 -m venv pbr-pass-env
+<span class="tk-prompt">$ </span>source pbr-pass-env/bin/activate
+<span class="tk-prompt">$ </span>pip install --upgrade pip
+<span class="tk-prompt">$ </span>pip install torch==2.13.0 torchvision==0.28.0 diffusers==0.39.0 transformers==5.15.0 accelerate==1.14.0 numpy pillow huggingface_hub trimesh
+<span class="tk-prompt">$ </span>deactivate</pre></div>
+          <p>First use downloads StableDelight (~2&nbsp;GB) and Marigold-IID (~2&nbsp;GB) automatically via <code>torch.hub</code> / <code>diffusers</code>. Confirmed live on this Studio: full chain (delight + decomposition) in ~17s on a real SF3D texture, real distinct roughness/metallic maps.</p>
+          <div class="callout callout-gotcha">
+            <div class="callout-label">Two real upstream bugs, both worked around in scripts/pbr_pass.py &mdash; nothing to do here</div>
+            <p>StableDelight's dynamically-downloaded pipeline module imports from a diffusers path (<code>diffusers.models.controlnet</code>) that was reorganized into a subpackage in current diffusers &mdash; worked around with a <code>sys.modules</code> alias (same technique as R0.4's MV-Adapter fix), not a version pin, since patching the downloaded cache file doesn't stick (diffusers re-syncs it against the remote hash on every load). Its <code>torch.hub.load</code> entry point also defaults to <code>device="cuda:0"</code> &mdash; the driver passes <code>device="mps"</code> explicitly.</p>
+          </div>
         </div>
       </div>
 
