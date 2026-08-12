@@ -2158,6 +2158,7 @@ CONSISTENCY_PACK=&quot;&quot;
 NEGATIVE=&quot;&quot;
 JUDGE=0
 BEST_OF=&quot;&quot;
+AUTO_RETRY=0
 
 GAME_SUFFIX=&quot;, 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed&quot;
 
@@ -2191,6 +2192,10 @@ Generation options:
   -L, --lora-scale F       LoRA strength (default: 1.0)
   -q, --quantize N         Quantization: 4 or 8 (default: 8)
   -n, --count N            Generate N variations (default: 1)
+      --auto-retry         With --best-of: if the judge rejects every variant,
+                           rewrite the prompt via an LLM at
+                           \$PIPELINE_PROMPT_DOCTOR_ENDPOINT and retry once.
+                           No-op unless that endpoint is set.
       --no-game-prompt     Skip the game-asset prompt suffix
       --json               Emit a final JSON result line on stdout.
                            Human-readable logs are routed to stderr so
@@ -2231,6 +2236,7 @@ while [[ $# -gt 0 ]]; do
         --negative)        NEGATIVE=&quot;$2&quot;;     shift 2 ;;
         --judge)           JUDGE=1;           shift   ;;
         --best-of)         BEST_OF=&quot;$2&quot;; JUDGE=1; COUNT=&quot;$2&quot;; shift 2 ;;
+        --auto-retry)      AUTO_RETRY=1;      shift   ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo &quot;Unknown option: $1&quot; &gt;&amp;2; usage; exit 1 ;;
@@ -2574,6 +2580,38 @@ print(picked)
             OUTPUT_PATHS=( &quot;${NEW_OUTPUT_PATHS[@]}&quot; )
             FIRST_OUTPUT=&quot;$WINNER_PATH&quot;
             info &quot;Judge picked $(basename &quot;$WINNER_PATH&quot;); $((COUNT - 1)) variant(s) moved to concept/rejected/&quot;
+
+            # v0.6.1 (concept doctor) — if even the winner is below the judge
+            # floor, optionally have an LLM rewrite the prompt and retry once.
+            # Opt-in twice over: needs --auto-retry AND a doctor endpoint.
+            # PIPELINE_DOCTOR_RETRIED guards against retry loops.
+            WINNER_REJECTED=&quot;$(python3 -c &quot;
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(str([r[&#x27;rejected&#x27;] for r in d[&#x27;results&#x27;] if r[&#x27;rank&#x27;] == 1][0]).lower())
+&quot; &quot;$JUDGE_RESULT_FILE&quot; 2&gt;/dev/null || echo false)&quot;
+            if [[ &quot;$AUTO_RETRY&quot; == &quot;1&quot; &amp;&amp; &quot;$WINNER_REJECTED&quot; == &quot;true&quot; \
+                  &amp;&amp; -z &quot;${PIPELINE_DOCTOR_RETRIED:-}&quot; \
+                  &amp;&amp; -n &quot;${PIPELINE_PROMPT_DOCTOR_ENDPOINT:-}&quot; ]]; then
+                NEW_PROMPT=&quot;$(python3 &quot;$SCRIPT_DIR/prompt_doctor.py&quot; \
+                    --prompt &quot;$FINAL_PROMPT&quot; --scores-file &quot;$JUDGE_RESULT_FILE&quot; || true)&quot;
+                if [[ -n &quot;$NEW_PROMPT&quot; ]]; then
+                    info &quot;All variants below judge floor — prompt doctor retrying with: $NEW_PROMPT&quot;
+                    rm -f &quot;$JUDGE_RESULT_FILE&quot;
+                    RETRY_ARGS=( &quot;$NEW_PROMPT&quot; --no-game-prompt --best-of &quot;$BEST_OF&quot; --auto-retry
+                                 -m &quot;$MODEL&quot; -w &quot;$WIDTH&quot; -H &quot;$HEIGHT&quot; -q &quot;$QUANTIZE&quot; )
+                    [[ -n &quot;$STEPS&quot; ]] &amp;&amp; RETRY_ARGS+=( -s &quot;$STEPS&quot; )
+                    [[ -n &quot;$OUTPUT_NAME&quot; ]] &amp;&amp; RETRY_ARGS+=( -o &quot;${OUTPUT_NAME}_retry&quot; )
+                    [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; RETRY_ARGS+=( --json )
+                    [[ -n &quot;$EXPLICIT_PROJECT&quot; ]] &amp;&amp; RETRY_ARGS+=( --project &quot;$EXPLICIT_PROJECT&quot; )
+                    [[ -n &quot;$NEGATIVE&quot; ]] &amp;&amp; RETRY_ARGS+=( --negative &quot;$NEGATIVE&quot; )
+                    # Restore real stdout before exec so the retry&#x27;s own
+                    # json_mode_begin starts from clean file descriptors.
+                    [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]] &amp;&amp; json_mode_end
+                    PIPELINE_DOCTOR_RETRIED=1 exec &quot;$0&quot; &quot;${RETRY_ARGS[@]}&quot;
+                fi
+                info &quot;Prompt doctor unavailable or failed — keeping the rejected winner.&quot;
+            fi
         fi
         rm -f &quot;$JUDGE_RESULT_FILE&quot;
     else
@@ -15677,6 +15715,16 @@ a few seconds per image after the model is loaded once.
 **When NOT to suggest it:** a single one-off generation the user is
 already happy with; `vlm-env` not installed and the user wants to
 generate right now (offer it as a follow-up instead).
+
+**Concept doctor (v0.6.1, `--auto-retry`).** With `--best-of N`, if the
+judge rejects every variant (all below the floor), `--auto-retry` sends
+the prompt plus the judge&#x27;s scores to an OpenAI-compatible chat endpoint
+(`$PIPELINE_PROMPT_DOCTOR_ENDPOINT`) which rewrites the prompt to target
+the lowest-scoring dimensions (most commonly forcing a real 3/4 view),
+then regenerates once with the rewritten prompt. Opt-in twice over: the
+flag AND the endpoint must both be present, and a retry never retries
+again. If the doctor endpoint is unset or fails, the run keeps the
+rejected winner exactly as before.
 
 **Remote judge endpoint (v0.6.1).** If `PIPELINE_JUDGE_ENDPOINT` is set
 (or `vlm_judge.py --endpoint URL`), judge calls go to an OpenAI-compatible

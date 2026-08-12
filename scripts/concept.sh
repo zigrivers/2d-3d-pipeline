@@ -45,6 +45,7 @@ CONSISTENCY_PACK=""
 NEGATIVE=""
 JUDGE=0
 BEST_OF=""
+AUTO_RETRY=0
 
 GAME_SUFFIX=", 3/4 view, full subject centered, clean white background, even studio lighting, no harsh shadows, game asset, detailed"
 
@@ -78,6 +79,10 @@ Generation options:
   -L, --lora-scale F       LoRA strength (default: 1.0)
   -q, --quantize N         Quantization: 4 or 8 (default: 8)
   -n, --count N            Generate N variations (default: 1)
+      --auto-retry         With --best-of: if the judge rejects every variant,
+                           rewrite the prompt via an LLM at
+                           \$PIPELINE_PROMPT_DOCTOR_ENDPOINT and retry once.
+                           No-op unless that endpoint is set.
       --no-game-prompt     Skip the game-asset prompt suffix
       --json               Emit a final JSON result line on stdout.
                            Human-readable logs are routed to stderr so
@@ -118,6 +123,7 @@ while [[ $# -gt 0 ]]; do
         --negative)        NEGATIVE="$2";     shift 2 ;;
         --judge)           JUDGE=1;           shift   ;;
         --best-of)         BEST_OF="$2"; JUDGE=1; COUNT="$2"; shift 2 ;;
+        --auto-retry)      AUTO_RETRY=1;      shift   ;;
         --json)            JSON_MODE=1;       shift   ;;
         -h|--help)         usage; exit 0 ;;
         -*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -461,6 +467,38 @@ print(picked)
             OUTPUT_PATHS=( "${NEW_OUTPUT_PATHS[@]}" )
             FIRST_OUTPUT="$WINNER_PATH"
             info "Judge picked $(basename "$WINNER_PATH"); $((COUNT - 1)) variant(s) moved to concept/rejected/"
+
+            # v0.6.1 (concept doctor) — if even the winner is below the judge
+            # floor, optionally have an LLM rewrite the prompt and retry once.
+            # Opt-in twice over: needs --auto-retry AND a doctor endpoint.
+            # PIPELINE_DOCTOR_RETRIED guards against retry loops.
+            WINNER_REJECTED="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(str([r['rejected'] for r in d['results'] if r['rank'] == 1][0]).lower())
+" "$JUDGE_RESULT_FILE" 2>/dev/null || echo false)"
+            if [[ "$AUTO_RETRY" == "1" && "$WINNER_REJECTED" == "true" \
+                  && -z "${PIPELINE_DOCTOR_RETRIED:-}" \
+                  && -n "${PIPELINE_PROMPT_DOCTOR_ENDPOINT:-}" ]]; then
+                NEW_PROMPT="$(python3 "$SCRIPT_DIR/prompt_doctor.py" \
+                    --prompt "$FINAL_PROMPT" --scores-file "$JUDGE_RESULT_FILE" || true)"
+                if [[ -n "$NEW_PROMPT" ]]; then
+                    info "All variants below judge floor — prompt doctor retrying with: $NEW_PROMPT"
+                    rm -f "$JUDGE_RESULT_FILE"
+                    RETRY_ARGS=( "$NEW_PROMPT" --no-game-prompt --best-of "$BEST_OF" --auto-retry
+                                 -m "$MODEL" -w "$WIDTH" -H "$HEIGHT" -q "$QUANTIZE" )
+                    [[ -n "$STEPS" ]] && RETRY_ARGS+=( -s "$STEPS" )
+                    [[ -n "$OUTPUT_NAME" ]] && RETRY_ARGS+=( -o "${OUTPUT_NAME}_retry" )
+                    [[ "$JSON_MODE" == "1" ]] && RETRY_ARGS+=( --json )
+                    [[ -n "$EXPLICIT_PROJECT" ]] && RETRY_ARGS+=( --project "$EXPLICIT_PROJECT" )
+                    [[ -n "$NEGATIVE" ]] && RETRY_ARGS+=( --negative "$NEGATIVE" )
+                    # Restore real stdout before exec so the retry's own
+                    # json_mode_begin starts from clean file descriptors.
+                    [[ "$JSON_MODE" == "1" ]] && json_mode_end
+                    PIPELINE_DOCTOR_RETRIED=1 exec "$0" "${RETRY_ARGS[@]}"
+                fi
+                info "Prompt doctor unavailable or failed — keeping the rejected winner."
+            fi
         fi
         rm -f "$JUDGE_RESULT_FILE"
     else

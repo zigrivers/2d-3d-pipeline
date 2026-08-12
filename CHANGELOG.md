@@ -2,6 +2,37 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — v0.6.1: concept doctor (`concept.sh --auto-retry`)
+
+With `--best-of N`, when the VLM judge rejects every variant, the new
+opt-in `--auto-retry` flag asks an LLM at an OpenAI-compatible endpoint
+(`$PIPELINE_PROMPT_DOCTOR_ENDPOINT`) to rewrite the prompt against the
+judge's lowest-scoring rubric dimensions, then reruns the generation
+once with the rewritten prompt. Directly targets the flat/front-view
+failure mode behind issue #19 at the concept stage.
+
+- `scripts/prompt_doctor.py` — stdlib-only; sends original prompt +
+  judge scores, asks for strict JSON back; picks the endpoint's served
+  model (the filesystem-path entry in /v1/models — models[0] on an
+  mlx_lm server can be any HF-cache entry) unless
+  `$PIPELINE_PROMPT_DOCTOR_MODEL` overrides; disables local thinking
+  models' hidden reasoning channel so the rewrite lands in `content`.
+  Any failure exits non-zero and the caller keeps the rejected winner —
+  behavior without the flag or endpoint is unchanged.
+- `scripts/concept.sh` — retry re-execs itself with the rewritten
+  prompt (`--no-game-prompt`, since the doctor rewrites the full
+  suffixed prompt), forwarding model/size/steps/quantize/json/project;
+  `PIPELINE_DOCTOR_RETRIED` guards against retry loops; under `--json`
+  the real stdout is restored before the re-exec so the retry's JSON
+  contract stays intact. Retried outputs get an `_retry` name suffix.
+- Tests: `tests/python/test_prompt_doctor.py` — 5 subprocess tests
+  against a stdlib mock chat server (request shape, served-model pick,
+  env overrides, unchanged-prompt rejection, unreachable endpoint).
+- Live evidence (2026-08-12): fed a real judge-rejection fixture
+  ("front only — blade nearly invisible" fantasy-sword scores) to a
+  local Qwen3.6-35B endpoint: rewrote to "fantasy sword, seen from a
+  3/4 angle showing the front and right side, ..." in 16.5 s.
+
 ## 2026-08-12 — v0.6.1: optional remote judge endpoint
 
 `vlm_judge.py` gains `--endpoint URL` / `$PIPELINE_JUDGE_ENDPOINT`: when
