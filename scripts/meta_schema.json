@@ -184,14 +184,22 @@
 
     "clip": {
       "type": "object",
-      "description": "Item 8 — CLIP similarity scoring",
+      "description": "Item 8 — prompt-adherence + preference + dedup scoring (item 16, 2026-08 refresh: SigLIP 2 replaces CLIP as default scorer; ImageReward + DreamSim add sibling fields)",
       "additionalProperties": true,
       "properties": {
         "similarity": { "type": "number" },
+        "scorer": { "type": "string", "enum": ["siglip2", "clip"] },
         "model": { "type": "string" },
         "model_band": { "type": "string" },
         "percentile_for_this_model": { "type": "number" },
-        "rank": { "type": "integer" }
+        "rank": { "type": "integer" },
+        "image_reward": { "type": "number" },
+        "image_reward_model": { "type": "string" },
+        "dreamsim_dupes": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "integer" } }
+        },
+        "dreamsim_threshold": { "type": "number" }
       }
     }
   },

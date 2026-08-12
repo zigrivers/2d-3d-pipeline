@@ -336,6 +336,30 @@ if [[ -f "$CLIP_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
             --meta "$META_FOR_CONCEPT" --model-name "$MODEL" 2>&1 \
             | grep '^\[clip\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[clip\] }" >&"$HUMAN_FD"; done; } || true
     fi
+
+    # v0.3.5 (item 16) — ImageReward human-preference score on the
+    # top-ranked variant. No-op when preference_score.py isn't installed.
+    PREF_SCRIPT="$SCRIPT_DIR/preference_score.py"
+    [[ -f "$PREF_SCRIPT" ]] || PREF_SCRIPT="$PIPELINE_ROOT/workspace/preference_score.py"
+    if [[ -f "$PREF_SCRIPT" ]]; then
+        "$PIPELINE_TOOLS_ENV/bin/python" "$PREF_SCRIPT" \
+            --prompt "$PROMPT" --image "$FIRST_OUTPUT" \
+            --meta "$META_FOR_CONCEPT" 2>&1 \
+            | grep '^\[image-reward\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[image-reward\] }" >&"$HUMAN_FD"; done; } || true
+    fi
+
+    # v0.3.5 (item 16) — DreamSim near-duplicate detection across variants.
+    # Only meaningful with more than one variant.
+    if [[ "$COUNT" -gt 1 ]]; then
+        DEDUP_SCRIPT="$SCRIPT_DIR/dedup_variants.py"
+        [[ -f "$DEDUP_SCRIPT" ]] || DEDUP_SCRIPT="$PIPELINE_ROOT/workspace/dedup_variants.py"
+        if [[ -f "$DEDUP_SCRIPT" ]]; then
+            "$PIPELINE_TOOLS_ENV/bin/python" "$DEDUP_SCRIPT" \
+                --images "${OUTPUT_PATHS[@]}" \
+                --meta "$META_FOR_CONCEPT" 2>&1 \
+                | grep '^\[dreamsim\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[dreamsim\] }" >&"$HUMAN_FD"; done; } || true
+        fi
+    fi
 fi
 
 if [[ "$JSON_MODE" == "1" ]]; then

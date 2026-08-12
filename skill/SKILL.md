@@ -34,7 +34,11 @@ On a fresh install, before any asset work, ask the user to run:
 This reports disk space, expected venvs, expected model caches, and
 that each wrapper's `--help` works. On a partial install, it lists
 what's missing. To pre-download the v0.3 quality-feature models
-(~1 GB total: rembg's u2net + OpenCLIP ViT-L/14):
+(~1 GB total: rembg's u2net + SigLIP 2 base):
+
+Note: `--warm-cache` does not yet cover the item-16 scorer stack
+(ImageReward ~1.8 GB, DreamSim's ensemble weights ~1.5 GB) — those
+download on first real use of `concept.sh`'s prompt-adherence scoring.
 
 ```bash
 ~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache
@@ -358,12 +362,16 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | "UV island" | "texture patch" |
 | "decimate ratio 0.16" | "simplified mesh: 18,400 → 3,000 polygons" |
 | "alpha_mean 0.42" | "subject takes up about 42% of the image" |
-| "CLIP similarity 0.84" | "image matches your prompt: very good (0.84/1.0)" |
-| "CLIP similarity 0.71" | "image matches your prompt: weak (0.71/1.0) — consider re-generating" |
+| "SigLIP similarity 0.16, band p50_or_better" | "image matches your prompt: very good" |
+| "SigLIP similarity 0.04, band below_p10" | "image matches your prompt: weak — consider re-generating" |
 | "non-manifold internal shell" | "hidden geometry inside the mesh" |
 | "wall thickness 0.4mm" | "thinnest part is 0.4mm — may fail to print" |
 | "extreme_aspect_ratio" | "image is unusually wide/tall — output mesh will be distorted" |
 | "low_resolution" | "image is below 512px — output quality will suffer" |
+| "image_reward 1.6" | "people-preference score: strong (ImageReward typically ranges roughly -2 to +2)" |
+| "image_reward -0.3" | "people-preference score: weak — the image is technically on-prompt but doesn't look great" |
+| "dreamsim_dupes: [[1, 3]]" | "variants 2 and 4 look like near-duplicates" |
+| "dreamsim_dupes: []" | "all variants are visually distinct" |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines

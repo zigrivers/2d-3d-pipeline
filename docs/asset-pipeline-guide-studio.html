@@ -1694,6 +1694,11 @@ license_bucket_for_model() {
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
         hunyuan3d-paint)                        echo commercial_threshold ;;
+        # Scorer stack refresh (item 16, 2026-08): SigLIP 2 (Apache 2.0),
+        # ImageReward (Apache 2.0), DreamSim (MIT) — all judge/metadata
+        # only, never shipped in output assets, but bucketed per
+        # cross-cutting principle 4 for consistency + auditability.
+        siglip2|imagereward|dreamsim)           echo commercial_safe ;;
         &quot;&quot;)                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
@@ -2282,6 +2287,30 @@ if [[ -f &quot;$CLIP_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/py
             --prompt &quot;$PROMPT&quot; --image &quot;$FIRST_OUTPUT&quot; \
             --meta &quot;$META_FOR_CONCEPT&quot; --model-name &quot;$MODEL&quot; 2&gt;&amp;1 \
             | grep &#x27;^\[clip\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[clip\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    fi
+
+    # v0.3.5 (item 16) — ImageReward human-preference score on the
+    # top-ranked variant. No-op when preference_score.py isn&#x27;t installed.
+    PREF_SCRIPT=&quot;$SCRIPT_DIR/preference_score.py&quot;
+    [[ -f &quot;$PREF_SCRIPT&quot; ]] || PREF_SCRIPT=&quot;$PIPELINE_ROOT/workspace/preference_score.py&quot;
+    if [[ -f &quot;$PREF_SCRIPT&quot; ]]; then
+        &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$PREF_SCRIPT&quot; \
+            --prompt &quot;$PROMPT&quot; --image &quot;$FIRST_OUTPUT&quot; \
+            --meta &quot;$META_FOR_CONCEPT&quot; 2&gt;&amp;1 \
+            | grep &#x27;^\[image-reward\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[image-reward\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+    fi
+
+    # v0.3.5 (item 16) — DreamSim near-duplicate detection across variants.
+    # Only meaningful with more than one variant.
+    if [[ &quot;$COUNT&quot; -gt 1 ]]; then
+        DEDUP_SCRIPT=&quot;$SCRIPT_DIR/dedup_variants.py&quot;
+        [[ -f &quot;$DEDUP_SCRIPT&quot; ]] || DEDUP_SCRIPT=&quot;$PIPELINE_ROOT/workspace/dedup_variants.py&quot;
+        if [[ -f &quot;$DEDUP_SCRIPT&quot; ]]; then
+            &quot;$PIPELINE_TOOLS_ENV/bin/python&quot; &quot;$DEDUP_SCRIPT&quot; \
+                --images &quot;${OUTPUT_PATHS[@]}&quot; \
+                --meta &quot;$META_FOR_CONCEPT&quot; 2&gt;&amp;1 \
+                | grep &#x27;^\[dreamsim\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[dreamsim\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
+        fi
     fi
 fi
 
@@ -5924,14 +5953,22 @@ PIPELINE_EOF</pre></div>
 
     &quot;clip&quot;: {
       &quot;type&quot;: &quot;object&quot;,
-      &quot;description&quot;: &quot;Item 8 — CLIP similarity scoring&quot;,
+      &quot;description&quot;: &quot;Item 8 — prompt-adherence + preference + dedup scoring (item 16, 2026-08 refresh: SigLIP 2 replaces CLIP as default scorer; ImageReward + DreamSim add sibling fields)&quot;,
       &quot;additionalProperties&quot;: true,
       &quot;properties&quot;: {
         &quot;similarity&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;scorer&quot;: { &quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;siglip2&quot;, &quot;clip&quot;] },
         &quot;model&quot;: { &quot;type&quot;: &quot;string&quot; },
         &quot;model_band&quot;: { &quot;type&quot;: &quot;string&quot; },
         &quot;percentile_for_this_model&quot;: { &quot;type&quot;: &quot;number&quot; },
-        &quot;rank&quot;: { &quot;type&quot;: &quot;integer&quot; }
+        &quot;rank&quot;: { &quot;type&quot;: &quot;integer&quot; },
+        &quot;image_reward&quot;: { &quot;type&quot;: &quot;number&quot; },
+        &quot;image_reward_model&quot;: { &quot;type&quot;: &quot;string&quot; },
+        &quot;dreamsim_dupes&quot;: {
+          &quot;type&quot;: &quot;array&quot;,
+          &quot;items&quot;: { &quot;type&quot;: &quot;array&quot;, &quot;items&quot;: { &quot;type&quot;: &quot;integer&quot; } }
+        },
+        &quot;dreamsim_threshold&quot;: { &quot;type&quot;: &quot;number&quot; }
       }
     }
   },
@@ -9695,24 +9732,32 @@ PIPELINE_EOF</pre></div>
               </summary>
               <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/clip_score.py << 'PIPELINE_EOF'
 #!/usr/bin/env python3
-&quot;&quot;&quot;v0.3 — CLIP variant ranking + per-model soft signal.
+&quot;&quot;&quot;v0.3.5 — prompt-adherence variant ranking + per-model soft signal.
 
-Scores generated images against their prompts using OpenCLIP ViT-L/14
-(MIT; commercial_safe). Two modes:
+Scores generated images against their prompts. Two scorer backends:
+
+  siglip2 (default): SigLIP 2 (Apache 2.0; commercial_safe). Better
+                      prompt-adherence signal than CLIP per
+                      arXiv:2606.18451 — item 16 of the 2026-08
+                      generation-quality refresh.
+  clip:               OpenCLIP ViT-L/14 (MIT; commercial_safe). Kept for
+                      back-compat; select with --scorer clip.
+
+Two modes:
 
   single:  score one image against one prompt. Writes
-           clip.similarity + clip.model + clip.model_band +
+           clip.similarity + clip.scorer + clip.model + clip.model_band +
            clip.percentile_for_this_model into the meta.json.
   rank:    score N images against the same prompt. Sorts by
            similarity desc; writes a &#x27;rank&#x27; field per variant.
 
-Calibration per model lives in scripts/clip_calibration.json (per-
-model percentile bands). Below-p25 scores trigger the &quot;weak&quot; band;
-below-p10 triggers &quot;very weak&quot; — at which point the wrapper /
-skill should suggest re-generation.
+Calibration per (scorer, model) lives in scripts/clip_calibration.json.
+Below-p25 scores trigger the &quot;weak&quot; band; below-p10 triggers &quot;very
+weak&quot; — at which point the wrapper / skill should suggest
+re-generation.
 
 Usage:
-    clip_score.py --prompt TEXT --image PATH --meta PATH --model-name MFLUX [--json]
+    clip_score.py --prompt TEXT --image PATH --meta PATH --model-name MFLUX [--scorer siglip2] [--json]
     clip_score.py --prompt TEXT --images PATH1 PATH2 ... --meta PATH --rank
 &quot;&quot;&quot;
 from __future__ import annotations
@@ -9729,28 +9774,38 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
 CALIBRATION = SCRIPT_DIR / &quot;clip_calibration.json&quot;
 
+SIGLIP2_MODEL_ID = &quot;google/siglip2-base-patch16-224&quot;
+CLIP_MODEL_ID = &quot;ViT-L-14&quot;
 
-def _imports():
+
+def _imports(scorer: str):
     try:
-        import open_clip  # type: ignore
         import torch  # type: ignore
         from PIL import Image  # type: ignore
-        return open_clip, torch, Image
+        if scorer == &quot;siglip2&quot;:
+            from transformers import AutoModel, AutoProcessor  # type: ignore
+            return (AutoModel, AutoProcessor), torch, Image
+        else:
+            import open_clip  # type: ignore
+            return open_clip, torch, Image
     except ImportError as e:
         print(f&quot;ERROR: missing dep ({e}); skipping. Activate pipeline-tools-env.&quot;,
               file=sys.stderr)
         return None, None, None
 
 
-def _band(model_name: str, score: float) -&gt; tuple[str, float]:
-    &quot;&quot;&quot;Return (band_label, approx_percentile) for `score` under `model_name`&#x27;s
-    per-model calibration. Falls back to a global 0.75 threshold if the
+def _band(scorer: str, model_name: str, score: float) -&gt; tuple[str, float]:
+    &quot;&quot;&quot;Return (band_label, approx_percentile) for `score` under `scorer`&#x27;s
+    per-model calibration. Falls back to a global threshold if the
     calibration file is missing.&quot;&quot;&quot;
+    fallback = 0.20 if scorer == &quot;siglip2&quot; else 0.75
     try:
         cal = json.loads(CALIBRATION.read_text())
     except Exception:
-        return (&quot;below_p25&quot; if score &lt; 0.75 else &quot;p50_or_better&quot;), -1.0
-    bands = cal.get(model_name) or cal.get(&quot;default&quot;) or {&quot;p50&quot;: 0.80, &quot;p25&quot;: 0.75, &quot;p10&quot;: 0.70}
+        return (&quot;below_p25&quot; if score &lt; fallback else &quot;p50_or_better&quot;), -1.0
+    scorer_cal = cal.get(scorer) or {}
+    bands = scorer_cal.get(model_name) or scorer_cal.get(&quot;default&quot;) \
+        or {&quot;p50&quot;: fallback + 0.05, &quot;p25&quot;: fallback, &quot;p10&quot;: fallback - 0.05}
     if score &gt;= bands[&quot;p50&quot;]:
         return &quot;p50_or_better&quot;, 0.5
     if score &gt;= bands[&quot;p25&quot;]:
@@ -9760,12 +9815,33 @@ def _band(model_name: str, score: float) -&gt; tuple[str, float]:
     return &quot;below_p10&quot;, 0.05
 
 
-def _score(prompt: str, image_paths: list[Path], open_clip, torch, Image) -&gt; list[float]:
-    model_id = &quot;ViT-L-14&quot;
+def _score_siglip2(prompt: str, image_paths: list[Path], model_cls, torch, Image) -&gt; list[float]:
+    AutoModel, AutoProcessor = model_cls
+    model = AutoModel.from_pretrained(SIGLIP2_MODEL_ID)
+    processor = AutoProcessor.from_pretrained(SIGLIP2_MODEL_ID)
+    model.eval()
+
+    with torch.no_grad():
+        text_inputs = processor(text=[prompt], padding=&quot;max_length&quot;, return_tensors=&quot;pt&quot;)
+        text_feat = model.get_text_features(**text_inputs)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+
+        scores: list[float] = []
+        for p in image_paths:
+            img = Image.open(p).convert(&quot;RGB&quot;)
+            img_inputs = processor(images=[img], return_tensors=&quot;pt&quot;)
+            img_feat = model.get_image_features(**img_inputs)
+            img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+            sim = float((img_feat @ text_feat.T).item())
+            scores.append(sim)
+    return scores
+
+
+def _score_clip(prompt: str, image_paths: list[Path], open_clip, torch, Image) -&gt; list[float]:
     model, _, preprocess = open_clip.create_model_and_transforms(
-        model_id, pretrained=&quot;openai&quot;
+        CLIP_MODEL_ID, pretrained=&quot;openai&quot;
     )
-    tokenizer = open_clip.get_tokenizer(model_id)
+    tokenizer = open_clip.get_tokenizer(CLIP_MODEL_ID)
     model.eval()
 
     text_tokens = tokenizer([prompt])
@@ -9784,6 +9860,12 @@ def _score(prompt: str, image_paths: list[Path], open_clip, torch, Image) -&gt; 
     return scores
 
 
+def _score(scorer: str, prompt: str, image_paths: list[Path], backend, torch, Image) -&gt; list[float]:
+    if scorer == &quot;siglip2&quot;:
+        return _score_siglip2(prompt, image_paths, backend, torch, Image)
+    return _score_clip(prompt, image_paths, backend, torch, Image)
+
+
 def main() -&gt; int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(&quot;--prompt&quot;, required=True)
@@ -9793,11 +9875,13 @@ def main() -&gt; int:
     p.add_argument(&quot;--model-name&quot;, default=&quot;z-image-turbo&quot;,
                    help=&quot;Generator name (used to pick the calibration band)&quot;)
     p.add_argument(&quot;--rank&quot;, action=&quot;store_true&quot;, help=&quot;Rank multiple images&quot;)
+    p.add_argument(&quot;--scorer&quot;, choices=[&quot;clip&quot;, &quot;siglip2&quot;], default=&quot;siglip2&quot;,
+                   help=&quot;Scorer backend (default: siglip2, per item 16 refresh)&quot;)
     p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
     args = p.parse_args()
 
-    open_clip, torch, Image = _imports()
-    if open_clip is None:
+    backend, torch, Image = _imports(args.scorer)
+    if backend is None:
         # Graceful no-op
         return 0
 
@@ -9813,22 +9897,24 @@ def main() -&gt; int:
         image_paths = [Path(os.path.expanduser(args.image))]
 
     t0 = time.time()
-    scores = _score(args.prompt, image_paths, open_clip, torch, Image)
+    scores = _score(args.scorer, args.prompt, image_paths, backend, torch, Image)
     duration = round(time.time() - t0, 2)
 
     meta_path = Path(os.path.expanduser(args.meta))
+    model_id = SIGLIP2_MODEL_ID if args.scorer == &quot;siglip2&quot; else CLIP_MODEL_ID
 
     if args.rank:
         # Sort indices by score desc
         ranked = sorted(enumerate(scores), key=lambda kv: -kv[1])
         result = []
         for rank, (idx, score) in enumerate(ranked, start=1):
-            band, pct = _band(args.model_name, score)
+            band, pct = _band(args.scorer, args.model_name, score)
             result.append({
                 &quot;rank&quot;: rank,
                 &quot;image&quot;: str(image_paths[idx]),
                 &quot;similarity&quot;: round(score, 3),
-                &quot;model&quot;: &quot;ViT-L-14&quot;,
+                &quot;scorer&quot;: args.scorer,
+                &quot;model&quot;: model_id,
                 &quot;model_band&quot;: band,
                 &quot;percentile_for_this_model&quot;: pct,
             })
@@ -9839,6 +9925,7 @@ def main() -&gt; int:
              &quot;--section&quot;, &quot;clip&quot;,
              &quot;--data&quot;, json.dumps({
                  &quot;similarity&quot;: primary[&quot;similarity&quot;],
+                 &quot;scorer&quot;: primary[&quot;scorer&quot;],
                  &quot;model&quot;: primary[&quot;model&quot;],
                  &quot;model_band&quot;: primary[&quot;model_band&quot;],
                  &quot;percentile_for_this_model&quot;: primary[&quot;percentile_for_this_model&quot;],
@@ -9854,10 +9941,11 @@ def main() -&gt; int:
                 print(f&quot;[clip] #{r[&#x27;rank&#x27;]} {r[&#x27;similarity&#x27;]:.3f} ({r[&#x27;model_band&#x27;]}) {r[&#x27;image&#x27;]}&quot;)
     else:
         score = scores[0]
-        band, pct = _band(args.model_name, score)
+        band, pct = _band(args.scorer, args.model_name, score)
         payload = {
             &quot;similarity&quot;: round(score, 3),
-            &quot;model&quot;: &quot;ViT-L-14&quot;,
+            &quot;scorer&quot;: args.scorer,
+            &quot;model&quot;: model_id,
             &quot;model_band&quot;: band,
             &quot;percentile_for_this_model&quot;: pct,
             &quot;duration_seconds&quot;: duration,
@@ -9871,7 +9959,7 @@ def main() -&gt; int:
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            print(f&quot;[clip] CLIP similarity: {score:.3f} ({band})&quot;)
+            print(f&quot;[clip] {args.scorer} similarity: {score:.3f} ({band})&quot;)
     return 0
 
 
@@ -9887,33 +9975,22 @@ PIPELINE_EOF</pre></div>
               </summary>
               <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/clip_calibration.json << 'PIPELINE_EOF'
 {
-  &quot;_schema_note&quot;: &quot;Per-model percentile bands for CLIP ViT-L/14 similarity scores. Used by scripts/clip_score.py to translate raw scores into model-aware bands. Initial values approximated from 2026 research; refresh quarterly against actual generations.&quot;,
-  &quot;_units&quot;: &quot;raw cosine similarity from CLIP ViT-L/14&quot;,
+  &quot;_schema_note&quot;: &quot;Per-scorer, per-model percentile bands. Used by scripts/clip_score.py to translate raw scores into model-aware bands. Nested by scorer since CLIP and SigLIP 2 have different raw-score scales. SigLIP 2 defaults below are a small-sample bootstrap (n=5, own-prompt vs. mismatched-prompt fixtures scored 2026-08-11 on this repo&#x27;s Studio) with real prompt-match discrimination confirmed (0.165 own-prompt vs -0.105 wrong-prompt, stable across 3 runs) — NOT yet a proper percentile calibration. Refresh with scripts/calibrate_clip.py --scorer siglip2 once &gt;=20 real generations accumulate per model.&quot;,
+  &quot;_units&quot;: &quot;raw cosine similarity (SigLIP 2 and CLIP both report cosine similarity between L2-normalized embeddings)&quot;,
   &quot;_bands&quot;: &quot;p50 = median, p25 = lower quartile, p10 = bottom decile. A score below the p10 of its model strongly suggests re-generation.&quot;,
-  &quot;default&quot;: {
-    &quot;p50&quot;: 0.80,
-    &quot;p25&quot;: 0.75,
-    &quot;p10&quot;: 0.70
+  &quot;siglip2&quot;: {
+    &quot;default&quot;: { &quot;p50&quot;: 0.14, &quot;p25&quot;: 0.10, &quot;p10&quot;: 0.05 },
+    &quot;z-image-turbo&quot;: { &quot;p50&quot;: 0.14, &quot;p25&quot;: 0.10, &quot;p10&quot;: 0.05 },
+    &quot;flux-schnell&quot;: { &quot;p50&quot;: 0.13, &quot;p25&quot;: 0.09, &quot;p10&quot;: 0.04 },
+    &quot;flux-dev&quot;: { &quot;p50&quot;: 0.15, &quot;p25&quot;: 0.11, &quot;p10&quot;: 0.06 },
+    &quot;qwen-image&quot;: { &quot;p50&quot;: 0.14, &quot;p25&quot;: 0.10, &quot;p10&quot;: 0.05 }
   },
-  &quot;z-image-turbo&quot;: {
-    &quot;p50&quot;: 0.81,
-    &quot;p25&quot;: 0.76,
-    &quot;p10&quot;: 0.71
-  },
-  &quot;flux-schnell&quot;: {
-    &quot;p50&quot;: 0.78,
-    &quot;p25&quot;: 0.73,
-    &quot;p10&quot;: 0.68
-  },
-  &quot;flux-dev&quot;: {
-    &quot;p50&quot;: 0.83,
-    &quot;p25&quot;: 0.78,
-    &quot;p10&quot;: 0.73
-  },
-  &quot;qwen-image&quot;: {
-    &quot;p50&quot;: 0.79,
-    &quot;p25&quot;: 0.74,
-    &quot;p10&quot;: 0.69
+  &quot;clip&quot;: {
+    &quot;default&quot;: { &quot;p50&quot;: 0.80, &quot;p25&quot;: 0.75, &quot;p10&quot;: 0.70 },
+    &quot;z-image-turbo&quot;: { &quot;p50&quot;: 0.81, &quot;p25&quot;: 0.76, &quot;p10&quot;: 0.71 },
+    &quot;flux-schnell&quot;: { &quot;p50&quot;: 0.78, &quot;p25&quot;: 0.73, &quot;p10&quot;: 0.68 },
+    &quot;flux-dev&quot;: { &quot;p50&quot;: 0.83, &quot;p25&quot;: 0.78, &quot;p10&quot;: 0.73 },
+    &quot;qwen-image&quot;: { &quot;p50&quot;: 0.79, &quot;p25&quot;: 0.74, &quot;p10&quot;: 0.69 }
   }
 }
 PIPELINE_EOF</pre></div>
@@ -10365,7 +10442,7 @@ def _extract_pair(entry: dict) -&gt; tuple[str, str, str] | None:
     return generator, str(cp), prompt
 
 
-def _score_one(image_path: str, prompt: str, model_name: str) -&gt; float | None:
+def _score_one(image_path: str, prompt: str, model_name: str, scorer: str) -&gt; float | None:
     &quot;&quot;&quot;Run clip_score.py once, return raw similarity. None on failure.&quot;&quot;&quot;
     if not CLIP_SCORE.exists():
         return None
@@ -10378,13 +10455,19 @@ def _score_one(image_path: str, prompt: str, model_name: str) -&gt; float | None
              &quot;--image&quot;, image_path,
              &quot;--meta&quot;, meta_path,
              &quot;--model-name&quot;, model_name,
+             &quot;--scorer&quot;, scorer,
              &quot;--json&quot;],
             capture_output=True, text=True, timeout=120,
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             return None
-        last = cp.stdout.strip().splitlines()[-1]
-        data = json.loads(last)
+        # clip_score.py --json pretty-prints (indent=2), so the JSON object
+        # spans multiple lines. Its own stdout may also carry a leading
+        # &quot;[meta_helper] merged ...&quot; status line ahead of the object.
+        # Take everything from the first &quot;{&quot; onward.
+        stdout = cp.stdout
+        start = stdout.index(&quot;{&quot;)
+        data = json.loads(stdout[start:])
         return float(data.get(&quot;similarity&quot;))
     except Exception:
         return None
@@ -10405,6 +10488,8 @@ def main() -&gt; int:
                    help=&quot;Models with fewer than N scored samples are left untouched&quot;)
     p.add_argument(&quot;--dry-run&quot;, action=&quot;store_true&quot;,
                    help=&quot;Compute + report but don&#x27;t write&quot;)
+    p.add_argument(&quot;--scorer&quot;, choices=[&quot;clip&quot;, &quot;siglip2&quot;], default=&quot;siglip2&quot;,
+                   help=&quot;Which scorer&#x27;s bands to (re)calibrate (default: siglip2)&quot;)
     p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
                    help=&quot;Emit JSON summary on stdout&quot;)
     args = p.parse_args()
@@ -10439,12 +10524,14 @@ def main() -&gt; int:
     for model_name, pairs in pairs_by_model.items():
         scores: list[float] = []
         for img, prompt in pairs:
-            s = _score_one(img, prompt, model_name)
+            s = _score_one(img, prompt, model_name, args.scorer)
             if s is not None:
                 scores.append(s)
         scores_by_model[model_name] = scores
 
-    # Load existing calibration so we can keep models we didn&#x27;t recalibrate.
+    # Load existing calibration so we can keep models/scorers we didn&#x27;t
+    # recalibrate. Nested by scorer since v0.3.5 (item 16) — bands live at
+    # calibration[scorer][model_name].
     out_path = Path(os.path.expanduser(args.out))
     existing = {}
     if out_path.exists():
@@ -10458,7 +10545,9 @@ def main() -&gt; int:
         &quot;at&quot;: __import__(&quot;datetime&quot;).datetime.utcnow().isoformat(timespec=&quot;seconds&quot;) + &quot;Z&quot;,
         &quot;manifest&quot;: str(manifest_path),
         &quot;min_samples&quot;: args.min_samples,
+        &quot;scorer&quot;: args.scorer,
     }
+    scorer_bands = dict(new_calibration.get(args.scorer) or {})
 
     summary: list[dict] = []
     for model_name, scores in scores_by_model.items():
@@ -10476,8 +10565,9 @@ def main() -&gt; int:
             &quot;p10&quot;: round(_percentile(scores, 10), 4),
             &quot;n_samples&quot;: len(scores),
         }
-        new_calibration[model_name] = bands
+        scorer_bands[model_name] = bands
         summary.append({&quot;model&quot;: model_name, &quot;scored&quot;: len(scores), &quot;status&quot;: &quot;updated&quot;, &quot;bands&quot;: bands})
+    new_calibration[args.scorer] = scorer_bands
 
     if not args.dry_run:
         out_path.write_text(json.dumps(new_calibration, indent=2, sort_keys=True) + &quot;\n&quot;)
@@ -10503,6 +10593,294 @@ def main() -&gt; int:
             print(&quot;[calibrate-clip] DRY RUN — no write&quot;)
         else:
             print(f&quot;[calibrate-clip] wrote {out_path}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>preference_score.py</code>
+                <span class="script-summary-desc">v0.3.5 ImageReward human-preference scoring (item 16)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/preference_score.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3.5 — ImageReward human-preference scoring (item 16 of the
+2026-08 generation-quality refresh).
+
+ImageReward (Apache 2.0; commercial_safe) scores an image against a
+prompt on learned human aesthetic/alignment preference, complementing
+SigLIP2&#x27;s prompt-adherence signal (scripts/clip_score.py) — a good
+CLIP/SigLIP match can still look bad; this catches that case.
+
+Writes clip.image_reward into the meta.json (same section as
+clip_score.py per the merge contract — image_reward is a sibling
+field, not a new section).
+
+Usage:
+    preference_score.py --prompt TEXT --image PATH --meta PATH [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+IMAGE_REWARD_MODEL = &quot;ImageReward-v1.0&quot;
+
+
+def _apply_transformers_compat_shim() -&gt; None:
+    &quot;&quot;&quot;ImageReward&#x27;s vendored BLIP/BERT implementation imports three
+    pruning-related helpers from transformers.modeling_utils that were
+    relocated (apply_chunking_to_forward, prune_linear_layer, both now
+    in transformers.pytorch_utils) or removed outright
+    (find_pruneable_heads_and_indices) in modern transformers releases.
+    SigLIP2 (clip_score.py) needs a modern transformers; ImageReward&#x27;s
+    upstream package hasn&#x27;t been updated for it. Shimming here keeps
+    both scorers in one pipeline-tools-env venv instead of forking it.
+    Safe: this utility&#x27;s implementation has been stable for years; the
+    body below is the last version transformers shipped before removal.
+    &quot;&quot;&quot;
+    import transformers.modeling_utils as mu
+
+    if hasattr(mu, &quot;find_pruneable_heads_and_indices&quot;):
+        return  # already present (older transformers) or already shimmed
+
+    import torch
+    import transformers.pytorch_utils as pu
+
+    def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+        mask = torch.ones(n_heads, head_size)
+        heads = set(heads) - already_pruned_heads
+        for head in heads:
+            head = head - sum(1 if h &lt; head else 0 for h in already_pruned_heads)
+            mask[head] = 0
+        mask = mask.view(-1).contiguous().eq(1)
+        index = torch.arange(len(mask))[mask].long()
+        return heads, index
+
+    mu.apply_chunking_to_forward = pu.apply_chunking_to_forward
+    mu.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
+    mu.prune_linear_layer = pu.prune_linear_layer
+
+
+def _imports():
+    try:
+        _apply_transformers_compat_shim()
+        import ImageReward as RM  # type: ignore
+        return RM
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping. Activate pipeline-tools-env.&quot;,
+              file=sys.stderr)
+        return None
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--prompt&quot;, required=True)
+    p.add_argument(&quot;--image&quot;, required=True)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--device&quot;, default=&quot;mps&quot;, help=&quot;torch device (default: mps)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    RM = _imports()
+    if RM is None:
+        return 0  # graceful no-op, matches clip_score.py&#x27;s convention
+
+    t0 = time.time()
+    try:
+        model = RM.load(IMAGE_REWARD_MODEL, device=args.device)
+        score = float(model.score(args.prompt, os.path.expanduser(args.image)))
+    except Exception as e:
+        print(f&quot;[image-reward] ERROR: scoring failed ({e}); skipping&quot;, file=sys.stderr)
+        return 0
+    duration = round(time.time() - t0, 2)
+
+    payload = {
+        &quot;image_reward&quot;: round(score, 3),
+        &quot;image_reward_model&quot;: IMAGE_REWARD_MODEL,
+        &quot;image_reward_duration_seconds&quot;: duration,
+    }
+    meta_path = Path(os.path.expanduser(args.meta))
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;clip&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=False,
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f&quot;[image-reward] score: {score:.3f}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>dedup_variants.py</code>
+                <span class="script-summary-desc">v0.3.5 DreamSim near-duplicate detection across -n N variants (item 16)</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/dedup_variants.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;v0.3.5 — DreamSim near-duplicate detection among -n N variants
+(item 16 of the 2026-08 generation-quality refresh).
+
+DreamSim (MIT; commercial_safe) is a perceptual-similarity model
+trained to match human judgments of &quot;these look like the same image&quot;
+better than pixel or CLIP-space distance. Used to flag near-duplicate
+variants among a `concept.sh -n N` batch so the skill can tell the
+user &quot;variants 2 and 4 are near-duplicates&quot; instead of presenting N
+images that are mostly the same picture.
+
+Writes clip.dreamsim_dupes (list of duplicate-group index lists) into
+the meta.json of the first/primary variant — same section as
+clip_score.py per the merge contract.
+
+Usage:
+    dedup_variants.py --images PATH1 PATH2 ... --meta PATH [--threshold 0.15] [--json]
+&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+META_HELPER = SCRIPT_DIR / &quot;meta_helper.py&quot;
+
+# DreamSim defaults to a relative &quot;./models&quot; cache_dir, which drops ~3 GB
+# wherever the caller&#x27;s cwd happens to be. Route it alongside this
+# pipeline&#x27;s other model caches (see U2NET_HOME / OPEN_CLIP_CACHE_DIR).
+DREAMSIM_CACHE_DIR = os.environ.get(
+    &quot;DREAMSIM_CACHE_DIR&quot;,
+    os.path.expanduser(&quot;~/3d-pipeline/models/dreamsim&quot;),
+)
+
+# DreamSim distance: 0 = identical, ~1 = maximally different for natural
+# images. Below this threshold, two variants are considered near-dupes.
+# Bootstrap default; recalibrate alongside clip_calibration.json once
+# real -n N batches accumulate.
+DEFAULT_THRESHOLD = 0.15
+
+
+def _imports():
+    try:
+        import torch  # type: ignore
+        from dreamsim import dreamsim  # type: ignore
+        from PIL import Image  # type: ignore
+        return dreamsim, torch, Image
+    except ImportError as e:
+        print(f&quot;ERROR: missing dep ({e}); skipping. Activate pipeline-tools-env.&quot;,
+              file=sys.stderr)
+        return None, None, None
+
+
+def _dedupe_groups(distances: dict[tuple[int, int], float], n: int, threshold: float) -&gt; list[list[int]]:
+    &quot;&quot;&quot;Union-find over pairs below threshold; returns groups of size &gt;= 2.&quot;&quot;&quot;
+    parent = list(range(n))
+
+    def find(x: int) -&gt; int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -&gt; None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for (i, j), d in distances.items():
+        if d &lt; threshold:
+            union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return [sorted(g) for g in groups.values() if len(g) &gt; 1]
+
+
+def main() -&gt; int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(&quot;--images&quot;, nargs=&quot;+&quot;, required=True,
+                   help=&quot;Variant image paths, in generation order&quot;)
+    p.add_argument(&quot;--meta&quot;, required=True)
+    p.add_argument(&quot;--threshold&quot;, type=float, default=DEFAULT_THRESHOLD,
+                   help=f&quot;DreamSim distance below which two images count as &quot;
+                        f&quot;near-duplicates (default: {DEFAULT_THRESHOLD})&quot;)
+    p.add_argument(&quot;--device&quot;, default=&quot;mps&quot;, help=&quot;torch device (default: mps)&quot;)
+    p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
+    args = p.parse_args()
+
+    if len(args.images) &lt; 2:
+        print(&quot;[dreamsim] fewer than 2 images; nothing to dedupe&quot;, file=sys.stderr)
+        return 0
+
+    dreamsim, torch, Image = _imports()
+    if dreamsim is None:
+        return 0
+
+    t0 = time.time()
+    Path(DREAMSIM_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    model, preprocess = dreamsim(pretrained=True, device=args.device, cache_dir=DREAMSIM_CACHE_DIR)
+
+    image_paths = [Path(os.path.expanduser(p)) for p in args.images]
+    tensors = [preprocess(Image.open(p).convert(&quot;RGB&quot;)).to(args.device) for p in image_paths]
+
+    distances: dict[tuple[int, int], float] = {}
+    with torch.no_grad():
+        for i in range(len(tensors)):
+            for j in range(i + 1, len(tensors)):
+                d = float(model(tensors[i], tensors[j]).item())
+                distances[(i, j)] = d
+
+    duration = round(time.time() - t0, 2)
+    groups = _dedupe_groups(distances, len(tensors), args.threshold)
+
+    payload = {
+        &quot;dreamsim_dupes&quot;: groups,
+        &quot;dreamsim_threshold&quot;: args.threshold,
+        &quot;dreamsim_duration_seconds&quot;: duration,
+    }
+    meta_path = Path(os.path.expanduser(args.meta))
+    subprocess.run(
+        [sys.executable, str(META_HELPER), &quot;merge&quot;, str(meta_path),
+         &quot;--section&quot;, &quot;clip&quot;,
+         &quot;--data&quot;, json.dumps(payload)],
+        check=False,
+    )
+    if args.json:
+        print(json.dumps({
+            **payload,
+            &quot;pairwise_distances&quot;: {f&quot;{i}-{j}&quot;: round(d, 3) for (i, j), d in distances.items()},
+        }, indent=2, sort_keys=True))
+    else:
+        if groups:
+            for g in groups:
+                names = &quot;, &quot;.join(str(i + 1) for i in g)
+                print(f&quot;[dreamsim] variants {names} are near-duplicates&quot;)
+        else:
+            print(&quot;[dreamsim] no near-duplicate variants found&quot;)
     return 0
 
 
@@ -11927,7 +12305,11 @@ On a fresh install, before any asset work, ask the user to run:
 This reports disk space, expected venvs, expected model caches, and
 that each wrapper&#x27;s `--help` works. On a partial install, it lists
 what&#x27;s missing. To pre-download the v0.3 quality-feature models
-(~1 GB total: rembg&#x27;s u2net + OpenCLIP ViT-L/14):
+(~1 GB total: rembg&#x27;s u2net + SigLIP 2 base):
+
+Note: `--warm-cache` does not yet cover the item-16 scorer stack
+(ImageReward ~1.8 GB, DreamSim&#x27;s ensemble weights ~1.5 GB) — those
+download on first real use of `concept.sh`&#x27;s prompt-adherence scoring.
 
 ```bash
 ~/3d-pipeline/workspace/pipeline_doctor.py --warm-cache
@@ -12251,12 +12633,16 @@ this table (cross-cutting principle 8 from improvement-spec.md):
 | &quot;UV island&quot; | &quot;texture patch&quot; |
 | &quot;decimate ratio 0.16&quot; | &quot;simplified mesh: 18,400 → 3,000 polygons&quot; |
 | &quot;alpha_mean 0.42&quot; | &quot;subject takes up about 42% of the image&quot; |
-| &quot;CLIP similarity 0.84&quot; | &quot;image matches your prompt: very good (0.84/1.0)&quot; |
-| &quot;CLIP similarity 0.71&quot; | &quot;image matches your prompt: weak (0.71/1.0) — consider re-generating&quot; |
+| &quot;SigLIP similarity 0.16, band p50_or_better&quot; | &quot;image matches your prompt: very good&quot; |
+| &quot;SigLIP similarity 0.04, band below_p10&quot; | &quot;image matches your prompt: weak — consider re-generating&quot; |
 | &quot;non-manifold internal shell&quot; | &quot;hidden geometry inside the mesh&quot; |
 | &quot;wall thickness 0.4mm&quot; | &quot;thinnest part is 0.4mm — may fail to print&quot; |
 | &quot;extreme_aspect_ratio&quot; | &quot;image is unusually wide/tall — output mesh will be distorted&quot; |
 | &quot;low_resolution&quot; | &quot;image is below 512px — output quality will suffer&quot; |
+| &quot;image_reward 1.6&quot; | &quot;people-preference score: strong (ImageReward typically ranges roughly -2 to +2)&quot; |
+| &quot;image_reward -0.3&quot; | &quot;people-preference score: weak — the image is technically on-prompt but doesn&#x27;t look great&quot; |
+| &quot;dreamsim_dupes: [[1, 3]]&quot; | &quot;variants 2 and 4 look like near-duplicates&quot; |
+| &quot;dreamsim_dupes: []&quot; | &quot;all variants are visually distinct&quot; |
 
 When a check emits a raw value (in `--json` mode), translate before
 speaking to the user. The wrapper already pre-translates some lines
@@ -13348,14 +13734,22 @@ chmod +x ~/.claude/skills/asset-pipeline/scripts/update_manifest.py</pre></div>
         <label class="step-check"><input type="checkbox"></label>
         <div class="step-body">
           <h3>Create the pipeline-tools venv</h3>
-          <p>Same Python version as SF3D / mflux. The venv houses <code>trimesh</code>, <code>open_clip_torch</code>, <code>rembg</code>, and a few small helpers. Total disk impact: ~6&nbsp;GB once populated (vs. ~15&nbsp;GB if each tool had its own venv).</p>
+          <p>Same Python version as SF3D / mflux. The venv houses <code>trimesh</code>, <code>open_clip_torch</code>, <code>rembg</code>, the item-16 scorer stack (SigLIP&nbsp;2, ImageReward, DreamSim), and a few small helpers. Total disk impact: ~7&nbsp;GB once populated (vs. ~15&nbsp;GB+ if each tool had its own venv).</p>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>cd ~/3d-pipeline
 <span class="tk-prompt">$ </span>python3.12 -m venv pipeline-tools-env    <span class="tk-cmt"># match SF3D / mflux Python version</span>
 <span class="tk-prompt">$ </span>source pipeline-tools-env/bin/activate
 <span class="tk-prompt">$ </span>pip install --upgrade pip
-<span class="tk-prompt">$ </span>pip install trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests
+<span class="tk-prompt">$ </span>pip install trimesh numpy scipy Pillow rembg[cpu] open_clip_torch torch tqdm requests <span class="tk-str">"transformers==4.57.6"</span> dreamsim
+<span class="tk-prompt">$ </span>pip install setuptools
+<span class="tk-prompt">$ </span>pip install image-reward --no-build-isolation
+<span class="tk-prompt">$ </span>pip install git+https://github.com/openai/CLIP.git
+<span class="tk-prompt">$ </span>pip install <span class="tk-str">"timm>=1.0.17"</span>    <span class="tk-cmt"># re-pin after image-reward's install; see note below</span>
 <span class="tk-prompt">$ </span>deactivate</pre></div>
-          <p>First install: 5–10 minutes on Studio tier. <code>torch</code> is the heaviest dep (~2&nbsp;GB) and is shared by <code>open_clip_torch</code> + <code>rembg</code>.</p>
+          <p>First install: 5–10 minutes on Studio tier. <code>torch</code> is the heaviest dep (~2&nbsp;GB) and is shared by <code>open_clip_torch</code> + <code>rembg</code> + the scorer stack.</p>
+          <div class="callout callout-info">
+            <div class="callout-label">Why the extra scorer-stack steps (item 16, 2026-08 refresh)</div>
+            <p><code>transformers==4.57.6</code> is pinned deliberately: SigLIP&nbsp;2 needs a recent <code>transformers</code>, but <code>image-reward</code>'s vendored BLIP implementation imports internal helpers that transformers 5.x removed — 4.57.6 is the newest release with both. <code>image-reward</code>'s own <code>setup.py</code> needs <code>--no-build-isolation</code> (it imports <code>pkg_resources</code> at build time without declaring <code>setuptools</code> as a build dependency — the same class of bug SF3D's <code>texture_baker</code> has, see the SF3D section above). It also imports OpenAI's original <code>clip</code> package without declaring it as a dependency, and its install downgrades <code>timm</code> to a version <code>open_clip_torch</code> can't use — the final <code>timm</code> re-pin fixes that (verified: <code>image-reward</code>'s runtime works fine against the newer <code>timm</code> despite its conservative pin).</p>
+          </div>
         </div>
       </div>
 
@@ -13376,9 +13770,11 @@ export OPEN_CLIP_CACHE_DIR=<span class="tk-str">"$HOME/3d-pipeline/models/clip"<
         <div class="step-body">
           <h3>Verify</h3>
           <div class="code-block"><div class="code-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div><pre><span class="tk-prompt">$ </span>source ~/3d-pipeline/pipeline-tools-env/bin/activate
-<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests; print('ok')"</span>
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import trimesh, numpy, scipy, PIL, rembg, open_clip, torch, tqdm, requests, transformers, clip, dreamsim; print('ok')"</span>
+<span class="tk-prompt">$ </span>cd ~/3d-pipeline/workspace
+<span class="tk-prompt">$ </span>python -c <span class="tk-str">"import sys; sys.path.insert(0, '.'); from preference_score import _apply_transformers_compat_shim; _apply_transformers_compat_shim(); import ImageReward; print('ok')"</span>
 <span class="tk-prompt">$ </span>deactivate</pre></div>
-          <p>You should see <code>ok</code> with no traceback. No models download in this step — that happens when v0.3 features actually run.</p>
+          <p>Both commands should print <code>ok</code> with no traceback. No models download in this step — that happens when v0.3+ features actually run. <code>ImageReward</code> is checked through the shim explicitly (not a bare <code>import ImageReward</code>) because, as of the pinned <code>transformers==4.57.6</code>, a bare import fails without it — the shim isn't just future-proofing.</p>
           <div class="verify">
             <div class="verify-header">Verify</div>
             <div class="verify-body">Each import succeeds. If <code>rembg</code> or <code>open_clip_torch</code> fail to install on your machine, see the troubleshooting notes in <a href="UPGRADES-studio.md">UPGRADES-studio.md</a>.</div>

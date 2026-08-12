@@ -279,6 +279,11 @@ license_bucket_for_model() {
         # and approved 2026-05-20 (see docs/license-review-hunyuan3d-paint.md);
         # bucket is `commercial_threshold` (same as SF3D / SPAR3D).
         hunyuan3d-paint)                        echo commercial_threshold ;;
+        # Scorer stack refresh (item 16, 2026-08): SigLIP 2 (Apache 2.0),
+        # ImageReward (Apache 2.0), DreamSim (MIT) — all judge/metadata
+        # only, never shipped in output assets, but bucketed per
+        # cross-cutting principle 4 for consistency + auditability.
+        siglip2|imagereward|dreamsim)           echo commercial_safe ;;
         "")                                     echo unknown ;;
         *)                                      echo unknown ;;
     esac
