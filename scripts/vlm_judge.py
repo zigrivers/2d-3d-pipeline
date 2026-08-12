@@ -29,11 +29,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -153,15 +157,86 @@ def _imports():
         return None, None
 
 
-def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_path: str) -> dict:
+# --- optional remote judge endpoint (v0.6.1) -------------------------------
+#
+# When --endpoint (or PIPELINE_JUDGE_ENDPOINT) points at an OpenAI-compatible
+# vision chat server (e.g. `mlx_vlm server` on another machine), judge calls
+# go over HTTP instead of loading the model in-process — same rubric, same
+# temperature-0 sampling, same JSON parsing. Off by default; unreachable
+# endpoint falls back to the in-process path with a warning, so behavior
+# without the env var is unchanged.
+
+ENDPOINT_ENV = "PIPELINE_JUDGE_ENDPOINT"
+# First remote call may hit a model cold-load on the server side; warm rubric
+# calls are ~10-20s, a joint mesh call over 8 views is slower.
+ENDPOINT_TIMEOUT_SECONDS = int(os.environ.get("PIPELINE_JUDGE_ENDPOINT_TIMEOUT", "300"))
+
+
+def _endpoint_base(url: str) -> str:
+    return url.rstrip("/")
+
+
+def _endpoint_probe(endpoint: str) -> bool:
+    """Cheap reachability check so an unset-up endpoint degrades to the
+    in-process path before any scoring starts (never mid-rank, which would
+    mix two judges' scores in one ranking)."""
+    try:
+        req = urllib.request.Request(f"{_endpoint_base(endpoint)}/models")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _image_data_url(image_path: str) -> str:
+    mime = mimetypes.guess_type(image_path)[0] or "image/png"
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _endpoint_generate(endpoint: str, model: str, prompt: str,
+                       image_paths: list[str], max_tokens: int) -> str:
+    content = [{"type": "image_url", "image_url": {"url": _image_data_url(p)}}
+               for p in image_paths]
+    content.append({"type": "text", "text": prompt})
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    req = urllib.request.Request(
+        f"{_endpoint_base(endpoint)}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=ENDPOINT_TIMEOUT_SECONDS) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    return body["choices"][0]["message"]["content"]
+
+
+def _make_generate(endpoint, mlx_vlm, apply_chat_template, model, processor, config, model_name):
+    """Return gen(prompt, image_paths, max_tokens) -> raw text, routed either
+    over HTTP or through the in-process mlx-vlm model."""
+    if endpoint:
+        def gen(prompt, image_paths, max_tokens):
+            return _endpoint_generate(endpoint, model_name, prompt, image_paths, max_tokens)
+        return gen
+
+    def gen(prompt, image_paths, max_tokens):
+        formatted = apply_chat_template(processor, config, prompt, num_images=len(image_paths))
+        return mlx_vlm.generate(
+            model, processor, formatted, image=image_paths,
+            max_tokens=max_tokens, temperature=0.0, verbose=False,
+        ).text
+    return gen
+
+
+def _judge_one(gen, image_path: str) -> dict:
     """One judge call per image — fixed rubric, fresh conversation (no
     history from prior images), per the de-biasing protocol."""
-    formatted = apply_chat_template(processor, config, RUBRIC, num_images=1)
-    result = mlx_vlm.generate(
-        model, processor, formatted, image=[image_path],
-        max_tokens=350, temperature=0.0, verbose=False,
-    )
-    text = result.text.strip()
+    text = gen(RUBRIC, [image_path], 350).strip()
     start = text.index("{")
     end = text.rindex("}") + 1
     data = json.loads(text[start:end])
@@ -172,14 +247,9 @@ def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_pat
     return parsed
 
 
-def _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config, image_paths: list[str]) -> dict:
+def _judge_mesh(gen, image_paths: list[str]) -> dict:
     """One joint call over all turntable views of a single mesh."""
-    formatted = apply_chat_template(processor, config, MESH_RUBRIC, num_images=len(image_paths))
-    result = mlx_vlm.generate(
-        model, processor, formatted, image=image_paths,
-        max_tokens=400, temperature=0.0, verbose=False,
-    )
-    text = result.text.strip()
+    text = gen(MESH_RUBRIC, image_paths, 400).strip()
     start = text.index("{")
     end = text.rindex("}") + 1
     data = json.loads(text[start:end])
@@ -206,15 +276,28 @@ def main() -> int:
     p.add_argument("--meta", required=True)
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"mlx-vlm model repo (default: {DEFAULT_MODEL})")
+    p.add_argument("--endpoint", default=os.environ.get(ENDPOINT_ENV, ""),
+                   help="Optional OpenAI-compatible vision endpoint base URL "
+                        f"(e.g. http://host:8006/v1). Default: ${ENDPOINT_ENV}. "
+                        "Unreachable endpoint falls back to in-process mlx-vlm.")
     p.add_argument("--rank", action="store_true", help="Judge and rank multiple images")
     p.add_argument("--floor", type=float, default=2.0,
                    help="Overall score below this (default 2.0) flags 'rejected' (warn-don't-block)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
-    mlx_vlm, apply_chat_template = _imports()
-    if mlx_vlm is None:
-        return 0  # graceful no-op
+    endpoint = args.endpoint.strip()
+    if endpoint and not _endpoint_probe(endpoint):
+        print(f"[judge] WARNING: endpoint {endpoint} unreachable — "
+              "falling back to in-process mlx-vlm", file=sys.stderr)
+        endpoint = ""
+
+    if endpoint:
+        mlx_vlm = apply_chat_template = None
+    else:
+        mlx_vlm, apply_chat_template = _imports()
+        if mlx_vlm is None:
+            return 0  # graceful no-op
 
     if args.mode == "mesh":
         if not args.images:
@@ -233,19 +316,24 @@ def main() -> int:
         image_paths = [Path(os.path.expanduser(args.image))]
 
     t0 = time.time()
-    model, processor = mlx_vlm.load(args.model)
-    config = model.config
+    if endpoint:
+        model = processor = config = None
+    else:
+        model, processor = mlx_vlm.load(args.model)
+        config = model.config
     t_load = time.time()
+    gen = _make_generate(endpoint, mlx_vlm, apply_chat_template,
+                         model, processor, config, args.model)
     meta_path = Path(os.path.expanduser(args.meta))
 
     if args.mode == "mesh":
         t_img0 = time.time()
-        scores = _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config,
-                              [str(p) for p in image_paths])
+        scores = _judge_mesh(gen, [str(p) for p in image_paths])
         verdict = float(scores.get("overall", 0))
         rejected = verdict < args.floor
         payload = {
             "model": args.model,
+            **({"endpoint": endpoint} if endpoint else {}),
             "views_rendered": len(image_paths),
             "scores": {k: v for k, v in scores.items() if k != "artifacts_note"},
             "notes": scores.get("artifacts_note", ""),
@@ -275,7 +363,7 @@ def main() -> int:
     results = []
     for img in image_paths:
         t_img0 = time.time()
-        scores = _judge_one(mlx_vlm, apply_chat_template, model, processor, config, str(img))
+        scores = _judge_one(gen, str(img))
         results.append({
             "image": str(img),
             "scores": scores,
@@ -301,6 +389,7 @@ def main() -> int:
              "--section", "judge",
              "--data", json.dumps({
                  "model": args.model,
+                 **({"endpoint": endpoint} if endpoint else {}),
                  "mode": "image",
                  "scores": winner["scores"],
                  "verdict": winner["verdict"],
@@ -328,6 +417,7 @@ def main() -> int:
         rejected = verdict < args.floor
         payload = {
             "model": args.model,
+            **({"endpoint": endpoint} if endpoint else {}),
             "mode": "image",
             "scores": r["scores"],
             "verdict": verdict,

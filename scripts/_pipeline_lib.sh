@@ -433,3 +433,16 @@ print_context() {
         printf "Assets:   %s\n" "$ASSETS_ROOT"
     fi
 }
+
+# v0.6.1 — interpreter for vlm_judge.py. The vlm-env python when installed;
+# plain python3 when a remote judge endpoint is set (the endpoint path in
+# vlm_judge.py is stdlib-only, no mlx-vlm needed). Empty when neither, and
+# callers treat empty as "judge unavailable" (same no-op as before).
+judge_python() {
+    local vlm_env="${VLM_ENV:-$PIPELINE_ROOT/vlm-env}"
+    if [[ -x "$vlm_env/bin/python" ]]; then
+        printf '%s\n' "$vlm_env/bin/python"
+    elif [[ -n "${PIPELINE_JUDGE_ENDPOINT:-}" ]]; then
+        command -v python3 || true
+    fi
+}

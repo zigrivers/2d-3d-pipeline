@@ -2,6 +2,37 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-08-12 — v0.6.1: optional remote judge endpoint
+
+`vlm_judge.py` gains `--endpoint URL` / `$PIPELINE_JUDGE_ENDPOINT`: when
+set, concept and mesh judging go to any OpenAI-compatible vision chat
+server instead of loading Qwen3-VL in-process. Generic, opt-in wiring —
+with the env var unset, nothing changes anywhere.
+
+- `scripts/vlm_judge.py` — remote path is stdlib-only (`urllib`), sends
+  the same rubric at temperature 0 with images as base64 data URLs, and
+  parses identically; scores verified byte-identical to the in-process
+  path on a real fixture (every dimension including `visible_faces`).
+  A 5s reachability probe runs before any scoring; an unreachable
+  endpoint warns and falls back in-process — never mid-rank, so one
+  ranking never mixes two judges. meta.json's `judge` section records
+  the `endpoint` used (schema already allows extra keys).
+- `scripts/_pipeline_lib.sh` — new `judge_python()`: picks the vlm-env
+  interpreter when installed, else plain `python3` when an endpoint is
+  set (the remote path needs no mlx-vlm). `concept.sh` and `generate.sh`
+  gate on it instead of hard-requiring vlm-env.
+- `benchmark.sh`/`model_bakeoff.py` need no changes: the env var reaches
+  vlm_judge.py through normal subprocess inheritance (verified live).
+- Tests: `tests/python/test_vlm_judge_endpoint.py` — 5 subprocess tests
+  against a stdlib mock server (request shape, data-URL round-trip,
+  one-call-per-image de-biasing preserved under --rank, env-var pickup,
+  graceful fallback). Runs without mlx-vlm installed — itself part of
+  the contract.
+- Live evidence (2026-08-12): `concept.sh "wooden supply crate"
+  --best-of 2` judged both variants remotely, winner's meta.json carries
+  the endpoint; measured ~18-19s per fresh judge call against a busy
+  server, ~2.6s with the server's vision cache warm.
+
 ## 2026-08-12 — v0.6.0: 2026-08 generation-quality refresh (items 15–25)
 
 Full round of `docs/spec-generation-refresh-2026.md`, shipped as one

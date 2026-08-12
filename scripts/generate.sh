@@ -791,10 +791,10 @@ fi
 JUDGE_MESH_VERDICT=""
 JUDGE_MESH_REJECTED=""
 if [[ "$JUDGE_MESH" == "1" ]]; then
-    VLM_ENV="${VLM_ENV:-$PIPELINE_ROOT/vlm-env}"
+    JUDGE_PYTHON="$(judge_python)"
     JUDGE_SCRIPT="$SCRIPT_DIR/vlm_judge.py"
     [[ -f "$JUDGE_SCRIPT" ]] || JUDGE_SCRIPT="$PIPELINE_ROOT/workspace/vlm_judge.py"
-    if [[ -f "$JUDGE_SCRIPT" && -x "$VLM_ENV/bin/python" && -f "$TURNTABLE_SCRIPT" && -x "$BLENDER" ]]; then
+    if [[ -f "$JUDGE_SCRIPT" && -n "$JUDGE_PYTHON" && -f "$TURNTABLE_SCRIPT" && -x "$BLENDER" ]]; then
         MESH_JUDGE_VIEWS="$(read_pipeline_config mesh_judge_views 8)"
         MESH_JUDGE_FLOOR="$(read_pipeline_config mesh_judge_floor 2.0)"
         MESH_JUDGE_DIR="$ASSETS_ROOT/preview/mesh_judge"

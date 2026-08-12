@@ -339,6 +339,16 @@ a few seconds per image after the model is loaded once.
 already happy with; `vlm-env` not installed and the user wants to
 generate right now (offer it as a follow-up instead).
 
+**Remote judge endpoint (v0.6.1).** If `PIPELINE_JUDGE_ENDPOINT` is set
+(or `vlm_judge.py --endpoint URL`), judge calls go to an OpenAI-compatible
+vision chat server (e.g. `mlx_vlm server` on another machine) instead of
+loading the model in-process — same rubric, temperature-0 sampling, and
+scoring. With an endpoint set, `vlm-env` isn't required at all; an
+unreachable endpoint warns and falls back to the in-process path. This is
+generic wiring: nothing in the pipeline assumes any particular server
+exists, and with the env var unset nothing changes. All wrappers
+(`concept.sh`, `generate.sh`, `benchmark.sh`) inherit it automatically.
+
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
 When the user needs **identity-locked** generations across multiple

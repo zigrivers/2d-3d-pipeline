@@ -415,16 +415,17 @@ if [[ -f "$CLIP_SCRIPT" && -x "$PIPELINE_TOOLS_ENV/bin/python" ]]; then
 fi
 
 # v0.3.5 (item 17) — local VLM judge + best-of-N auto-select. No-op when
-# vlm-env or vlm_judge.py isn't installed.
-VLM_ENV="${VLM_ENV:-$PIPELINE_ROOT/vlm-env}"
+# vlm-env or vlm_judge.py isn't installed (v0.6.1: a remote judge endpoint
+# via $PIPELINE_JUDGE_ENDPOINT works without vlm-env — see judge_python).
+JUDGE_PYTHON="$(judge_python)"
 JUDGE_SCRIPT="$SCRIPT_DIR/vlm_judge.py"
 [[ -f "$JUDGE_SCRIPT" ]] || JUDGE_SCRIPT="$PIPELINE_ROOT/workspace/vlm_judge.py"
-if [[ "$JUDGE" == "1" && -f "$JUDGE_SCRIPT" && -x "$VLM_ENV/bin/python" ]]; then
+if [[ "$JUDGE" == "1" && -f "$JUDGE_SCRIPT" && -n "$JUDGE_PYTHON" ]]; then
     META_FOR_CONCEPT="${FIRST_OUTPUT}.meta.json"
     if [[ "$COUNT" -gt 1 ]]; then
         JUDGE_RESULT_FILE="$(mktemp)"
         JUDGE_STDERR_FILE="$(mktemp)"
-        "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+        "$JUDGE_PYTHON" "$JUDGE_SCRIPT" \
             --mode image --images "${OUTPUT_PATHS[@]}" \
             --meta "$META_FOR_CONCEPT" --rank --json \
             > "$JUDGE_RESULT_FILE" 2> "$JUDGE_STDERR_FILE" || true
@@ -463,7 +464,7 @@ print(picked)
         fi
         rm -f "$JUDGE_RESULT_FILE"
     else
-        "$VLM_ENV/bin/python" "$JUDGE_SCRIPT" \
+        "$JUDGE_PYTHON" "$JUDGE_SCRIPT" \
             --mode image --image "$FIRST_OUTPUT" \
             --meta "$META_FOR_CONCEPT" 2>&1 \
             | grep '^\[judge\]' | { while IFS= read -r line; do printf "[concept] %s\n" "${line#\[judge\] }" >&"$HUMAN_FD"; done; } || true

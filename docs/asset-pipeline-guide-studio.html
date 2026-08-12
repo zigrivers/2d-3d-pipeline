@@ -1958,6 +1958,19 @@ print_context() {
         printf &quot;Assets:   %s\n&quot; &quot;$ASSETS_ROOT&quot;
     fi
 }
+
+# v0.6.1 — interpreter for vlm_judge.py. The vlm-env python when installed;
+# plain python3 when a remote judge endpoint is set (the endpoint path in
+# vlm_judge.py is stdlib-only, no mlx-vlm needed). Empty when neither, and
+# callers treat empty as &quot;judge unavailable&quot; (same no-op as before).
+judge_python() {
+    local vlm_env=&quot;${VLM_ENV:-$PIPELINE_ROOT/vlm-env}&quot;
+    if [[ -x &quot;$vlm_env/bin/python&quot; ]]; then
+        printf &#x27;%s\n&#x27; &quot;$vlm_env/bin/python&quot;
+    elif [[ -n &quot;${PIPELINE_JUDGE_ENDPOINT:-}&quot; ]]; then
+        command -v python3 || true
+    fi
+}
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/_pipeline_lib.sh</pre></div>
             </details>
@@ -2515,16 +2528,17 @@ if [[ -f &quot;$CLIP_SCRIPT&quot; &amp;&amp; -x &quot;$PIPELINE_TOOLS_ENV/bin/py
 fi
 
 # v0.3.5 (item 17) — local VLM judge + best-of-N auto-select. No-op when
-# vlm-env or vlm_judge.py isn&#x27;t installed.
-VLM_ENV=&quot;${VLM_ENV:-$PIPELINE_ROOT/vlm-env}&quot;
+# vlm-env or vlm_judge.py isn&#x27;t installed (v0.6.1: a remote judge endpoint
+# via $PIPELINE_JUDGE_ENDPOINT works without vlm-env — see judge_python).
+JUDGE_PYTHON=&quot;$(judge_python)&quot;
 JUDGE_SCRIPT=&quot;$SCRIPT_DIR/vlm_judge.py&quot;
 [[ -f &quot;$JUDGE_SCRIPT&quot; ]] || JUDGE_SCRIPT=&quot;$PIPELINE_ROOT/workspace/vlm_judge.py&quot;
-if [[ &quot;$JUDGE&quot; == &quot;1&quot; &amp;&amp; -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -x &quot;$VLM_ENV/bin/python&quot; ]]; then
+if [[ &quot;$JUDGE&quot; == &quot;1&quot; &amp;&amp; -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -n &quot;$JUDGE_PYTHON&quot; ]]; then
     META_FOR_CONCEPT=&quot;${FIRST_OUTPUT}.meta.json&quot;
     if [[ &quot;$COUNT&quot; -gt 1 ]]; then
         JUDGE_RESULT_FILE=&quot;$(mktemp)&quot;
         JUDGE_STDERR_FILE=&quot;$(mktemp)&quot;
-        &quot;$VLM_ENV/bin/python&quot; &quot;$JUDGE_SCRIPT&quot; \
+        &quot;$JUDGE_PYTHON&quot; &quot;$JUDGE_SCRIPT&quot; \
             --mode image --images &quot;${OUTPUT_PATHS[@]}&quot; \
             --meta &quot;$META_FOR_CONCEPT&quot; --rank --json \
             &gt; &quot;$JUDGE_RESULT_FILE&quot; 2&gt; &quot;$JUDGE_STDERR_FILE&quot; || true
@@ -2563,7 +2577,7 @@ print(picked)
         fi
         rm -f &quot;$JUDGE_RESULT_FILE&quot;
     else
-        &quot;$VLM_ENV/bin/python&quot; &quot;$JUDGE_SCRIPT&quot; \
+        &quot;$JUDGE_PYTHON&quot; &quot;$JUDGE_SCRIPT&quot; \
             --mode image --image &quot;$FIRST_OUTPUT&quot; \
             --meta &quot;$META_FOR_CONCEPT&quot; 2&gt;&amp;1 \
             | grep &#x27;^\[judge\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[judge\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
@@ -3405,10 +3419,10 @@ fi
 JUDGE_MESH_VERDICT=&quot;&quot;
 JUDGE_MESH_REJECTED=&quot;&quot;
 if [[ &quot;$JUDGE_MESH&quot; == &quot;1&quot; ]]; then
-    VLM_ENV=&quot;${VLM_ENV:-$PIPELINE_ROOT/vlm-env}&quot;
+    JUDGE_PYTHON=&quot;$(judge_python)&quot;
     JUDGE_SCRIPT=&quot;$SCRIPT_DIR/vlm_judge.py&quot;
     [[ -f &quot;$JUDGE_SCRIPT&quot; ]] || JUDGE_SCRIPT=&quot;$PIPELINE_ROOT/workspace/vlm_judge.py&quot;
-    if [[ -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -x &quot;$VLM_ENV/bin/python&quot; &amp;&amp; -f &quot;$TURNTABLE_SCRIPT&quot; &amp;&amp; -x &quot;$BLENDER&quot; ]]; then
+    if [[ -f &quot;$JUDGE_SCRIPT&quot; &amp;&amp; -n &quot;$JUDGE_PYTHON&quot; &amp;&amp; -f &quot;$TURNTABLE_SCRIPT&quot; &amp;&amp; -x &quot;$BLENDER&quot; ]]; then
         MESH_JUDGE_VIEWS=&quot;$(read_pipeline_config mesh_judge_views 8)&quot;
         MESH_JUDGE_FLOOR=&quot;$(read_pipeline_config mesh_judge_floor 2.0)&quot;
         MESH_JUDGE_DIR=&quot;$ASSETS_ROOT/preview/mesh_judge&quot;
@@ -13076,11 +13090,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -13200,15 +13218,86 @@ def _imports():
         return None, None
 
 
-def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_path: str) -&gt; dict:
+# --- optional remote judge endpoint (v0.6.1) -------------------------------
+#
+# When --endpoint (or PIPELINE_JUDGE_ENDPOINT) points at an OpenAI-compatible
+# vision chat server (e.g. `mlx_vlm server` on another machine), judge calls
+# go over HTTP instead of loading the model in-process — same rubric, same
+# temperature-0 sampling, same JSON parsing. Off by default; unreachable
+# endpoint falls back to the in-process path with a warning, so behavior
+# without the env var is unchanged.
+
+ENDPOINT_ENV = &quot;PIPELINE_JUDGE_ENDPOINT&quot;
+# First remote call may hit a model cold-load on the server side; warm rubric
+# calls are ~10-20s, a joint mesh call over 8 views is slower.
+ENDPOINT_TIMEOUT_SECONDS = int(os.environ.get(&quot;PIPELINE_JUDGE_ENDPOINT_TIMEOUT&quot;, &quot;300&quot;))
+
+
+def _endpoint_base(url: str) -&gt; str:
+    return url.rstrip(&quot;/&quot;)
+
+
+def _endpoint_probe(endpoint: str) -&gt; bool:
+    &quot;&quot;&quot;Cheap reachability check so an unset-up endpoint degrades to the
+    in-process path before any scoring starts (never mid-rank, which would
+    mix two judges&#x27; scores in one ranking).&quot;&quot;&quot;
+    try:
+        req = urllib.request.Request(f&quot;{_endpoint_base(endpoint)}/models&quot;)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _image_data_url(image_path: str) -&gt; str:
+    mime = mimetypes.guess_type(image_path)[0] or &quot;image/png&quot;
+    with open(image_path, &quot;rb&quot;) as f:
+        b64 = base64.b64encode(f.read()).decode(&quot;ascii&quot;)
+    return f&quot;data:{mime};base64,{b64}&quot;
+
+
+def _endpoint_generate(endpoint: str, model: str, prompt: str,
+                       image_paths: list[str], max_tokens: int) -&gt; str:
+    content = [{&quot;type&quot;: &quot;image_url&quot;, &quot;image_url&quot;: {&quot;url&quot;: _image_data_url(p)}}
+               for p in image_paths]
+    content.append({&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: prompt})
+    payload = {
+        &quot;model&quot;: model,
+        &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: content}],
+        &quot;max_tokens&quot;: max_tokens,
+        &quot;temperature&quot;: 0.0,
+    }
+    req = urllib.request.Request(
+        f&quot;{_endpoint_base(endpoint)}/chat/completions&quot;,
+        data=json.dumps(payload).encode(&quot;utf-8&quot;),
+        headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
+    )
+    with urllib.request.urlopen(req, timeout=ENDPOINT_TIMEOUT_SECONDS) as resp:
+        body = json.loads(resp.read().decode(&quot;utf-8&quot;))
+    return body[&quot;choices&quot;][0][&quot;message&quot;][&quot;content&quot;]
+
+
+def _make_generate(endpoint, mlx_vlm, apply_chat_template, model, processor, config, model_name):
+    &quot;&quot;&quot;Return gen(prompt, image_paths, max_tokens) -&gt; raw text, routed either
+    over HTTP or through the in-process mlx-vlm model.&quot;&quot;&quot;
+    if endpoint:
+        def gen(prompt, image_paths, max_tokens):
+            return _endpoint_generate(endpoint, model_name, prompt, image_paths, max_tokens)
+        return gen
+
+    def gen(prompt, image_paths, max_tokens):
+        formatted = apply_chat_template(processor, config, prompt, num_images=len(image_paths))
+        return mlx_vlm.generate(
+            model, processor, formatted, image=image_paths,
+            max_tokens=max_tokens, temperature=0.0, verbose=False,
+        ).text
+    return gen
+
+
+def _judge_one(gen, image_path: str) -&gt; dict:
     &quot;&quot;&quot;One judge call per image — fixed rubric, fresh conversation (no
     history from prior images), per the de-biasing protocol.&quot;&quot;&quot;
-    formatted = apply_chat_template(processor, config, RUBRIC, num_images=1)
-    result = mlx_vlm.generate(
-        model, processor, formatted, image=[image_path],
-        max_tokens=350, temperature=0.0, verbose=False,
-    )
-    text = result.text.strip()
+    text = gen(RUBRIC, [image_path], 350).strip()
     start = text.index(&quot;{&quot;)
     end = text.rindex(&quot;}&quot;) + 1
     data = json.loads(text[start:end])
@@ -13219,14 +13308,9 @@ def _judge_one(mlx_vlm, apply_chat_template, model, processor, config, image_pat
     return parsed
 
 
-def _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config, image_paths: list[str]) -&gt; dict:
+def _judge_mesh(gen, image_paths: list[str]) -&gt; dict:
     &quot;&quot;&quot;One joint call over all turntable views of a single mesh.&quot;&quot;&quot;
-    formatted = apply_chat_template(processor, config, MESH_RUBRIC, num_images=len(image_paths))
-    result = mlx_vlm.generate(
-        model, processor, formatted, image=image_paths,
-        max_tokens=400, temperature=0.0, verbose=False,
-    )
-    text = result.text.strip()
+    text = gen(MESH_RUBRIC, image_paths, 400).strip()
     start = text.index(&quot;{&quot;)
     end = text.rindex(&quot;}&quot;) + 1
     data = json.loads(text[start:end])
@@ -13253,15 +13337,28 @@ def main() -&gt; int:
     p.add_argument(&quot;--meta&quot;, required=True)
     p.add_argument(&quot;--model&quot;, default=DEFAULT_MODEL,
                    help=f&quot;mlx-vlm model repo (default: {DEFAULT_MODEL})&quot;)
+    p.add_argument(&quot;--endpoint&quot;, default=os.environ.get(ENDPOINT_ENV, &quot;&quot;),
+                   help=&quot;Optional OpenAI-compatible vision endpoint base URL &quot;
+                        f&quot;(e.g. http://host:8006/v1). Default: ${ENDPOINT_ENV}. &quot;
+                        &quot;Unreachable endpoint falls back to in-process mlx-vlm.&quot;)
     p.add_argument(&quot;--rank&quot;, action=&quot;store_true&quot;, help=&quot;Judge and rank multiple images&quot;)
     p.add_argument(&quot;--floor&quot;, type=float, default=2.0,
                    help=&quot;Overall score below this (default 2.0) flags &#x27;rejected&#x27; (warn-don&#x27;t-block)&quot;)
     p.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;)
     args = p.parse_args()
 
-    mlx_vlm, apply_chat_template = _imports()
-    if mlx_vlm is None:
-        return 0  # graceful no-op
+    endpoint = args.endpoint.strip()
+    if endpoint and not _endpoint_probe(endpoint):
+        print(f&quot;[judge] WARNING: endpoint {endpoint} unreachable — &quot;
+              &quot;falling back to in-process mlx-vlm&quot;, file=sys.stderr)
+        endpoint = &quot;&quot;
+
+    if endpoint:
+        mlx_vlm = apply_chat_template = None
+    else:
+        mlx_vlm, apply_chat_template = _imports()
+        if mlx_vlm is None:
+            return 0  # graceful no-op
 
     if args.mode == &quot;mesh&quot;:
         if not args.images:
@@ -13280,19 +13377,24 @@ def main() -&gt; int:
         image_paths = [Path(os.path.expanduser(args.image))]
 
     t0 = time.time()
-    model, processor = mlx_vlm.load(args.model)
-    config = model.config
+    if endpoint:
+        model = processor = config = None
+    else:
+        model, processor = mlx_vlm.load(args.model)
+        config = model.config
     t_load = time.time()
+    gen = _make_generate(endpoint, mlx_vlm, apply_chat_template,
+                         model, processor, config, args.model)
     meta_path = Path(os.path.expanduser(args.meta))
 
     if args.mode == &quot;mesh&quot;:
         t_img0 = time.time()
-        scores = _judge_mesh(mlx_vlm, apply_chat_template, model, processor, config,
-                              [str(p) for p in image_paths])
+        scores = _judge_mesh(gen, [str(p) for p in image_paths])
         verdict = float(scores.get(&quot;overall&quot;, 0))
         rejected = verdict &lt; args.floor
         payload = {
             &quot;model&quot;: args.model,
+            **({&quot;endpoint&quot;: endpoint} if endpoint else {}),
             &quot;views_rendered&quot;: len(image_paths),
             &quot;scores&quot;: {k: v for k, v in scores.items() if k != &quot;artifacts_note&quot;},
             &quot;notes&quot;: scores.get(&quot;artifacts_note&quot;, &quot;&quot;),
@@ -13322,7 +13424,7 @@ def main() -&gt; int:
     results = []
     for img in image_paths:
         t_img0 = time.time()
-        scores = _judge_one(mlx_vlm, apply_chat_template, model, processor, config, str(img))
+        scores = _judge_one(gen, str(img))
         results.append({
             &quot;image&quot;: str(img),
             &quot;scores&quot;: scores,
@@ -13348,6 +13450,7 @@ def main() -&gt; int:
              &quot;--section&quot;, &quot;judge&quot;,
              &quot;--data&quot;, json.dumps({
                  &quot;model&quot;: args.model,
+                 **({&quot;endpoint&quot;: endpoint} if endpoint else {}),
                  &quot;mode&quot;: &quot;image&quot;,
                  &quot;scores&quot;: winner[&quot;scores&quot;],
                  &quot;verdict&quot;: winner[&quot;verdict&quot;],
@@ -13375,6 +13478,7 @@ def main() -&gt; int:
         rejected = verdict &lt; args.floor
         payload = {
             &quot;model&quot;: args.model,
+            **({&quot;endpoint&quot;: endpoint} if endpoint else {}),
             &quot;mode&quot;: &quot;image&quot;,
             &quot;scores&quot;: r[&quot;scores&quot;],
             &quot;verdict&quot;: verdict,
@@ -15573,6 +15677,16 @@ a few seconds per image after the model is loaded once.
 **When NOT to suggest it:** a single one-off generation the user is
 already happy with; `vlm-env` not installed and the user wants to
 generate right now (offer it as a follow-up instead).
+
+**Remote judge endpoint (v0.6.1).** If `PIPELINE_JUDGE_ENDPOINT` is set
+(or `vlm_judge.py --endpoint URL`), judge calls go to an OpenAI-compatible
+vision chat server (e.g. `mlx_vlm server` on another machine) instead of
+loading the model in-process — same rubric, temperature-0 sampling, and
+scoring. With an endpoint set, `vlm-env` isn&#x27;t required at all; an
+unreachable endpoint warns and falls back to the in-process path. This is
+generic wiring: nothing in the pipeline assumes any particular server
+exists, and with the env var unset nothing changes. All wrappers
+(`concept.sh`, `generate.sh`, `benchmark.sh`) inherit it automatically.
 
 ### Consistency mode (v0.3.2+, ComfyUI backend)
 
