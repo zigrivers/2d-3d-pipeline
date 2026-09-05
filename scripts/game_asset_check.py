@@ -42,62 +42,59 @@ def _imports():
         sys.exit(2)
 
 
+def uv_occupancy(uv, faces) -> float:
+    """Fraction of the 0-1 UV square actually covered by triangles.
+
+    This used to measure the bounding box of every UV point, which is ~1.0
+    for any mesh that spans the square at all, however little of it the
+    triangles cover. Measured on real pipeline output: a character reported
+    0.999 against a true coverage of 0.603, and an SF3D prop reported 0.678
+    against 0.364 — under the 0.40 threshold that is meant to recommend
+    --reuv, so that recommendation could never fire.
+
+    Overlapping or mirrored UVs can sum past 1.0, so the result is clamped.
+    Pure Python on purpose: numpy is not installed where the tests run.
+    """
+    total = 0.0
+    for tri in faces:
+        u0, v0 = uv[tri[0]]
+        u1, v1 = uv[tri[1]]
+        u2, v2 = uv[tri[2]]
+        total += abs((u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)) * 0.5
+    return max(0.0, min(1.0, total))
+
+
 def _uv_analysis(mesh, np) -> dict:
     """Best-effort UV island count + occupancy ratio."""
     uv = getattr(mesh.visual, "uv", None) if hasattr(mesh, "visual") else None
     if uv is None or len(uv) == 0:
         return {"has_uv": False}
     in_bounds = bool(((uv >= 0.0) & (uv <= 1.0)).all())
-    # Approx island count: connected components of the FACE adjacency graph
-    # restricted to faces sharing UV coords. Cheap proxy: face_adjacency_unshared.
-    try:
-        import networkx as nx  # type: ignore
-        g = nx.Graph()
-        g.add_nodes_from(range(len(mesh.faces)))
-        # Edges between faces are added when their shared edge has matching UVs
-        # at both vertices. Implement cheaply via face_adjacency.
-        for a, b in mesh.face_adjacency.tolist():
-            # If two adjacent faces share the SAME UV at the shared edge's
-            # vertices, they belong to the same island. Use rough equality.
-            fa = mesh.faces[a]
-            fb = mesh.faces[b]
-            shared = set(fa.tolist()) & set(fb.tolist())
-            same = True
-            for v in shared:
-                # Find the corresponding UV index. trimesh's uv is indexed
-                # by vertex, not by face-corner, so we just compare uv[v].
-                pass  # trivially same when uv is per-vertex
-            if same:
-                g.add_edge(a, b)
-        island_count = nx.number_connected_components(g)
-    except ImportError:
-        # No networkx — use a tiny disjoint-set
-        parent = list(range(len(mesh.faces)))
+    # Island count = connected components of the face-adjacency graph. glTF
+    # stores UVs per vertex, so a UV seam only exists where the vertices are
+    # split — which also splits face adjacency. Islands and surface shells are
+    # therefore the same number here, and one disjoint-set pass finds both.
+    # (An earlier version ran this twice, once through networkx with a
+    # UV-comparison loop whose body was `pass`; both paths computed exactly
+    # this, so the networkx branch was removed.)
+    parent = list(range(len(mesh.faces)))
 
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-        def union(a, b):
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
 
-        for a, b in mesh.face_adjacency.tolist():
-            union(a, b)
-        roots = {find(i) for i in range(len(mesh.faces))}
-        island_count = len(roots)
+    for a, b in mesh.face_adjacency.tolist():
+        union(a, b)
+    island_count = len({find(i) for i in range(len(mesh.faces))})
 
-    # Occupancy = bbox area of all UV points / total UV space.
-    if len(uv) > 0:
-        u_min, v_min = uv.min(axis=0)
-        u_max, v_max = uv.max(axis=0)
-        bbox_area = float((u_max - u_min) * (v_max - v_min))
-        occupancy = max(0.0, min(1.0, bbox_area))
-    else:
-        occupancy = 0.0
+    occupancy = uv_occupancy(uv.tolist(), mesh.faces.tolist()) if len(uv) else 0.0
 
     return {
         "has_uv": True,
