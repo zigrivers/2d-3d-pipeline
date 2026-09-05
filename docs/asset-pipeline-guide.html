@@ -3868,11 +3868,18 @@ means skip the meta write — v0.2 behaviour preserved.
 &quot;&quot;&quot;
 import bpy
 import json
+import os
 import subprocess
 import sys
 import time
 from mathutils import Matrix
 from pathlib import Path
+
+# decimate_plan.py sits alongside this file in both the repo and the
+# deployed workspace; Blender does not put the script&#x27;s own directory on
+# sys.path when run with --python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from decimate_plan import MIN_SAFE_RATIO, plan_decimate, target_met  # noqa: E402
 
 argv = sys.argv[sys.argv.index(&#x27;--&#x27;) + 1:]
 input_path, output_path = argv[0], argv[1]
@@ -3942,14 +3949,26 @@ boundary_after_hygiene = _boundary_edge_count(obj.data)
 
 # --- decimate to target polycount ---
 current = len(obj.data.polygons)
+
+# Guard a dense organic mesh against a target the decimator cannot reach
+# without wrecking it. PIPELINE_DECIMATE_MIN_RATIO=0 disables the guard.
+try:
+    _min_ratio = float(os.environ.get(&quot;PIPELINE_DECIMATE_MIN_RATIO&quot;, MIN_SAFE_RATIO))
+except ValueError:
+    _min_ratio = MIN_SAFE_RATIO
+plan = plan_decimate(current, target_poly, min_ratio=_min_ratio)
+effective_target = plan[&quot;target&quot;]
+if plan[&quot;clamped&quot;]:
+    print(f&quot;[clean_asset] WARNING: {plan[&#x27;reason&#x27;]}&quot;, file=sys.stderr)
+
 decimate_before = current
 decimate_after = current
 decimate_ratio = 1.0
 decimate_error = None
-if current &gt; target_poly:
+if current &gt; effective_target:
     try:
         mod = obj.modifiers.new(name=&quot;Decimate&quot;, type=&#x27;DECIMATE&#x27;)
-        mod.ratio = target_poly / current
+        mod.ratio = effective_target / current
         bpy.ops.object.modifier_apply(modifier=&quot;Decimate&quot;)
         decimate_after = len(obj.data.polygons)
         decimate_ratio = round(decimate_after / decimate_before, 4) if decimate_before else 1.0
@@ -3988,6 +4007,13 @@ print(
     f&quot;loose={loose_elements_deleted} holes_filled={holes_filled} &quot;
     f&quot;decimate={decimate_before}-&gt;{decimate_after} ({duration}s)&quot;
 )
+if not target_met(decimate_after, effective_target):
+    print(
+        f&quot;[clean_asset] WARNING: decimator floored at {decimate_after:,} polys, &quot;
+        f&quot;short of the {effective_target:,} target — the mesh could not collapse &quot;
+        f&quot;further without tearing. Treat the polycount as approximate.&quot;,
+        file=sys.stderr,
+    )
 
 # --- v0.3: merge cleanup section into per-asset meta.json ---
 if meta_path:
@@ -4006,6 +4032,11 @@ if meta_path:
                 &quot;after&quot;: decimate_after,
                 &quot;ratio&quot;: decimate_ratio,
                 &quot;error&quot;: decimate_error,
+                &quot;requested_target&quot;: plan[&quot;requested_target&quot;],
+                &quot;effective_target&quot;: effective_target,
+                &quot;clamped&quot;: plan[&quot;clamped&quot;],
+                &quot;clamp_reason&quot;: plan[&quot;reason&quot;],
+                &quot;target_met&quot;: target_met(decimate_after, effective_target),
             },
             &quot;duration_seconds&quot;: duration,
         }
@@ -15665,6 +15696,82 @@ if __name__ == &quot;__main__&quot;:
     sys.exit(main())
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/blender_bridge.py</pre></div>
+            </details>
+
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>decimate_plan.py</code>
+                <span class="script-summary-desc">Decimate guard — stops dense organic meshes being decimated into blobs</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/decimate_plan.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Decide how far a mesh may be decimated before it stops looking like itself.
+
+Collapse decimation is safe on props: a crate at 3,000 polygons is still a
+crate. It is not safe on dense organic meshes — a face loses its nose long
+before a crate loses its corners. Worse, Blender&#x27;s decimator silently floors
+out well above an unreachable target instead of failing, so the pipeline would
+otherwise record a polycount it never actually hit.
+
+Measured on this pipeline&#x27;s own output:
+
+    source    target    result    verdict
+    19,059     3,000     3,000    clean  (SF3D prop)
+    32,383     3,000     2,999    clean  (SF3D prop)
+    48,530     3,000     2,999    clean  (SF3D prop)
+   187,974    12,000    47,626    face destroyed, target never reached
+   187,974   100,000   100,000    clean  (TRELLIS.2 character)
+
+So the discriminator is not the ratio alone — props legitimately decimate to
+6% of source. It is a dense source mesh *combined with* an aggressive target.
+Props arrive under 50k polys; organic generators arrive near 190k.
+&quot;&quot;&quot;
+
+DENSE_MESH_POLYS = 100_000
+MIN_SAFE_RATIO = 0.25
+
+
+def plan_decimate(source_polys, requested_target,
+                  min_ratio=MIN_SAFE_RATIO, dense_threshold=DENSE_MESH_POLYS):
+    &quot;&quot;&quot;Return the decimation plan for a mesh.
+
+    Keys: target (int, what to actually decimate to), requested_target (int,
+    what the caller asked for), clamped (bool), reason (str or None).
+
+    Pass min_ratio=0 to disable the guard entirely.
+    &quot;&quot;&quot;
+    plan = {
+        &quot;target&quot;: requested_target,
+        &quot;requested_target&quot;: requested_target,
+        &quot;clamped&quot;: False,
+        &quot;reason&quot;: None,
+    }
+
+    if requested_target &gt;= source_polys:
+        return plan  # nothing to decimate
+    if min_ratio &lt;= 0 or source_polys &lt; dense_threshold:
+        return plan  # guard disabled, or a prop-density mesh
+
+    floor = int(source_polys * min_ratio)
+    if requested_target &gt;= floor:
+        return plan
+
+    plan[&quot;target&quot;] = floor
+    plan[&quot;clamped&quot;] = True
+    plan[&quot;reason&quot;] = (
+        f&quot;target {requested_target:,} is below {min_ratio:.0%} of a dense &quot;
+        f&quot;{source_polys:,}-poly mesh; collapse decimation cannot reach it &quot;
+        f&quot;without destroying surface detail. Using {floor:,} instead. &quot;
+        f&quot;For a genuinely low-poly version use --retopo quad, or pass &quot;
+        f&quot;--no-clean and decimate deliberately.&quot;
+    )
+    return plan
+
+
+def target_met(decimate_after, effective_target, tolerance=1.05):
+    &quot;&quot;&quot;True when the decimator actually reached the target it was given.&quot;&quot;&quot;
+    return decimate_after &lt;= effective_target * tolerance
+PIPELINE_EOF</pre></div>
             </details>
 
           <div class="callout callout-tip">
