@@ -15428,6 +15428,274 @@ def write(queue_dir: Path, *, machine: str,
 PIPELINE_EOF</pre></div>
             </details>
 
+            <details class="script-detail">
+              <summary class="script-summary">
+                <code>blender_bridge.py</code>
+                <span class="script-summary-desc">Blender MCP bridge — serves text→2D→3D and image→3D to the MCP for Blender add-on's LOCAL_API mode</span>
+              </summary>
+              <div class="code-block"><div class="code-header"><span class="code-lang">bash &middot; paste into terminal</span><button class="copy-btn">Copy</button></div><pre>cat > ~/3d-pipeline/workspace/blender_bridge.py << 'PIPELINE_EOF'
+#!/usr/bin/env python3
+&quot;&quot;&quot;Serve this pipeline over the MCP-for-Blender LOCAL_API contract.
+
+The &quot;MCP for Blender&quot; add-on&#x27;s Hunyuan3D integration, in LOCAL_API mode, POSTs
+JSON to ``/generate`` and expects raw GLB bytes back. This server answers that
+contract using the pipeline&#x27;s own wrappers instead of a Hunyuan3D checkpoint:
+
+    {&quot;image&quot;: &quot;&lt;base64 png&gt;&quot;}  -&gt; generate.sh                (image -&gt; GLB)
+    {&quot;text&quot;:  &quot;a treasure chest&quot;} -&gt; concept.sh + generate.sh (text -&gt; 2D -&gt; GLB)
+
+Text-to-3D is the capability the add-on cannot otherwise reach: its local mode
+requires an image, because the upstream local server is image-only. Routing
+text through concept.sh first adds it with no add-on changes, and reuses the
+cleanup, quality checks and manifest tracking the wrappers already do.
+
+Stdlib only, so it runs under any Python on the box without a venv.
+
+Bind address defaults to 127.0.0.1: /generate runs the pipeline wrappers, so
+this must not be exposed off-host.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+WORKSPACE = Path(os.environ.get(&quot;PIPELINE_WORKSPACE&quot;, Path.home() / &quot;3d-pipeline&quot; / &quot;workspace&quot;))
+CONCEPT = WORKSPACE / &quot;concept.sh&quot;
+GENERATE = WORKSPACE / &quot;generate.sh&quot;
+
+# Generation is GPU-bound; two concurrent runs thrash unified memory and are
+# slower than running them back to back.
+# ponytail: one global lock, add a real job queue if batching ever matters.
+_GEN_LOCK = threading.Lock()
+
+MAX_PROMPT_CHARS = 2000
+MAX_BODY_BYTES = 64 * 1024 * 1024  # a base64 PNG reference image
+WRAPPER_TIMEOUT = 900  # trellis2 is the slow path at ~6 min/asset
+
+
+class PipelineError(RuntimeError):
+    &quot;&quot;&quot;A wrapper failed, or returned something we could not use.&quot;&quot;&quot;
+
+
+def _run_wrapper(cmd: list[str]) -&gt; dict:
+    &quot;&quot;&quot;Run a pipeline wrapper in --json mode and return its parsed result.
+
+    The wrappers route human-readable output to stderr under --json, so the
+    last non-empty stdout line is the JSON result.
+    &quot;&quot;&quot;
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=WRAPPER_TIMEOUT,
+        cwd=str(WORKSPACE),
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or &quot;&quot;).strip().splitlines()[-5:]
+        raise PipelineError(f&quot;{Path(cmd[0]).name} exited {proc.returncode}: {&#x27; | &#x27;.join(tail)}&quot;)
+
+    for line in reversed((proc.stdout or &quot;&quot;).strip().splitlines()):
+        line = line.strip()
+        if not line.startswith(&quot;{&quot;):
+            continue
+        try:
+            result = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if result.get(&quot;status&quot;) != &quot;ok&quot;:
+            raise PipelineError(f&quot;{Path(cmd[0]).name}: {result.get(&#x27;error&#x27;, result.get(&#x27;status&#x27;))}&quot;)
+        return result
+
+    raise PipelineError(f&quot;{Path(cmd[0]).name} produced no JSON result&quot;)
+
+
+def _safe_name() -&gt; str:
+    return f&quot;bridge_{uuid.uuid4().hex[:12]}&quot;
+
+
+def text_to_image(prompt: str, name: str) -&gt; Path:
+    &quot;&quot;&quot;Generate a concept image from a text prompt. Returns the PNG path.&quot;&quot;&quot;
+    result = _run_wrapper([str(CONCEPT), prompt, &quot;-o&quot;, name, &quot;--json&quot;])
+    outputs = result.get(&quot;outputs&quot;) or []
+    if not outputs:
+        raise PipelineError(&quot;concept.sh returned no image&quot;)
+    return Path(outputs[0])
+
+
+def image_to_glb(image_path: Path) -&gt; Path:
+    &quot;&quot;&quot;Generate and clean a mesh from an image. Returns the cleaned GLB path.&quot;&quot;&quot;
+    result = _run_wrapper([str(GENERATE), &quot;-i&quot;, str(image_path), &quot;--json&quot;])
+    clean = result.get(&quot;clean_path&quot;) or result.get(&quot;raw_path&quot;)
+    if not clean:
+        raise PipelineError(&quot;generate.sh returned no mesh path&quot;)
+    return Path(clean)
+
+
+def _decode_image(encoded: str, name: str) -&gt; Path:
+    &quot;&quot;&quot;Write a base64 (optionally data-URI) image to disk. Returns the path.&quot;&quot;&quot;
+    payload = re.sub(r&quot;^data:image/[a-zA-Z0-9.+-]+;base64,&quot;, &quot;&quot;, encoded.strip())
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise PipelineError(f&quot;image is not valid base64: {exc}&quot;) from exc
+    if not raw:
+        raise PipelineError(&quot;image decoded to zero bytes&quot;)
+
+    concept_dir = WORKSPACE / &quot;concept&quot;
+    concept_dir.mkdir(parents=True, exist_ok=True)
+    path = concept_dir / f&quot;{name}.png&quot;
+    path.write_bytes(raw)
+    return path
+
+
+def build_glb(params: dict) -&gt; tuple[Path, str]:
+    &quot;&quot;&quot;Route a request to the right pipeline path. Returns (glb, how).&quot;&quot;&quot;
+    text = params.get(&quot;text&quot;)
+    image = params.get(&quot;image&quot;)
+
+    if isinstance(text, str):
+        text = text.strip()
+    if isinstance(image, str):
+        image = image.strip()
+
+    if not text and not image:
+        raise PipelineError(&quot;request needs either &#x27;text&#x27; or &#x27;image&#x27;&quot;)
+    if text and len(text) &gt; MAX_PROMPT_CHARS:
+        raise PipelineError(f&quot;prompt exceeds {MAX_PROMPT_CHARS} characters&quot;)
+
+    name = _safe_name()
+    # An image wins when both are sent: it is the more specific instruction,
+    # and it is what the add-on sends when the user supplied a reference.
+    if image:
+        image_path = _decode_image(image, name)
+        how = &quot;image_to_3d&quot;
+    else:
+        image_path = text_to_image(text, name)
+        how = &quot;text_to_2d_to_3d&quot;
+
+    return image_to_glb(image_path), how
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = &quot;PipelineBlenderBridge/1.0&quot;
+
+    def log_message(self, fmt, *args):  # noqa: A003 - BaseHTTPRequestHandler API
+        sys.stderr.write(&quot;[bridge] %s\n&quot; % (fmt % args))
+
+    def _send_json(self, code: int, payload: dict) -&gt; None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header(&quot;Content-Type&quot;, &quot;application/json&quot;)
+        self.send_header(&quot;Content-Length&quot;, str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path.rstrip(&quot;/&quot;) == &quot;/health&quot;:
+            self._send_json(200, {
+                &quot;status&quot;: &quot;ok&quot;,
+                &quot;backend&quot;: &quot;2d-3d-pipeline&quot;,
+                &quot;workspace&quot;: str(WORKSPACE),
+                &quot;text_to_3d&quot;: CONCEPT.is_file(),
+                &quot;image_to_3d&quot;: GENERATE.is_file(),
+            })
+        else:
+            self._send_json(404, {&quot;text&quot;: &quot;not found&quot;, &quot;error_code&quot;: 1})
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path.rstrip(&quot;/&quot;) != &quot;/generate&quot;:
+            self._send_json(404, {&quot;text&quot;: &quot;not found&quot;, &quot;error_code&quot;: 1})
+            return
+
+        try:
+            length = int(self.headers.get(&quot;Content-Length&quot;) or 0)
+        except ValueError:
+            self._send_json(400, {&quot;text&quot;: &quot;bad Content-Length&quot;, &quot;error_code&quot;: 1})
+            return
+        if length &lt;= 0 or length &gt; MAX_BODY_BYTES:
+            self._send_json(400, {&quot;text&quot;: &quot;missing or oversized body&quot;, &quot;error_code&quot;: 1})
+            return
+
+        try:
+            params = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._send_json(400, {&quot;text&quot;: f&quot;bad JSON: {exc}&quot;, &quot;error_code&quot;: 1})
+            return
+        if not isinstance(params, dict):
+            self._send_json(400, {&quot;text&quot;: &quot;body must be a JSON object&quot;, &quot;error_code&quot;: 1})
+            return
+
+        with _GEN_LOCK:
+            try:
+                glb, how = build_glb(params)
+                data = glb.read_bytes()
+            except PipelineError as exc:
+                self.log_message(&quot;failed: %s&quot;, exc)
+                self._send_json(400, {&quot;text&quot;: str(exc), &quot;error_code&quot;: 1})
+                return
+            except subprocess.TimeoutExpired:
+                self.log_message(&quot;timed out after %ss&quot;, WRAPPER_TIMEOUT)
+                self._send_json(504, {&quot;text&quot;: &quot;generation timed out&quot;, &quot;error_code&quot;: 1})
+                return
+            except OSError as exc:
+                self.log_message(&quot;error: %s&quot;, exc)
+                self._send_json(500, {&quot;text&quot;: str(exc), &quot;error_code&quot;: 1})
+                return
+
+        self.log_message(&quot;%s -&gt; %s (%d bytes)&quot;, how, glb.name, len(data))
+        self.send_response(200)
+        self.send_header(&quot;Content-Type&quot;, &quot;model/gltf-binary&quot;)
+        self.send_header(&quot;Content-Length&quot;, str(len(data)))
+        self.send_header(&quot;X-Pipeline-Path&quot;, str(glb))
+        self.send_header(&quot;X-Pipeline-Route&quot;, how)
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def main(argv=None) -&gt; int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(&quot;--host&quot;, default=&quot;127.0.0.1&quot;,
+                        help=&quot;bind address (default: 127.0.0.1, localhost only)&quot;)
+    parser.add_argument(&quot;--port&quot;, type=int, default=8081,
+                        help=&quot;bind port (default: 8081, the add-on&#x27;s default)&quot;)
+    args = parser.parse_args(argv)
+
+    missing = [str(p) for p in (CONCEPT, GENERATE) if not p.is_file()]
+    if missing:
+        print(f&quot;[bridge] missing wrapper(s): {&#x27;, &#x27;.join(missing)}&quot;, file=sys.stderr)
+        return 1
+
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f&quot;[bridge] serving {WORKSPACE} on http://{args.host}:{args.port}&quot;, file=sys.stderr)
+    print(&quot;[bridge] POST /generate {\&quot;text\&quot;:...} or {\&quot;image\&quot;:&lt;base64&gt;} -&gt; GLB bytes&quot;,
+          file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print(&quot;\n[bridge] stopped&quot;, file=sys.stderr)
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+PIPELINE_EOF
+chmod +x ~/3d-pipeline/workspace/blender_bridge.py</pre></div>
+            </details>
+
           <div class="callout callout-tip">
             <div class="callout-label">What each script does</div>
             <strong>_pipeline_lib.sh</strong> — shared library that detects the active project (Unity, Unreal, or any folder with <code>.asset-pipeline.json</code>) and computes output paths. Sourced by the three wrappers; never run directly.<br>
