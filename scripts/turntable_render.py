@@ -82,19 +82,35 @@ scene.collection.objects.link(cam)
 scene.camera = cam
 cam_data.lens = 50.0
 
+# --- ambient world ---
+# Lights the subject without appearing behind it, since film_transparent
+# keeps the background out of frame. Without this the unlit side of an
+# asset goes fully black and hides real geometry problems.
+world = bpy.data.worlds.new("PreviewWorld")
+scene.world = world
+world.use_nodes = True
+world.node_tree.nodes["Background"].inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+world.node_tree.nodes["Background"].inputs[1].default_value = 0.35
+
 # --- three-point lights ---
+# Energy tracks the rig distance: illuminance falls off with the square of
+# distance, so a fixed wattage blows out a small asset and under-lights a
+# large one. Calibrated against dist = 1.7, i.e. a 1m normalised asset.
+energy_scale = (dist / 1.7) ** 2
+
+
 def make_light(name, energy, x, y, z):
     ld = bpy.data.lights.new(name=name, type='AREA')
-    ld.energy = energy
+    ld.energy = energy * energy_scale
     ld.size = max(longest * 0.5, 0.5)
     obj_l = bpy.data.objects.new(name, ld)
     obj_l.location = (x, y, z)
     scene.collection.objects.link(obj_l)
     return obj_l
 
-key = make_light("Key", 600, center.x + dist * 0.7, center.y - dist * 0.5, center.z + dist * 0.5)
-fill = make_light("Fill", 300, center.x - dist * 0.6, center.y - dist * 0.3, center.z + dist * 0.2)
-rim = make_light("Rim", 400, center.x, center.y + dist * 0.8, center.z + dist * 0.5)
+key = make_light("Key", 45, center.x + dist * 0.7, center.y - dist * 0.5, center.z + dist * 0.5)
+fill = make_light("Fill", 20, center.x - dist * 0.6, center.y - dist * 0.3, center.z + dist * 0.2)
+rim = make_light("Rim", 28, center.x, center.y + dist * 0.8, center.z + dist * 0.5)
 for light in (key, fill, rim):
     constraint = light.constraints.new('TRACK_TO')
     constraint.target = obj
@@ -103,6 +119,11 @@ for light in (key, fill, rim):
 
 # --- render settings (Eevee for speed) ---
 scene.render.engine = 'BLENDER_EEVEE_NEXT' if 'BLENDER_EEVEE_NEXT' in {e.identifier for e in bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items} else 'BLENDER_EEVEE'
+# A preview exists to show the asset's real albedo, and it feeds the VLM
+# mesh judge. Blender's default AgX view transform is a cinematic look that
+# desaturates saturated colour hard — an orange hood renders pale pink — so
+# a judge scoring these would be scoring the transform, not the asset.
+scene.view_settings.view_transform = 'Standard'
 scene.render.resolution_x = resolution
 scene.render.resolution_y = resolution
 scene.render.image_settings.file_format = 'PNG'
