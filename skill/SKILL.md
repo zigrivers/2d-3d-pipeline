@@ -752,6 +752,50 @@ family — see Flow 1's "Consistency mode" subsection), pass
 `concept.sh` call. Flow 2's 3D generators (SF3D / SPAR3D /
 TRELLIS) handle ComfyUI's outputs the same way they handle mflux's.
 
+### Routing when Blender is the destination (v0.4+)
+
+Two doors reach this pipeline when the user is working in Blender through
+the "MCP for Blender" add-on. They fail in opposite directions, so pick by
+context rather than defaulting blindly.
+
+| Door | How it runs | Use when |
+|---|---|---|
+| **Shell** | You run `concept.sh` / `generate.sh` via bash, then import the GLB with `execute_blender_code` → `bpy.ops.import_scene.gltf(filepath=...)` | You have shell access — which is the default whenever you do |
+| **Bridge** | The add-on's `generate_hunyuan3d_model` tool POSTs to `blender_bridge.py` on `127.0.0.1:8081`, which calls the same wrappers | No shell access (Claude Desktop, other MCP clients), or a quick one-off with no project involved |
+
+**Prefer the shell door whenever you have bash**, for three reasons:
+
+- **Project staging.** The wrappers detect the active project from the
+  working directory. The bridge always runs with its cwd set to
+  `~/3d-pipeline/workspace`, so everything it makes lands in the global
+  workspace and the user has to move it by hand. Run the wrappers from the
+  project directory instead and the GLB lands in `assets/clean/` and stages
+  to `Assets/Models/AI/` automatically.
+- **Generator and flag choice.** `-g trellis2`, `--polycount`, `--best-of`,
+  `--judge-mesh` and `--lods` are all reachable from the shell. The bridge
+  is locked to the SF3D default because the add-on has no way to send
+  options.
+- **Blender stays responsive.** The add-on runs commands on Blender's main
+  thread, so a bridge generation freezes the UI for its whole duration
+  (~80s for text → 3D). The shell door's only Blender call is the import,
+  which is sub-second.
+
+**Never route a slow generator through the bridge.** TRELLIS.2 is ~5–6
+min/asset; through the bridge that freezes Blender for the entire run and
+will likely exceed the MCP client's timeout. Slow generators take the shell
+door, always.
+
+**Tell the user which door you used** whenever it changes where the file
+landed. Global workspace versus project staging is exactly the kind of
+difference they would otherwise discover much later.
+
+The bridge runs under launchd (`com.kenallred.blender-bridge`) and starts at
+login. If a bridge call fails, check it is up before debugging anything else:
+
+```bash
+curl -s http://127.0.0.1:8081/health
+```
+
 ## Flow 4: GLB → printable STL
 
 ### Step 1 — Identify the source GLB
