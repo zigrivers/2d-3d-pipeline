@@ -13,11 +13,18 @@ means skip the meta write — v0.2 behaviour preserved.
 """
 import bpy
 import json
+import os
 import subprocess
 import sys
 import time
 from mathutils import Matrix
 from pathlib import Path
+
+# decimate_plan.py sits alongside this file in both the repo and the
+# deployed workspace; Blender does not put the script's own directory on
+# sys.path when run with --python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from decimate_plan import MIN_SAFE_RATIO, plan_decimate, target_met  # noqa: E402
 
 argv = sys.argv[sys.argv.index('--') + 1:]
 input_path, output_path = argv[0], argv[1]
@@ -87,14 +94,26 @@ boundary_after_hygiene = _boundary_edge_count(obj.data)
 
 # --- decimate to target polycount ---
 current = len(obj.data.polygons)
+
+# Guard a dense organic mesh against a target the decimator cannot reach
+# without wrecking it. PIPELINE_DECIMATE_MIN_RATIO=0 disables the guard.
+try:
+    _min_ratio = float(os.environ.get("PIPELINE_DECIMATE_MIN_RATIO", MIN_SAFE_RATIO))
+except ValueError:
+    _min_ratio = MIN_SAFE_RATIO
+plan = plan_decimate(current, target_poly, min_ratio=_min_ratio)
+effective_target = plan["target"]
+if plan["clamped"]:
+    print(f"[clean_asset] WARNING: {plan['reason']}", file=sys.stderr)
+
 decimate_before = current
 decimate_after = current
 decimate_ratio = 1.0
 decimate_error = None
-if current > target_poly:
+if current > effective_target:
     try:
         mod = obj.modifiers.new(name="Decimate", type='DECIMATE')
-        mod.ratio = target_poly / current
+        mod.ratio = effective_target / current
         bpy.ops.object.modifier_apply(modifier="Decimate")
         decimate_after = len(obj.data.polygons)
         decimate_ratio = round(decimate_after / decimate_before, 4) if decimate_before else 1.0
@@ -133,6 +152,13 @@ print(
     f"loose={loose_elements_deleted} holes_filled={holes_filled} "
     f"decimate={decimate_before}->{decimate_after} ({duration}s)"
 )
+if not target_met(decimate_after, effective_target):
+    print(
+        f"[clean_asset] WARNING: decimator floored at {decimate_after:,} polys, "
+        f"short of the {effective_target:,} target — the mesh could not collapse "
+        f"further without tearing. Treat the polycount as approximate.",
+        file=sys.stderr,
+    )
 
 # --- v0.3: merge cleanup section into per-asset meta.json ---
 if meta_path:
@@ -151,6 +177,11 @@ if meta_path:
                 "after": decimate_after,
                 "ratio": decimate_ratio,
                 "error": decimate_error,
+                "requested_target": plan["requested_target"],
+                "effective_target": effective_target,
+                "clamped": plan["clamped"],
+                "clamp_reason": plan["reason"],
+                "target_met": target_met(decimate_after, effective_target),
             },
             "duration_seconds": duration,
         }
