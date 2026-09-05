@@ -10826,6 +10826,16 @@ try:
 except Exception:
     pass
 
+# Blender&#x27;s glTF importer puts a model&#x27;s front on -Y — the same direction
+# Blender&#x27;s own front view looks from. The turntable used to start at 0°,
+# which opens on the model&#x27;s side and lands the hero frame on its back: a
+# useless thumbnail for anything with a face, and --judge-mesh scores the
+# hero frame, so the judge was assessing the back of the head.
+FRONT_ANGLE = math.radians(270.0)
+# Three-quarter reads better than dead-on: it shows silhouette and depth at
+# once. It is also the view concept.sh&#x27;s own prompt suffix asks for.
+HERO_OFFSET = math.radians(45.0)
+
 # Auto-fit camera by adjusting distance per frame. Centre look-at.
 hero_path = &quot;&quot;
 gif_frame_paths = []
@@ -10845,14 +10855,15 @@ if mode == &quot;none&quot; or frames &lt; 1:
     pass
 else:
     if mode == &quot;png&quot;:
-        position_camera(math.radians(45))
+        position_camera(FRONT_ANGLE + HERO_OFFSET)
         hero_path = os.path.join(preview_dir, f&quot;{name}.png&quot;)
         scene.render.filepath = hero_path
         bpy.ops.render.render(write_still=True)
     else:  # gif or any frame count &gt; 1
-        # Render N frames + a hero (first frame at 45°)
+        # Start the orbit on the hero view, so frame 0 is the three-quarter
+        # front and the GIF opens on the subject rather than its back.
         for i in range(frames):
-            angle = math.radians(i * 360.0 / frames)
+            angle = FRONT_ANGLE + HERO_OFFSET + math.radians(i * 360.0 / frames)
             position_camera(angle)
             frame_path = os.path.join(preview_dir, f&quot;{name}_f{i:02d}.png&quot;)
             scene.render.filepath = frame_path
