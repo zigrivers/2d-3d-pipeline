@@ -2,6 +2,15 @@
 
 Dated entries for significant changes to the docs, scripts, or skill.
 
+## 2026-09-11 — selective asset-pipeline skill guides
+
+The runtime skill now selects image, mesh, print, texture, benchmark, queue,
+multi-view, and edit guidance on demand. Hardware, license, overwrite, print,
+and tool constraints are preserved. Agents run accessible read-only doctor
+checks directly, and a complete asset request authorizes intermediate concept
+and mesh stages unless a material decision or explicit review remains open.
+Both HTML installers and the skill installer include all supporting guides.
+
 ## 2026-08-12 — v0.6.2: mesh judging never uses the remote endpoint
 
 Found by a live full-pipeline test the same day v0.6.1 shipped: the served

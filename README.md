@@ -32,7 +32,7 @@ context/      AI-facing context docs (HTML + markdown)
 scripts/      Canonical bash wrappers and Python helpers (_pipeline_lib.sh,
               concept.sh, generate.sh, print.sh, clean_asset.py,
               prepare_for_print.py, migrate_assets.sh)
-skill/        SKILL.md + scripts/update_manifest.py (deployed to
+skill/        SKILL.md + task references + scripts/update_manifest.py (deployed to
               ~/.claude/skills/asset-pipeline/)
 tools/        Maintenance tooling — embed regenerate + verify
 .githooks/    Optional pre-commit hook (opt in via `make install-hooks`)

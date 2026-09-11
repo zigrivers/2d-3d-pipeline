@@ -43,3 +43,14 @@ def test_check_skill_skips_mutable_paths(tmp_path, monkeypatch):
     )
     drifted = [s for s in result["skill"] if s["status"] == "drift"]
     assert not any(s["name"] == "SKILL.md" for s in drifted)
+
+
+def test_apply_skill_includes_each_task_guide(tmp_path, monkeypatch):
+    """A fresh installation must resolve every operation selected by the router."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pipeline_doctor.apply_skill(manifest={}, mutable_paths=[])
+    installed = tmp_path / ".claude" / "skills" / "asset-pipeline"
+    for operation in ("image", "mesh", "print", "texture", "benchmark", "queue", "multiview", "edit"):
+        relative = Path("references") / f"{operation}.md"
+        assert (installed / relative).is_file(), f"Missing installed guide: {relative}"
+        assert (installed / relative).read_bytes() == (REPO / "skill" / relative).read_bytes()

@@ -78,6 +78,19 @@ EMBEDS: dict[str, str] = {
     "scripts/retopo_quad.py":               "~/3d-pipeline/workspace/retopo_quad.py",
     "scripts/blender_bridge.py":                       "~/3d-pipeline/workspace/blender_bridge.py",
     "scripts/decimate_plan.py":                        "~/3d-pipeline/workspace/decimate_plan.py",
+    "skill/references/configuration.md":               "~/.claude/skills/asset-pipeline/references/configuration.md",
+    "skill/references/diagnostics.md":                 "~/.claude/skills/asset-pipeline/references/diagnostics.md",
+    "skill/references/image.md":                       "~/.claude/skills/asset-pipeline/references/image.md",
+    "skill/references/mesh.md":                        "~/.claude/skills/asset-pipeline/references/mesh.md",
+    "skill/references/mesh-quality.md":                "~/.claude/skills/asset-pipeline/references/mesh-quality.md",
+    "skill/references/print.md":                       "~/.claude/skills/asset-pipeline/references/print.md",
+    "skill/references/texture.md":                     "~/.claude/skills/asset-pipeline/references/texture.md",
+    "skill/references/benchmark.md":                   "~/.claude/skills/asset-pipeline/references/benchmark.md",
+    "skill/references/queue.md":                       "~/.claude/skills/asset-pipeline/references/queue.md",
+    "skill/references/multiview.md":                   "~/.claude/skills/asset-pipeline/references/multiview.md",
+    "skill/references/edit.md":                        "~/.claude/skills/asset-pipeline/references/edit.md",
+    "skill/references/manifest.md":                    "~/.claude/skills/asset-pipeline/references/manifest.md",
+    "skill/references/troubleshooting.md":             "~/.claude/skills/asset-pipeline/references/troubleshooting.md",
 }
 
 EMBEDS_SCRIPTS: dict[str, str] = {
