@@ -45,8 +45,11 @@ def test_reconsider_optionals_recognized():
     assert "--reconsider-optionals" in r.stdout
 
 
-def test_fix_alias_warns():
+def test_fix_alias_warns(tmp_path, monkeypatch):
     """--fix routes to --apply and prints a deprecation notice on stderr."""
+    # --fix dispatches installation, even when --check is also present.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PIPELINE_ROOT", str(tmp_path / "pipeline"))
     r = _run("--fix", "--check", "wrappers", "--json")
     # The deprecation notice must mention --apply explicitly so the user knows
     # the new canonical name. Exit code is whatever --apply --check wrappers
