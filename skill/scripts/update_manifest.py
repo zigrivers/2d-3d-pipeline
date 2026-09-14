@@ -75,8 +75,13 @@ from pathlib import Path
 
 # 2D models flagged as generator_2d, 3D models as generator_3d. Anything else
 # leaves both slots empty and is recorded under its existing key only.
-GENERATOR_2D = {"z-image-turbo", "flux-schnell", "flux-dev", "qwen-image"}
-GENERATOR_3D = {"sf3d", "trellis", "spar3d"}
+# Keep in sync with the wrappers' own generator options. These lists went
+# stale once before: trellis2, flux2-klein and ernie-image shipped in the
+# wrappers but were rejected here, so recording a TRELLIS.2 run failed.
+GENERATOR_2D = {"z-image-turbo", "flux-schnell", "flux-dev", "qwen-image",
+                "flux2-klein", "ernie-image"}
+GENERATOR_3D = {"sf3d", "trellis", "spar3d", "trellis2"}
+GENERATORS = sorted(GENERATOR_2D | GENERATOR_3D)
 
 
 def _strtobool(s: str) -> bool:
@@ -290,10 +295,7 @@ def main() -> int:
     p.add_argument("--clean", default="")
     p.add_argument("--stl", default="")
     p.add_argument("--stl-size-mm", type=float, default=0.0)
-    p.add_argument("--generator", required=True,
-                   choices=["sf3d", "trellis", "spar3d",
-                            "z-image-turbo", "flux-schnell", "flux-dev",
-                            "qwen-image"])
+    p.add_argument("--generator", required=True, choices=GENERATORS)
     p.add_argument("--polycount", type=int, default=0)
     p.add_argument("--category", required=True,
                    choices=["prop", "character", "hero", "environment",

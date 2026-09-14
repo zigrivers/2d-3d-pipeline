@@ -509,6 +509,25 @@ print(str([r['rejected'] for r in d['results'] if r['rank'] == 1][0]).lower())
     fi
 fi
 
+# Record the run. Outside the --json branch on purpose: a run without
+# --json is still a run, and used to leave no trace at all.
+record_manifest \
+    --manifest "$MANIFEST_PATH" \
+    --name "$(basename "${FIRST_OUTPUT%.*}")" \
+    --concept "$FIRST_OUTPUT" \
+    --generator "$MODEL" \
+    --category 2d-only \
+    --license-bucket "$LICENSE_BUCKET" \
+    --prompt "$PROMPT" \
+    --final-prompt "$FINAL_PROMPT" \
+    --seed "$FIRST_SEED" \
+    --steps "$STEPS" \
+    --width "$WIDTH" \
+    --height "$HEIGHT" \
+    --duration-seconds "$DURATION" \
+    --machine "$MACHINE" \
+    --hardware-tier "$HW_TIER"
+
 if [[ "$JSON_MODE" == "1" ]]; then
     # Build the JSON outputs array via Python so paths with special chars
     # round-trip cleanly.

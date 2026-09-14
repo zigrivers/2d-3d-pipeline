@@ -446,3 +446,41 @@ judge_python() {
         command -v python3 || true
     fi
 }
+
+# --- manifest recording -------------------------------------------------
+# The asset manifest used to depend on the calling agent remembering to run
+# update_manifest.py by hand after every generation. In practice that step
+# was skipped and the manifest was never written at all, so the pipeline
+# kept no run history. The wrappers record their own runs now.
+#
+# Never fails a generation: a manifest problem must not lose an asset that
+# was produced successfully, so every path here returns 0.
+
+find_manifest_updater() {
+    local here="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    local candidate
+    for candidate in \
+        "$here/update_manifest.py" \
+        "$HOME/.claude/skills/asset-pipeline/scripts/update_manifest.py"
+    do
+        if [[ -f "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+record_manifest() {
+    local updater
+    if ! updater="$(find_manifest_updater)"; then
+        printf '[pipeline] manifest not updated: update_manifest.py not found\n' >&2
+        return 0
+    fi
+    # stdout goes to stderr: under --json the last stdout line must stay the
+    # wrapper's own result object.
+    if ! python3 "$updater" "$@" >&2; then
+        printf '[pipeline] manifest not updated — the asset itself is fine\n' >&2
+    fi
+    return 0
+}
