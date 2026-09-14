@@ -894,6 +894,27 @@ done_ "Raw:    $RAW_PATH"
 done_ "Clean:  $CLEAN_PATH"
 [[ -n "$ENGINE_STAGED_PATH" ]] && done_ "Engine: $ENGINE_STAGED_PATH"
 
+# Record the run. Outside the --json branch on purpose: a run without
+# --json is still a run, and used to leave no trace at all.
+# ponytail: category defaults to prop — the wrapper cannot tell a crate from
+# a character. Re-run update_manifest.py with --category to correct it.
+record_manifest \
+    --manifest "$MANIFEST_PATH" \
+    --name "$OUTPUT_NAME" \
+    --concept "$INPUT" \
+    --raw "$RAW_PATH" \
+    --clean "$CLEAN_PATH" \
+    --generator "$GENERATOR" \
+    --category prop \
+    --polycount "$POLYCOUNT" \
+    --license-bucket "$LICENSE_BUCKET" \
+    --texture-resolution "$TEXTURE_RES" \
+    --duration-seconds "$DURATION" \
+    --machine "$MACHINE" \
+    --hardware-tier "$HW_TIER" \
+    --engine-path "$ENGINE_STAGED_PATH" \
+    --meta-json "$META_PATH"
+
 if [[ "$JSON_MODE" == "1" ]]; then
     ENGINE_STAGED_BOOL=false
     [[ -n "$ENGINE_STAGED_PATH" ]] && ENGINE_STAGED_BOOL=true

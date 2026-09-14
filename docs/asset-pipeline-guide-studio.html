@@ -1971,6 +1971,44 @@ judge_python() {
         command -v python3 || true
     fi
 }
+
+# --- manifest recording -------------------------------------------------
+# The asset manifest used to depend on the calling agent remembering to run
+# update_manifest.py by hand after every generation. In practice that step
+# was skipped and the manifest was never written at all, so the pipeline
+# kept no run history. The wrappers record their own runs now.
+#
+# Never fails a generation: a manifest problem must not lose an asset that
+# was produced successfully, so every path here returns 0.
+
+find_manifest_updater() {
+    local here=&quot;${SCRIPT_DIR:-$(cd &quot;$(dirname &quot;${BASH_SOURCE[0]}&quot;)&quot; &amp;&amp; pwd)}&quot;
+    local candidate
+    for candidate in \
+        &quot;$here/update_manifest.py&quot; \
+        &quot;$HOME/.claude/skills/asset-pipeline/scripts/update_manifest.py&quot;
+    do
+        if [[ -f &quot;$candidate&quot; ]]; then
+            printf &#x27;%s&#x27; &quot;$candidate&quot;
+            return 0
+        fi
+    done
+    return 1
+}
+
+record_manifest() {
+    local updater
+    if ! updater=&quot;$(find_manifest_updater)&quot;; then
+        printf &#x27;[pipeline] manifest not updated: update_manifest.py not found\n&#x27; &gt;&amp;2
+        return 0
+    fi
+    # stdout goes to stderr: under --json the last stdout line must stay the
+    # wrapper&#x27;s own result object.
+    if ! python3 &quot;$updater&quot; &quot;$@&quot; &gt;&amp;2; then
+        printf &#x27;[pipeline] manifest not updated — the asset itself is fine\n&#x27; &gt;&amp;2
+    fi
+    return 0
+}
 PIPELINE_EOF
 chmod +x ~/3d-pipeline/workspace/_pipeline_lib.sh</pre></div>
             </details>
@@ -2621,6 +2659,25 @@ print(str([r[&#x27;rejected&#x27;] for r in d[&#x27;results&#x27;] if r[&#x27;ra
             | grep &#x27;^\[judge\]&#x27; | { while IFS= read -r line; do printf &quot;[concept] %s\n&quot; &quot;${line#\[judge\] }&quot; &gt;&amp;&quot;$HUMAN_FD&quot;; done; } || true
     fi
 fi
+
+# Record the run. Outside the --json branch on purpose: a run without
+# --json is still a run, and used to leave no trace at all.
+record_manifest \
+    --manifest &quot;$MANIFEST_PATH&quot; \
+    --name &quot;$(basename &quot;${FIRST_OUTPUT%.*}&quot;)&quot; \
+    --concept &quot;$FIRST_OUTPUT&quot; \
+    --generator &quot;$MODEL&quot; \
+    --category 2d-only \
+    --license-bucket &quot;$LICENSE_BUCKET&quot; \
+    --prompt &quot;$PROMPT&quot; \
+    --final-prompt &quot;$FINAL_PROMPT&quot; \
+    --seed &quot;$FIRST_SEED&quot; \
+    --steps &quot;$STEPS&quot; \
+    --width &quot;$WIDTH&quot; \
+    --height &quot;$HEIGHT&quot; \
+    --duration-seconds &quot;$DURATION&quot; \
+    --machine &quot;$MACHINE&quot; \
+    --hardware-tier &quot;$HW_TIER&quot;
 
 if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     # Build the JSON outputs array via Python so paths with special chars
@@ -3559,6 +3616,27 @@ done_ &quot;Pipeline complete in ${DURATION}s&quot;
 done_ &quot;Raw:    $RAW_PATH&quot;
 done_ &quot;Clean:  $CLEAN_PATH&quot;
 [[ -n &quot;$ENGINE_STAGED_PATH&quot; ]] &amp;&amp; done_ &quot;Engine: $ENGINE_STAGED_PATH&quot;
+
+# Record the run. Outside the --json branch on purpose: a run without
+# --json is still a run, and used to leave no trace at all.
+# ponytail: category defaults to prop — the wrapper cannot tell a crate from
+# a character. Re-run update_manifest.py with --category to correct it.
+record_manifest \
+    --manifest &quot;$MANIFEST_PATH&quot; \
+    --name &quot;$OUTPUT_NAME&quot; \
+    --concept &quot;$INPUT&quot; \
+    --raw &quot;$RAW_PATH&quot; \
+    --clean &quot;$CLEAN_PATH&quot; \
+    --generator &quot;$GENERATOR&quot; \
+    --category prop \
+    --polycount &quot;$POLYCOUNT&quot; \
+    --license-bucket &quot;$LICENSE_BUCKET&quot; \
+    --texture-resolution &quot;$TEXTURE_RES&quot; \
+    --duration-seconds &quot;$DURATION&quot; \
+    --machine &quot;$MACHINE&quot; \
+    --hardware-tier &quot;$HW_TIER&quot; \
+    --engine-path &quot;$ENGINE_STAGED_PATH&quot; \
+    --meta-json &quot;$META_PATH&quot;
 
 if [[ &quot;$JSON_MODE&quot; == &quot;1&quot; ]]; then
     ENGINE_STAGED_BOOL=false
@@ -17481,8 +17559,13 @@ from pathlib import Path
 
 # 2D models flagged as generator_2d, 3D models as generator_3d. Anything else
 # leaves both slots empty and is recorded under its existing key only.
-GENERATOR_2D = {&quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;, &quot;qwen-image&quot;}
-GENERATOR_3D = {&quot;sf3d&quot;, &quot;trellis&quot;, &quot;spar3d&quot;}
+# Keep in sync with the wrappers&#x27; own generator options. These lists went
+# stale once before: trellis2, flux2-klein and ernie-image shipped in the
+# wrappers but were rejected here, so recording a TRELLIS.2 run failed.
+GENERATOR_2D = {&quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;, &quot;qwen-image&quot;,
+                &quot;flux2-klein&quot;, &quot;ernie-image&quot;}
+GENERATOR_3D = {&quot;sf3d&quot;, &quot;trellis&quot;, &quot;spar3d&quot;, &quot;trellis2&quot;}
+GENERATORS = sorted(GENERATOR_2D | GENERATOR_3D)
 
 
 def _strtobool(s: str) -&gt; bool:
@@ -17696,10 +17779,7 @@ def main() -&gt; int:
     p.add_argument(&quot;--clean&quot;, default=&quot;&quot;)
     p.add_argument(&quot;--stl&quot;, default=&quot;&quot;)
     p.add_argument(&quot;--stl-size-mm&quot;, type=float, default=0.0)
-    p.add_argument(&quot;--generator&quot;, required=True,
-                   choices=[&quot;sf3d&quot;, &quot;trellis&quot;, &quot;spar3d&quot;,
-                            &quot;z-image-turbo&quot;, &quot;flux-schnell&quot;, &quot;flux-dev&quot;,
-                            &quot;qwen-image&quot;])
+    p.add_argument(&quot;--generator&quot;, required=True, choices=GENERATORS)
     p.add_argument(&quot;--polycount&quot;, type=int, default=0)
     p.add_argument(&quot;--category&quot;, required=True,
                    choices=[&quot;prop&quot;, &quot;character&quot;, &quot;hero&quot;, &quot;environment&quot;,
