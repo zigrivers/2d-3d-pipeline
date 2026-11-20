@@ -3,7 +3,8 @@
 For installing the pipeline on a fresh Mac, auditing an existing install
 for drift against the repo catalog, or reconciling after the repo gains
 new scripts/models/venvs, invoke the **`asset-pipeline-setup`** skill
-instead of working with this one. That skill handles:
+instead of working with this one (if it is not installed, follow
+`setup-skill/SKILL.md` in the maintained repository). That skill handles:
 
 - First-machine bootstrap (tier choice, HF auth, optional feature_sets)
 - Audit loop (`git pull` → `pipeline_doctor.py --check installed` → multi-select fixes)
