@@ -22,7 +22,8 @@ other retry option but is currently broken (see below), so don't
 suggest it yet.
 
 **`ernie-image` is wired but currently non-functional** (verified live,
-2026-08-12): mflux 0.18.1 (the latest release) expects a `text_encoder_2`
+2026-08-12): mflux 0.18.1 (the latest release on that date, and still the
+installed version; newer releases are not re-tested) expects a `text_encoder_2`
 component that doesn't exist in either `baidu/ERNIE-Image`'s or
 `baidu/ERNIE-Image-Turbo`'s actual current Hugging Face repo layout
 (confirmed by listing both repos directly) — both fail identically with

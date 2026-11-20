@@ -10,8 +10,9 @@ Use the local Apple Silicon pipeline for the requested asset operation.
 ## When to run setup
 
 For installation, drift reconciliation, or new optional components, use
-`asset-pipeline-setup` instead. Do not run its installation workflow for an
-ordinary generation task.
+`asset-pipeline-setup` instead. If that skill is not installed, follow
+`setup-skill/SKILL.md` in the maintained repository. Do not run its
+installation workflow for an ordinary generation task.
 
 ## Select the task
 
@@ -66,7 +67,7 @@ Use these exact names in conversation, manifest entries, and JSON output:
 
 | Bucket                          | Models                                              |
 | ------------------------------- | --------------------------------------------------- |
-| `commercial_safe`               | z-image-turbo, flux-schnell, qwen-image, trellis2   |
+| `commercial_safe`               | z-image-turbo, flux-schnell, flux2-klein, ernie-image, qwen-image, trellis2 |
 | `commercial_threshold`          | sf3d, spar3d                                        |
 | `non_commercial`                | flux-dev, trellis                                   |
 | `source_available_restricted`   | (reserved; nothing default-mapped here yet)         |
@@ -104,8 +105,6 @@ pass `--overwrite-engine`. Let the wrapper's auto-increment do its thing
 
 ## What not to do
 
-- Don't try to detect projects yourself — let the wrappers do it. They
-  print context as their first action.
 - Don't call `print.sh` on a raw, uncleaned GLB from `raw/`. Always use
   the cleaned version from `clean/`.
 - Don't promise multi-color printing from the mesh alone. That's a
@@ -116,12 +115,10 @@ pass `--overwrite-engine`. Let the wrapper's auto-increment do its thing
   directory — let auto-detection do its job. Pass it only when the user
   is somewhere else (e.g., their home directory) but wants outputs in a
   specific project.
-- Don't recommend the queue on the laptop tier.
 - Don't silently switch to flux-dev or trellis as a default. They're
   non-commercial.
 - Don't pass `--allow-oversize` without confirming the user understands
   why the model exceeded the build volume.
-- Don't pass `--overwrite-engine` reflexively. Default behaviour is safer.
 
 ## Bundled resources
 
